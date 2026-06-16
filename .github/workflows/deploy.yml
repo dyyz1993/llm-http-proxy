@@ -1,0 +1,82 @@
+name: Deploy to jd
+
+# 打 tag(v*)时触发,在 release 构建二进制之后部署到 jd 服务器
+# 也可手动触发(workflow_dispatch)
+on:
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
+    branches: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: Deploy to jd server
+    runs-on: ubuntu-latest
+    # 只在 release 成功完成时部署
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    steps:
+      - name: Set up SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.JD_SSH_KEY }}" > ~/.ssh/jd_deploy_key
+          chmod 600 ~/.ssh/jd_deploy_key
+          ssh-keyscan -H ${{ secrets.JD_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Test connectivity (连通性测试)
+        run: |
+          echo "=== 测试 SSH 连接到 jd ==="
+          ssh -o ConnectTimeout=20 -i ~/.ssh/jd_deploy_key \
+            ${{ secrets.JD_USER }}@${{ secrets.JD_HOST }} \
+            'echo "✅ CI 已连上 jd"; hostname; uname -m; /usr/local/bin/llm-http-proxy -version'
+
+      - name: Get latest release tag
+        id: tag
+        run: |
+          TAG=$(curl -fsSL \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/latest" \
+            | jq -r .tag_name)
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "最新 release tag: $TAG"
+
+      - name: Download binary to runner
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          REPO: ${{ github.repository }}
+        run: |
+          echo "=== 下载 ${TAG} 的 linux-amd64 二进制 ==="
+          curl -fsSL -o /tmp/proxy.tar.gz \
+            "https://github.com/${REPO}/releases/download/${TAG}/llm-http-proxy-linux-amd64.tar.gz"
+          ls -lh /tmp/proxy.tar.gz
+
+      - name: SCP binary to jd
+        run: |
+          echo "=== 推送二进制到 jd ==="
+          scp -o ConnectTimeout=20 -i ~/.ssh/jd_deploy_key \
+            /tmp/proxy.tar.gz \
+            ${{ secrets.JD_USER }}@${{ secrets.JD_HOST }}:/tmp/proxy-ci.tar.gz
+
+      - name: Install and restart on jd
+        run: |
+          echo "=== 解压、替换、重启 ==="
+          ssh -o ConnectTimeout=20 -i ~/.ssh/jd_deploy_key \
+            ${{ secrets.JD_USER }}@${{ secrets.JD_HOST }} << 'REMOTE'
+            set -e
+            cd /tmp
+            tar -xzf proxy-ci.tar.gz
+            chmod 755 llm-http-proxy-linux-amd64
+            mv llm-http-proxy-linux-amd64 /usr/local/bin/llm-http-proxy
+            rm proxy-ci.tar.gz
+            echo "新版本: $(/usr/local/bin/llm-http-proxy -version)"
+            systemctl restart llm-http-proxy
+            sleep 2
+            echo "服务状态: $(systemctl is-active llm-http-proxy)"
+            curl -s -o /dev/null -w "本地健康检查 HTTP %{http_code}\n" http://localhost:8080/
+          REMOTE
+
+      - name: Verify from runner (公网验证)
+        run: |
+          echo "=== 从 GitHub runner 公网验证服务 ==="
+          curl -s -o /dev/null -w "HTTP %{http_code} 耗时 %{time_total}s\n" \
+            "http://${{ secrets.JD_HOST }}:8080/__stats"
