@@ -1,4 +1,4 @@
-// glm-proxy 性能基准测试。
+// llm-http-proxy 性能基准测试。
 //
 // 对比"直连后端" vs "经代理转发" 的吞吐与延迟开销,
 // 并测 WebSocket 的往返吞吐。全部本地自包含,零外网依赖。
@@ -23,11 +23,22 @@ import (
 // benchBackend 是一个最小后端:接收 body,固定返回一小段 JSON。
 func benchBackend() *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// 读完 body,丢弃
-		io.Copy(io.Discard, r.Body)
+		io.Copy(io.Discard, r.Body) // 读完 body,丢弃
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"ok":true}`))
 	}))
+}
+
+// benchClient 返回连接池化的 HTTP 客户端。
+// 关键:复用 Transport 让 keep-alive 连接池生效,避免短连接耗尽临时端口。
+// MaxIdleConnsPerHost 默认只有 2,压测时调高以充分复用连接。
+func benchClient() *http.Client {
+	return &http.Client{
+		Transport: &http.Transport{
+			DisableCompression:  true,
+			MaxIdleConnsPerHost: 256,
+		},
+	}
 }
 
 // benchPayload 是每次请求发送的 JSON body。
@@ -38,7 +49,7 @@ func BenchmarkDirect(b *testing.B) {
 	backend := benchBackend()
 	defer backend.Close()
 
-	client := &http.Client{Transport: &http.Transport{DisableCompression: true}}
+	client := benchClient()
 	url := backend.URL + "/chat"
 
 	b.ResetTimer()
@@ -53,7 +64,7 @@ func BenchmarkDirect(b *testing.B) {
 	}
 }
 
-// BenchmarkProxy 经代理转发同样的请求。
+// BenchmarkProxy 经代理转发同样的请求(串行)。
 func BenchmarkProxy(b *testing.B) {
 	backend := benchBackend()
 	defer backend.Close()
@@ -61,7 +72,7 @@ func BenchmarkProxy(b *testing.B) {
 	proxy := httptest.NewServer(newProxyHandler())
 	defer proxy.Close()
 
-	client := &http.Client{Transport: &http.Transport{DisableCompression: true}}
+	client := benchClient()
 	url := proxy.URL + "/" + backend.URL + "/chat"
 
 	b.ResetTimer()
@@ -76,8 +87,7 @@ func BenchmarkProxy(b *testing.B) {
 	}
 }
 
-// BenchmarkProxyConcurrent 经代理转发,并发跑(Go benchmark 的 -cpu 控制并行度,
-// 这里用 b.RunParallel 模拟多客户端)。
+// BenchmarkProxyConcurrent 经代理转发,并发跑(模拟多客户端同时请求)。
 func BenchmarkProxyConcurrent(b *testing.B) {
 	backend := benchBackend()
 	defer backend.Close()
@@ -85,7 +95,7 @@ func BenchmarkProxyConcurrent(b *testing.B) {
 	proxy := httptest.NewServer(newProxyHandler())
 	defer proxy.Close()
 
-	client := &http.Client{Transport: &http.Transport{DisableCompression: true}}
+	client := benchClient()
 	url := proxy.URL + "/" + backend.URL + "/chat"
 
 	b.ResetTimer()
@@ -102,7 +112,8 @@ func BenchmarkProxyConcurrent(b *testing.B) {
 	})
 }
 
-// BenchmarkWebSocket WS 双向隧道的往返吞吐。
+// BenchmarkWebSocket 测 WS 双向隧道的往返吞吐。
+// 复用一条长连接多次收发,贴近真实 WS 用法,也避免反复建连耗尽端口。
 func BenchmarkWebSocket(b *testing.B) {
 	wsBackend := httptest.NewServer(websocket.Handler(func(ws *websocket.Conn) {
 		io.Copy(ws, ws) // echo
@@ -116,19 +127,22 @@ func BenchmarkWebSocket(b *testing.B) {
 	wsTarget := "ws:" + strings.TrimPrefix(wsBackend.URL, "http:")
 	target := proxyWS + "/" + wsTarget
 
+	// 建立一条长连接,在循环里反复收发
+	cfg, err := websocket.NewConfig(target, "http://localhost/")
+	if err != nil {
+		b.Fatal(err)
+	}
+	conn, err := websocket.DialConfig(cfg)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer conn.Close()
+
 	msg := []byte("benchmark-ping")
 
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		cfg, err := websocket.NewConfig(target, "http://localhost/")
-		if err != nil {
-			b.Fatal(err)
-		}
-		conn, err := websocket.DialConfig(cfg)
-		if err != nil {
-			b.Fatal(err)
-		}
 		if _, err := conn.Write(msg); err != nil {
 			b.Fatal(err)
 		}
@@ -136,6 +150,5 @@ func BenchmarkWebSocket(b *testing.B) {
 		if _, err := conn.Read(buf); err != nil {
 			b.Fatal(err)
 		}
-		conn.Close()
 	}
 }
