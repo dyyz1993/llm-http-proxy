@@ -210,27 +210,35 @@ func renderStatsTable(w io.Writer, snap map[string]*ipStats, by string) {
 		}
 	}
 
-	// 列名随维度变化
-	primaryCol, peerCol := "IP", "KEY"
+	// 列名随维度变化。掩码 key 可能很长(40+字符),所以按 key 维度时
+	// 主列放宽,对端列(IP)收窄。
+	var primaryCol, peerCol string
+	var primaryW, peerW int
 	if by == "key" {
 		primaryCol, peerCol = "KEY", "IP"
+		primaryW, peerW = 48, 18
+	} else {
+		primaryCol, peerCol = "IP", "KEY"
+		primaryW, peerW = 18, 48
 	}
+	totalW := primaryW + peerW + 6 + 6 + 26 + 12
 
-	fmt.Fprintf(w, "%-18s %-44s %6s %6s %-26s %s\n",
-		primaryCol, peerCol, "COUNT", "STATUS", "LAST_SEEN", "TARGET")
-	fmt.Fprintf(w, "%s\n", strings.Repeat("-", 118))
+	fmt.Fprintf(w, "%-*s %-*s %6s %6s %-26s %s\n",
+		primaryW, primaryCol, peerW, peerCol, "COUNT", "STATUS", "LAST_SEEN", "TARGET")
+	fmt.Fprintf(w, "%s\n", strings.Repeat("-", totalW))
 	for _, r := range rows {
 		ts := r.LastSeen.Format("2006-01-02 15:04:05")
-		fmt.Fprintf(w, "%-18s %-44s %6d %6d %-26s %s\n",
-			trunc(r.Primary, 18), trunc(r.Peer, 44), r.Count, r.LastStatus, ts, r.LastTarget)
+		fmt.Fprintf(w, "%-*s %-*s %6d %6d %-26s %s\n",
+			primaryW, trunc(r.Primary, primaryW), peerW, trunc(r.Peer, peerW),
+			r.Count, r.LastStatus, ts, r.LastTarget)
 	}
-	fmt.Fprintf(w, "%s\n", strings.Repeat("-", 118))
+	fmt.Fprintf(w, "%s\n", strings.Repeat("-", totalW))
 
 	// 去重汇总
 	if by == "key" {
 		agg := statsByKey(snap)
-		fmt.Fprintf(w, "\n去重统计(按 KEY):%d 个不同 key,共 %d 个 IP,总计调用 ",
-			len(agg), distinctIPCount(snap))
+		fmt.Fprintf(w, "\n去重统计(按 KEY):%d 个不同 key,共 %d 个不同 IP,总计调用 %d 次\n",
+			len(agg), distinctIPCount(snap), totalCount(snap))
 	} else {
 		fmt.Fprintf(w, "\n去重统计(按 IP):%d 个不同 IP,共 %d 个不同 key,总计调用 %d 次\n",
 			len(snap), distinctKeyCount(snap), totalCount(snap))
