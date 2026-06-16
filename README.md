@@ -124,8 +124,23 @@ go build -o llm-http-proxy . && ./llm-http-proxy
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `-addr` | `:8080` | 监听地址 |
+| `-persist` | (空) | 统计持久化文件路径。指定后,统计定期落盘,重启不丢 |
+| `-version` | | 打印版本号并退出 |
 
-示例:`-addr :3000` 监听 3000 端口。
+示例:`-addr :3000` 监听 3000 端口;`-persist /var/lib/llm-http-proxy/stats.json` 开启持久化。
+
+### 统计持久化
+
+默认统计存在内存里,**重启会清空**。加 `-persist` 参数后:
+- 启动时从文件读回历史统计
+- 后台每 30 秒把快照原子写入文件(先写 `.tmp` 再 rename,避免写坏)
+- 服务重启 / 崩溃恢复 / 升级二进制后,统计**不丢失**
+
+systemd 部署示例(需配合 `ReadWritePaths` 放开写权限):
+```ini
+ExecStart=/usr/local/bin/llm-http-proxy -addr :8080 -persist /var/lib/llm-http-proxy/stats.json
+ReadWritePaths=/var/lib/llm-http-proxy
+```
 
 ## 统计端点
 
