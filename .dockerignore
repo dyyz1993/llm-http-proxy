@@ -1,0 +1,30 @@
+# Git
+.git
+.gitignore
+
+# CI
+.github
+
+# 文档
+README.md
+LICENSE
+
+# 本地编译产物 / 二进制
+bin/
+*.exe
+*.dll
+*.so
+*.dylog
+llm-http-proxy
+
+# 测试覆盖率
+*.out
+coverage.txt
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# 系统
+.DS_Store

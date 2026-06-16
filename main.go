@@ -95,7 +95,8 @@ func newProxyHandler() http.Handler {
 			http.Error(w, "目标 URL 无法解析: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		outReq.Header = req.Header.Clone() // 原样复制,不追加任何 header
+		outReq.Header = req.Header.Clone()    // 原样复制,不追加任何 header
+		outReq.ContentLength = req.ContentLength // 显式带上 body 长度,避免 body 不被发送
 
 		resp, err := client.Do(outReq)
 		if err != nil {
