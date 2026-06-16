@@ -26,11 +26,57 @@ import (
 	"time"
 )
 
+// bjTime 是北京时间(UTC+8)的 time.Time 包装。
+// JSON 序列化时自动转北京时区,不依赖服务器本地时区。
+type bjTime time.Time
+
+// beijing 是北京时区(UTC+8),全局共用(main.go 也引用)。
+var beijing = time.FixedZone("CST", 8*3600)
+
+// MarshalJSON 把时间按北京时间 RFC3339 输出。
+func (t bjTime) MarshalJSON() ([]byte, error) {
+	return []byte(`"` + time.Time(t).In(beijing).Format(time.RFC3339) + `"`), nil
+}
+
+// UnmarshalJSON 从 JSON 字符串解析回 bjTime(支持 RFC3339)。
+func (t *bjTime) UnmarshalJSON(data []byte) error {
+	s := strings.Trim(string(data), `"`)
+	if s == "null" || s == "" {
+		return nil
+	}
+	parsed, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return err
+	}
+	*t = bjTime(parsed)
+	return nil
+}
+
+// bjFormat 按北京时间格式化,给表格输出用。
+func (t bjTime) bjFormat(layout string) string {
+	return time.Time(t).In(beijing).Format(layout)
+}
+
+// IsZero 透传到底层 time.Time。
+func (t bjTime) IsZero() bool {
+	return time.Time(t).IsZero()
+}
+
+// After 透传到底层 time.Time。
+func (t bjTime) After(u bjTime) bool {
+	return time.Time(t).After(time.Time(u))
+}
+
+// Equal 透传到底层 time.Time 的 Equal。
+func (t bjTime) Equal(u bjTime) bool {
+	return time.Time(t).Equal(time.Time(u))
+}
+
 // keyEntry 是单个 (IP, 掩码key) 的累计统计。
 type keyEntry struct {
 	Count        int64         `json:"count"`
-	FirstSeen    time.Time     `json:"first_seen"` // 首次访问时间(创建时设,不变)
-	LastSeen     time.Time     `json:"last_seen"`  // 最后访问时间
+	FirstSeen    bjTime        `json:"first_seen"` // 首次访问时间(创建时设,不变)
+	LastSeen     bjTime        `json:"last_seen"`  // 最后访问时间
 	LastStatus   int           `json:"last_status"`
 	LastTarget   string        `json:"last_target"`   // 只记 host,不记 path
 	StatusCounts map[int]int64 `json:"status_counts"` // 各状态码累计计数
@@ -70,12 +116,12 @@ func (s *statsCollector) record(ip, maskedKey, targetHost string, status int) {
 	}
 	ke, ok := is.Keys[maskedKey]
 	if !ok {
-		now := time.Now()
+		now := bjTime(time.Now())
 		ke = &keyEntry{FirstSeen: now, StatusCounts: make(map[int]int64)} // 首次访问
 		is.Keys[maskedKey] = ke
 	}
 	ke.Count++
-	ke.LastSeen = time.Now()
+	ke.LastSeen = bjTime(time.Now())
 	ke.LastStatus = status
 	ke.LastTarget = targetHost
 	ke.StatusCounts[status]++
@@ -137,7 +183,7 @@ func (s *statsCollector) hoursSnapshot(n int) []hourEntry {
 		if b.Hour.Equal(h) {
 			count = b.Count
 		}
-		out = append(out, hourEntry{Hour: h.Format("15:04"), Count: count})
+		out = append(out, hourEntry{Hour: h.In(beijing).Format("15:04"), Count: count})
 	}
 	return out
 }
@@ -250,8 +296,8 @@ type rowView struct {
 	Primary    string // 维度值(IP 或 key)
 	Peer       string // 对端(key 或 IP)
 	Count      int64
-	FirstSeen  time.Time
-	LastSeen   time.Time
+	FirstSeen  bjTime
+	LastSeen   bjTime
 	LastStatus int
 	LastTarget string
 }
@@ -376,8 +422,8 @@ func renderStatsTable(w io.Writer, snap map[string]*ipStats, by string) {
 		primaryW, primaryCol, peerW, peerCol, "COUNT", "STATUS", "FIRST_SEEN", "LAST_SEEN", "TARGET")
 	fmt.Fprintf(w, "%s\n", strings.Repeat("-", totalW))
 	for _, r := range rows {
-		fs := r.FirstSeen.Format("2006-01-02 15:04:05")
-		ls := r.LastSeen.Format("2006-01-02 15:04:05")
+		fs := r.FirstSeen.bjFormat("2006-01-02 15:04:05")
+		ls := r.LastSeen.bjFormat("2006-01-02 15:04:05")
 		fmt.Fprintf(w, "%-*s %-*s %6d %6d %-19s %-19s %s\n",
 			primaryW, trunc(r.Primary, primaryW), peerW, trunc(r.Peer, peerW),
 			r.Count, r.LastStatus, fs, ls, r.LastTarget)
