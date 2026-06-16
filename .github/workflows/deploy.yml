@@ -16,24 +16,14 @@ jobs:
       - name: Configure SSH and test
         env:
           SSH_KEY: ${{ secrets.JD_SSH_KEY }}
-          JD_HOST: ${{ secrets.JD_HOST }}
-          JD_USER: ${{ secrets.JD_USER }}
         run: |
           set -e
           mkdir -p ~/.ssh
           printf '%s\n' "$SSH_KEY" > ~/.ssh/jd_deploy_key
           chmod 600 ~/.ssh/jd_deploy_key
           ssh-keygen -lf ~/.ssh/jd_deploy_key
-          # 写 ssh config:用 printf 避免 heredoc 缩进问题
-          {
-            printf 'Host jd\n'
-            printf '  HostName %s\n' "$JD_HOST"
-            printf '  User %s\n' "$JD_USER"
-            printf '  IdentityFile ~/.ssh/jd_deploy_key\n'
-            printf '  StrictHostKeyChecking no\n'
-            printf '  UserKnownHostsFile /dev/null\n'
-            printf '  ConnectTimeout 25\n'
-          } > ~/.ssh/config
+          # IP 和 user 不是敏感信息,直接写死(避免 secret 屏蔽干扰 ssh config)
+          printf 'Host jd\n  HostName 36.151.142.174\n  User root\n  IdentityFile ~/.ssh/jd_deploy_key\n  StrictHostKeyChecking no\n  UserKnownHostsFile /dev/null\n  ConnectTimeout 25\n' > ~/.ssh/config
           chmod 600 ~/.ssh/config
           echo "--- 测试连接 ---"
           ssh jd 'echo CI-OK; hostname; /usr/local/bin/llm-http-proxy -version'
