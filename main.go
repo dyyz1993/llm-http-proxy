@@ -66,6 +66,9 @@ var (
 	startTime = time.Now() // 进程启动时即记录
 )
 
+// beijing 是北京时间时区(UTC+8),不依赖服务器本地时区设置。
+var beijing = time.FixedZone("CST", 8*3600)
+
 func main() {
 	addr := flag.String("addr", ":8080", "监听地址")
 	persist := flag.String("persist", "", "统计持久化文件路径(为空则不持久化,重启清空)")
@@ -128,7 +131,7 @@ func versionHandler(w http.ResponseWriter, req *http.Request) {
 	info := versionInfo{
 		Version:   version,
 		BuildTime: buildTime,
-		StartTime: startTime.Format(time.RFC3339),
+		StartTime: startTime.In(beijing).Format(time.RFC3339),
 		Uptime:    uptime.Round(time.Second).String(),
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
