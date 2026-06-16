@@ -57,9 +57,18 @@ func tlsDialWithServerName(hostport string) (net.Conn, error) {
 	return tls.Dial("tcp", hostport, &tls.Config{ServerName: host})
 }
 
+// version 在构建时通过 -ldflags "-X main.version=..." 注入,默认 dev。
+var version = "dev"
+
 func main() {
 	addr := flag.String("addr", ":8080", "监听地址")
+	ver := flag.Bool("version", false, "打印版本号并退出")
 	flag.Parse()
+
+	if *ver {
+		fmt.Println("llm-http-proxy", version)
+		return
+	}
 
 	stats := newStatsCollector()
 

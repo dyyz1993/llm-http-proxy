@@ -1,0 +1,24 @@
+# docker-compose 示例:一行起 llm-http-proxy 服务
+#
+# 用法:
+#   docker compose up -d        # 启动(后台)
+#   docker compose logs -f      # 看日志(含 IP/掩码key 统计)
+#   curl http://localhost:8080/__stats   # 查看统计
+#   docker compose down          # 停止
+#
+# 镜像地址:ghcr.io/dyyz1993/llm-http-proxy
+# 如不想用预构建镜像,把 image 换成 build: .
+
+services:
+  llm-http-proxy:
+    # 预构建多架构镜像(GHCR),支持 amd64 / arm64
+    image: ghcr.io/dyyz1993/llm-http-proxy:latest
+    # 本地构建则用这句(二选一):
+    # build: .
+    container_name: llm-http-proxy
+    ports:
+      - "8080:8080"   # 宿主机端口:容器端口。改左边即可换端口,如 "3000:8080"
+    restart: unless-stopped
+    # 命令行参数(覆盖 CMD)。当前默认监听 :8080,如需改端口:
+    # command: ["-addr", ":9090"]
+    # 同时上面的 ports 也要对应改成 "9090:9090"
