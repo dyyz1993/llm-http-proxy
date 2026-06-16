@@ -129,22 +129,53 @@ go build -o llm-http-proxy . && ./llm-http-proxy
 
 ## 统计端点
 
-代理自带请求来源统计(只统计,不泄露隐私):
+代理自带请求来源统计(只统计,不泄露隐私)。支持**双向查询**和**表格视图**:
 
 ```bash
+# 默认:按 IP 聚合(看每个 IP 用了哪些 key)
 curl http://localhost:8080/__stats
+
+# 反向:按 key 聚合(看每个 key 触发了哪些 IP)
+curl "http://localhost:8080/__stats?by=key"
+
+# ASCII 表格视图(人读友好)
+curl "http://localhost:8080/__stats?format=table"
+curl "http://localhost:8080/__stats?by=key&format=table"
 ```
 
-返回按 IP 和**掩码 key** 聚合的 JSON 计数:
+**by=ip**(默认)—— 每个 IP 用了多少个不同 key:
 
 ```json
 {
   "203.0.113.5": {
-    "keys": {
-      "sk-****5678": {"count": 42, "last_seen": "...", "last_status": 200}
-    }
+    "keys": {"sk-****5678": {"count": 42, ...}},
+    "distinct_keys": 1,
+    "total_count": 42
   }
 }
+```
+
+**by=key** —— 每个 key 触发了多少个不同 IP:
+
+```json
+{
+  "sk-****5678": {
+    "ips": {"203.0.113.5": {"count": 42, ...}},
+    "distinct_ips": 1,
+    "total_count": 42
+  }
+}
+```
+
+**format=table** —— ASCII 表格:
+
+```
+IP                 KEY                                           COUNT STATUS LAST_SEEN                 TARGET
+----------------------------------------------------------------------------------------------------------------------
+14.19.170.64       f8dc*****************************************CGwA      1    200 2026-06-17 01:27:36      open.bigmodel.cn
+14.19.170.64       -                                                1    200 2026-06-17 01:25:53      httpbin.org
+----------------------------------------------------------------------------------------------------------------------
+去重统计(按 IP):2 个不同 IP,共 3 个不同 key,总计调用 5 次
 ```
 
 **采集与隐私:**

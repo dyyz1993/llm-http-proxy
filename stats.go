@@ -13,6 +13,8 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -81,16 +83,190 @@ func (s *statsCollector) snapshot() map[string]*ipStats {
 	return out
 }
 
-// statsHandler 处理 GET /__stats,返回 JSON 汇总。
+// statsHandler 处理 GET /__stats,返回统计汇总。
+//
+// 查询参数:
+//
+//	by=ip    (默认)按来源 IP 聚合,看每个 IP 用了哪些 key
+//	by=key   按 key 聚合,看每个 key 触发了哪些 IP(反向查询)
+//	format=json (默认)返回 JSON
+//	format=table 返回 ASCII 表格(人读友好)
 func statsHandler(s *statsCollector) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+
+		by := r.URL.Query().Get("by")
+		if by != "key" {
+			by = "ip" // 默认
+		}
+		format := r.URL.Query().Get("format")
+		if format != "table" {
+			format = "json" // 默认
+		}
+
+		snap := s.snapshot()
+
+		if format == "table" {
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			renderStatsTable(w, snap, by)
+			return
+		}
+
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		json.NewEncoder(w).Encode(s.snapshot())
+		if by == "key" {
+			// 反向视图:以 key 为顶层
+			json.NewEncoder(w).Encode(statsByKey(snap))
+		} else {
+			json.NewEncoder(w).Encode(statsByIP(snap))
+		}
 	}
+}
+
+// rowView 是表格/列表里的一行:一个 (维度值, 对端, 统计) 三元组。
+type rowView struct {
+	Primary string // 维度值(IP 或 key)
+	Peer    string // 对端(key 或 IP)
+	Count   int64
+	LastSeen    time.Time
+	LastStatus  int
+	LastTarget  string
+}
+
+// statsByIP 生成按 IP 聚合的 JSON 视图,带去重计数。
+type ipAggView struct {
+	Keys       map[string]*keyEntry `json:"keys"`
+	DistinctKeys int                `json:"distinct_keys"` // 该 IP 用了多少个不同 key
+	TotalCount  int64              `json:"total_count"`    // 该 IP 总调用数
+}
+
+func statsByIP(snap map[string]*ipStats) map[string]*ipAggView {
+	out := make(map[string]*ipAggView, len(snap))
+	for ip, is := range snap {
+		var total int64
+		for _, ke := range is.Keys {
+			total += ke.Count
+		}
+		out[ip] = &ipAggView{
+			Keys:         is.Keys,
+			DistinctKeys: len(is.Keys),
+			TotalCount:   total,
+		}
+	}
+	return out
+}
+
+// keyAggView 是反向视图:某个 key 被哪些 IP 使用。
+type keyAggView struct {
+	IPs        map[string]*keyEntry `json:"ips"`
+	DistinctIPs int                 `json:"distinct_ips"` // 该 key 触发了多少个不同 IP
+	TotalCount  int64               `json:"total_count"`
+}
+
+func statsByKey(snap map[string]*ipStats) map[string]*keyAggView {
+	out := make(map[string]*keyAggView)
+	for ip, is := range snap {
+		for k, ke := range is.Keys {
+			kv, ok := out[k]
+			if !ok {
+				kv = &keyAggView{IPs: make(map[string]*keyEntry)}
+				out[k] = kv
+			}
+			ke2 := *ke
+			kv.IPs[ip] = &ke2
+			kv.TotalCount += ke.Count
+		}
+	}
+	for _, kv := range out {
+		kv.DistinctIPs = len(kv.IPs)
+	}
+	return out
+}
+
+// renderStatsTable 渲染 ASCII 表格。
+func renderStatsTable(w io.Writer, snap map[string]*ipStats, by string) {
+	var rows []rowView
+	if by == "key" {
+		for ip, is := range snap {
+			for k, ke := range is.Keys {
+				rows = append(rows, rowView{
+					Primary: k, Peer: ip,
+					Count: ke.Count, LastSeen: ke.LastSeen,
+					LastStatus: ke.LastStatus, LastTarget: ke.LastTarget,
+				})
+			}
+		}
+	} else {
+		for ip, is := range snap {
+			for k, ke := range is.Keys {
+				rows = append(rows, rowView{
+					Primary: ip, Peer: k,
+					Count: ke.Count, LastSeen: ke.LastSeen,
+					LastStatus: ke.LastStatus, LastTarget: ke.LastTarget,
+				})
+			}
+		}
+	}
+
+	// 列名随维度变化
+	primaryCol, peerCol := "IP", "KEY"
+	if by == "key" {
+		primaryCol, peerCol = "KEY", "IP"
+	}
+
+	fmt.Fprintf(w, "%-18s %-44s %6s %6s %-26s %s\n",
+		primaryCol, peerCol, "COUNT", "STATUS", "LAST_SEEN", "TARGET")
+	fmt.Fprintf(w, "%s\n", strings.Repeat("-", 118))
+	for _, r := range rows {
+		ts := r.LastSeen.Format("2006-01-02 15:04:05")
+		fmt.Fprintf(w, "%-18s %-44s %6d %6d %-26s %s\n",
+			trunc(r.Primary, 18), trunc(r.Peer, 44), r.Count, r.LastStatus, ts, r.LastTarget)
+	}
+	fmt.Fprintf(w, "%s\n", strings.Repeat("-", 118))
+
+	// 去重汇总
+	if by == "key" {
+		agg := statsByKey(snap)
+		fmt.Fprintf(w, "\n去重统计(按 KEY):%d 个不同 key,共 %d 个 IP,总计调用 ",
+			len(agg), distinctIPCount(snap))
+	} else {
+		fmt.Fprintf(w, "\n去重统计(按 IP):%d 个不同 IP,共 %d 个不同 key,总计调用 %d 次\n",
+			len(snap), distinctKeyCount(snap), totalCount(snap))
+	}
+}
+
+// trunc 把字符串截断到 maxLen,超出加省略号(用于表格对齐)。
+func trunc(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen-1] + "…"
+}
+
+func distinctIPCount(snap map[string]*ipStats) int {
+	return len(snap)
+}
+
+func distinctKeyCount(snap map[string]*ipStats) int {
+	seen := map[string]bool{}
+	for _, is := range snap {
+		for k := range is.Keys {
+			seen[k] = true
+		}
+	}
+	return len(seen)
+}
+
+func totalCount(snap map[string]*ipStats) int64 {
+	var t int64
+	for _, is := range snap {
+		for _, ke := range is.Keys {
+			t += ke.Count
+		}
+	}
+	return t
 }
 
 // --- 采集函数 ------------------------------------------------------------

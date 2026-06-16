@@ -604,6 +604,179 @@ func TestStatsNoPlaintextKey(t *testing.T) {
 	}
 }
 
+// TestStatsByKeyView 验证 by=key 反向视图:以 key 为顶层聚合 IP。
+func TestStatsByKeyView(t *testing.T) {
+	backend := echoBackend()
+	defer backend.Close()
+
+	stats := newStatsCollector()
+	mux := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Path == "/__stats" {
+			statsHandler(stats).ServeHTTP(w, req)
+			return
+		}
+		newProxyHandler(stats).ServeHTTP(w, req)
+	})
+	proxy := httptest.NewServer(mux)
+	defer proxy.Close()
+
+	// 同一个 key,从"两个不同 IP"调用(用 X-Forwarded-For 模拟)
+	for _, fakeIP := range []string{"10.0.0.1", "10.0.0.2"} {
+		req, _ := http.NewRequest("POST",
+			proxyURL(proxy.URL, backend.URL+"/api"), strings.NewReader("{}"))
+		req.Header.Set("Authorization", "Bearer sk-shared-key-1234567890")
+		req.Header.Set("X-Forwarded-For", fakeIP)
+		resp, err := noCompressClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+	}
+
+	// 拉 by=key 视图
+	resp, err := noCompressClient.Get(proxy.URL + "/__stats?by=key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	var byKey map[string]*keyAggView
+	if err := json.NewDecoder(resp.Body).Decode(&byKey); err != nil {
+		t.Fatal(err)
+	}
+
+	masked := maskKey("sk-shared-key-1234567890")
+	kv, ok := byKey[masked]
+	if !ok {
+		t.Fatalf("反向视图里找不到 key %q: %+v", masked, byKey)
+	}
+	// 这个 key 应该触发 2 个不同 IP
+	if kv.DistinctIPs != 2 {
+		t.Errorf("DistinctIPs = %d,期望 2: %+v", kv.DistinctIPs, kv)
+	}
+	if _, ok := kv.IPs["10.0.0.1"]; !ok {
+		t.Errorf("反向视图里缺少 IP 10.0.0.1: %+v", kv.IPs)
+	}
+	if _, ok := kv.IPs["10.0.0.2"]; !ok {
+		t.Errorf("反向视图里缺少 IP 10.0.0.2: %+v", kv.IPs)
+	}
+}
+
+// TestStatsDistinctCount 验证去重统计字段(distinct_keys / distinct_ips)。
+func TestStatsDistinctCount(t *testing.T) {
+	backend := echoBackend()
+	defer backend.Close()
+
+	stats := newStatsCollector()
+	mux := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Path == "/__stats" {
+			statsHandler(stats).ServeHTTP(w, req)
+			return
+		}
+		newProxyHandler(stats).ServeHTTP(w, req)
+	})
+	proxy := httptest.NewServer(mux)
+	defer proxy.Close()
+
+	// IP-A 用 2 个不同 key,IP-B 用 1 个 key(和 IP-A 的一个相同)
+	calls := []struct{ ip, key string }{
+		{"10.0.0.1", "Bearer sk-aaa1112223334444"},
+		{"10.0.0.1", "Bearer sk-bbb5556667778888"},
+		{"10.0.0.2", "Bearer sk-aaa1112223334444"}, // 复用 IP-A 的第一个 key
+	}
+	for _, c := range calls {
+		req, _ := http.NewRequest("POST",
+			proxyURL(proxy.URL, backend.URL+"/api"), strings.NewReader("{}"))
+		req.Header.Set("Authorization", c.key)
+		req.Header.Set("X-Forwarded-For", c.ip)
+		resp, err := noCompressClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+	}
+
+	// by=ip:应 2 个 IP,IP-A 有 2 个 distinct key
+	resp, err := noCompressClient.Get(proxy.URL + "/__stats?by=ip")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var byIP map[string]*ipAggView
+	json.NewDecoder(resp.Body).Decode(&byIP)
+	if len(byIP) != 2 {
+		t.Errorf("IP 数 = %d,期望 2", len(byIP))
+	}
+	if byIP["10.0.0.1"].DistinctKeys != 2 {
+		t.Errorf("10.0.0.1 distinct_keys = %d,期望 2", byIP["10.0.0.1"].DistinctKeys)
+	}
+
+	// by=key:2 个不同 key,第一个 key(sk-aaa...))有 2 个 distinct IP
+	resp2, err := noCompressClient.Get(proxy.URL + "/__stats?by=key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp2.Body.Close()
+	var byKey map[string]*keyAggView
+	json.NewDecoder(resp2.Body).Decode(&byKey)
+	if len(byKey) != 2 {
+		t.Errorf("key 数 = %d,期望 2", len(byKey))
+	}
+	sharedKey := maskKey("sk-aaa1112223334444")
+	if byKey[sharedKey].DistinctIPs != 2 {
+		t.Errorf("共享 key distinct_ips = %d,期望 2", byKey[sharedKey].DistinctIPs)
+	}
+}
+
+// TestStatsFormatTable 验证 format=table 返回 ASCII 表格(非 JSON)。
+func TestStatsFormatTable(t *testing.T) {
+	backend := echoBackend()
+	defer backend.Close()
+
+	stats := newStatsCollector()
+	mux := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Path == "/__stats" {
+			statsHandler(stats).ServeHTTP(w, req)
+			return
+		}
+		newProxyHandler(stats).ServeHTTP(w, req)
+	})
+	proxy := httptest.NewServer(mux)
+	defer proxy.Close()
+
+	// 发一个请求产生数据
+	req, _ := http.NewRequest("POST",
+		proxyURL(proxy.URL, backend.URL+"/api"), strings.NewReader("{}"))
+	req.Header.Set("Authorization", "Bearer sk-table-test-1234567")
+	noCompressClient.Do(req)
+
+	// 拉 table 格式
+	resp, err := noCompressClient.Get(proxy.URL + "/__stats?format=table")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	ct := resp.Header.Get("Content-Type")
+	if !strings.HasPrefix(ct, "text/plain") {
+		t.Errorf("table Content-Type = %q,期望 text/plain", ct)
+	}
+	s := string(body)
+	// 表格应包含列头和分隔线
+	if !strings.Contains(s, "COUNT") {
+		t.Errorf("表格缺少 COUNT 列头:\n%s", s)
+	}
+	if !strings.Contains(s, "----") {
+		t.Errorf("表格缺少分隔线:\n%s", s)
+	}
+	// 应包含掩码 key
+	masked := maskKey("sk-table-test-1234567")
+	if !strings.Contains(s, masked) {
+		t.Errorf("表格缺少掩码 key %q:\n%s", masked, s)
+	}
+}
+
 // 防止编译时未使用的 import 报错(部分场景下 url/time/base64 可能未被引用)
 var _ = time.Second
 var _ = base64.StdEncoding
