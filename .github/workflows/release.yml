@@ -27,6 +27,8 @@ jobs:
             goarch: arm64
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0  # 拉完整历史,让 git describe 能工作
 
       - name: Set up Go
         uses: actions/setup-go@v6
@@ -43,8 +45,11 @@ jobs:
           mkdir -p out
           ext=""
           if [ "$GOOS" = "windows" ]; then ext=".exe"; fi
+          # version 用 git describe:tag 后有新提交会显示 v1.5.0-3-gabc1234
+          VERSION=$(git describe --tags --always --dirty)
+          echo "version: ${VERSION}"
           go build -trimpath -ldflags="-s -w \
-            -X main.version=${GITHUB_REF_NAME} \
+            -X main.version=${VERSION} \
             -X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             -o "out/llm-http-proxy-${GOOS}-${GOARCH}${ext}" .
 
