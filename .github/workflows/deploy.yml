@@ -1,6 +1,5 @@
 name: Deploy to jd
 
-# 打 tag(release 完成后)自动部署到 jd,也可手动触发
 on:
   workflow_run:
     workflows: ["Release"]
@@ -18,27 +17,29 @@ jobs:
         env:
           SSH_KEY: ${{ secrets.JD_SSH_KEY }}
           HOST: ${{ secrets.JD_HOST }}
+          JD_USER: ${{ secrets.JD_USER }}
         run: |
           mkdir -p ~/.ssh
           printf '%s\n' "$SSH_KEY" > ~/.ssh/jd_deploy_key
           chmod 600 ~/.ssh/jd_deploy_key
-          # 诊断:验证私钥完整(打印指纹,不泄露内容)
-          echo "私钥首行: $(head -1 ~/.ssh/jd_deploy_key)"
-          echo "私钥末行: $(tail -1 ~/.ssh/jd_deploy_key)"
-          ssh-keygen -lf ~/.ssh/jd_deploy_key
-          # host key 容错收集
           ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
-          # ssh 版本(排查 unknown option)
-          ssh -V
+          {
+            echo "Host jd"
+            echo "  HostName ${HOST}"
+            echo "  User ${JD_USER}"
+            echo "  IdentityFile ~/.ssh/jd_deploy_key"
+            echo "  StrictHostKeyChecking no"
+            echo "  UserKnownHostsFile ~/.ssh/known_hosts"
+            echo "  ConnectTimeout 25"
+          } > ~/.ssh/config
+          chmod 600 ~/.ssh/config
+          echo "=== ssh config ==="
+          cat ~/.ssh/config
 
       - name: Test connectivity
-        env:
-          HOST: ${{ secrets.JD_HOST }}
-          JD_USER: ${{ secrets.JD_USER }}
         run: |
           echo "=== 测试 SSH 连接到 jd ==="
-          set -x
-          ssh -o ConnectTimeout=25 -o StrictHostKeyChecking=no -i ~/.ssh/jd_deploy_key "${JD_USER}@${HOST}" "echo CI-connected"
+          ssh jd "echo CI-connected; hostname; /usr/local/bin/llm-http-proxy -version"
 
       - name: Get latest release tag
         env:
@@ -60,32 +61,24 @@ jobs:
           ls -lh /tmp/proxy.tar.gz
 
       - name: SCP binary to jd
-        env:
-          HOST: ${{ secrets.JD_HOST }}
-          JD_USER: ${{ secrets.JD_USER }}
         run: |
           echo "=== 推送二进制到 jd ==="
-          scp -o ConnectTimeout=20 -i ~/.ssh/jd_deploy_key \
-            /tmp/proxy.tar.gz "$JD_USER@$HOST:/tmp/proxy-ci.tar.gz"
+          scp /tmp/proxy.tar.gz jd:/tmp/proxy-ci.tar.gz
 
       - name: Install and restart on jd
-        env:
-          HOST: ${{ secrets.JD_HOST }}
-          JD_USER: ${{ secrets.JD_USER }}
         run: |
           echo "=== 解压、替换、重启 ==="
-          ssh -o ConnectTimeout=20 -i ~/.ssh/jd_deploy_key "$JD_USER@$HOST" \
-            'set -e
-             cd /tmp
-             tar -xzf proxy-ci.tar.gz
-             chmod 755 llm-http-proxy-linux-amd64
-             mv llm-http-proxy-linux-amd64 /usr/local/bin/llm-http-proxy
-             rm proxy-ci.tar.gz
-             echo "新版本: $(/usr/local/bin/llm-http-proxy -version)"
-             systemctl restart llm-http-proxy
-             sleep 2
-             echo "服务状态: $(systemctl is-active llm-http-proxy)"
-             curl -s -o /dev/null -w "本地健康检查 HTTP %{http_code}\n" http://localhost:8080/'
+          ssh jd 'set -e
+            cd /tmp
+            tar -xzf proxy-ci.tar.gz
+            chmod 755 llm-http-proxy-linux-amd64
+            mv llm-http-proxy-linux-amd64 /usr/local/bin/llm-http-proxy
+            rm proxy-ci.tar.gz
+            echo "新版本: $(/usr/local/bin/llm-http-proxy -version)"
+            systemctl restart llm-http-proxy
+            sleep 2
+            echo "服务状态: $(systemctl is-active llm-http-proxy)"
+            curl -s -o /dev/null -w "本地健康检查 HTTP %{http_code}\n" http://localhost:8080/'
 
       - name: Verify from runner
         env:
