@@ -44,7 +44,8 @@ jobs:
         run: docker build -t llm-http-proxy:ci .
 
       - name: Check image size
-        run: docker images llm-http-proxy:ci --format "镜像大小: {{.Size}}"
+        run: |
+          docker images llm-http-proxy:ci --format "image size: {{.Size}}"
 
       # 自验证:宿主机起 echo 后端,容器代理转发给它。
       # 容器经 host.docker.internal 回到宿主机(Linux 需 --add-host)。
