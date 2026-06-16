@@ -18,6 +18,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -365,4 +366,66 @@ func maskedKeyFromRequest(r *http.Request) string {
 func logRequest(ip, maskedKey, method, targetHost string, status int, dur time.Duration) {
 	log.Printf("req ip=%s key=%s method=%s host=%s status=%d dur=%s",
 		ip, maskedKey, method, targetHost, status, dur)
+}
+
+// --- 持久化 ---------------------------------------------------------------
+//
+// 把统计快照存到 JSON 文件,重启时读回。
+// 写入采用原子方式:先写到临时文件,再 rename,避免崩溃时留下半个文件。
+
+// persistSnapshot 是落盘的文件结构。版本号便于将来升级格式。
+type persistSnapshot struct {
+	Version int                 `json:"version"`
+	Data    map[string]*ipStats `json:"data"`
+}
+
+// load 从 path 读取统计快照,恢复到 collector。文件不存在视为空,不报错。
+func (s *statsCollector) load(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // 首次启动,没文件很正常
+		}
+		return err
+	}
+	var snap persistSnapshot
+	if err := json.Unmarshal(data, &snap); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.data = snap.Data
+	if s.data == nil {
+		s.data = make(map[string]*ipStats)
+	}
+	return nil
+}
+
+// save 把当前统计原子写入 path。
+func (s *statsCollector) save(path string) error {
+	snap := s.snapshot() // 已深拷贝,不持锁
+	out := persistSnapshot{Version: 1, Data: snap}
+	data, err := json.Marshal(out)
+	if err != nil {
+		return err
+	}
+	// 原子写:先写临时文件,再 rename
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// startPersistLoop 启动后台 goroutine,每 interval 落盘一次。
+func (s *statsCollector) startPersistLoop(path string, interval time.Duration) {
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for range ticker.C {
+			if err := s.save(path); err != nil {
+				log.Printf("统计落盘失败: %v", err)
+			}
+		}
+	}()
 }

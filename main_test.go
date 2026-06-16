@@ -22,6 +22,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -631,6 +633,55 @@ func TestStatsFirstSeen(t *testing.T) {
 	}
 	if ke2.Count != 2 {
 		t.Errorf("count = %d, 期望 2", ke2.Count)
+	}
+}
+
+// TestStatsPersistRoundTrip 验证持久化:save 到文件 -> 新 collector load -> 数据一致。
+func TestStatsPersistRoundTrip(t *testing.T) {
+	tmpFile := filepath.Join(t.TempDir(), "stats.json")
+	t.Cleanup(func() { os.Remove(tmpFile) })
+
+	// 写入一些数据
+	s1 := newStatsCollector()
+	s1.record("10.0.0.1", "sk-****1111", "a.com", 200)
+	s1.record("10.0.0.1", "sk-****1111", "a.com", 200)
+	s1.record("10.0.0.2", "sk-****2222", "b.com", 500)
+	if err := s1.save(tmpFile); err != nil {
+		t.Fatalf("save 失败: %v", err)
+	}
+
+	// 新 collector 从文件加载
+	s2 := newStatsCollector()
+	if err := s2.load(tmpFile); err != nil {
+		t.Fatalf("load 失败: %v", err)
+	}
+
+	snap := s2.snapshot()
+	if len(snap) != 2 {
+		t.Fatalf("load 后 IP 数 = %d, 期望 2", len(snap))
+	}
+	ke := snap["10.0.0.1"].Keys["sk-****1111"]
+	if ke == nil || ke.Count != 2 {
+		t.Errorf("10.0.0.1/sk-****1111 count = %v, 期望 2", ke)
+	}
+	if ke.LastTarget != "a.com" {
+		t.Errorf("last_target = %q, 期望 a.com", ke.LastTarget)
+	}
+	ke2 := snap["10.0.0.2"].Keys["sk-****2222"]
+	if ke2 == nil || ke2.LastStatus != 500 {
+		t.Errorf("10.0.0.2/sk-****2222 status = %v, 期望 500", ke2)
+	}
+}
+
+// TestStatsLoadMissingFile 验证文件不存在时 load 不报错(首次启动)。
+func TestStatsLoadMissingFile(t *testing.T) {
+	s := newStatsCollector()
+	err := s.load("/nonexistent/path/stats.json")
+	if err != nil {
+		t.Errorf("文件不存在时 load 应返回 nil,得到: %v", err)
+	}
+	if len(s.data) != 0 {
+		t.Errorf("load 后数据非空: %+v", s.data)
 	}
 }
 

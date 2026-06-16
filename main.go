@@ -62,6 +62,7 @@ var version = "dev"
 
 func main() {
 	addr := flag.String("addr", ":8080", "监听地址")
+	persist := flag.String("persist", "", "统计持久化文件路径(为空则不持久化,重启清空)")
 	ver := flag.Bool("version", false, "打印版本号并退出")
 	flag.Parse()
 
@@ -71,6 +72,16 @@ func main() {
 	}
 
 	stats := newStatsCollector()
+
+	// 持久化:启动时读回历史统计,后台每 30s 落盘一次。
+	if *persist != "" {
+		if err := stats.load(*persist); err != nil {
+			log.Printf("读取持久化统计失败(将从头开始): %v", err)
+		} else {
+			log.Printf("已从 %s 读回历史统计", *persist)
+		}
+		stats.startPersistLoop(*persist, 30*time.Second)
+	}
 
 	// 顶层路由:/__stats 查看统计,其余全部走代理。
 	topHandler := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
