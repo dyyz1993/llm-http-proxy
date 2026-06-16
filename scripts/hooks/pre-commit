@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# pre-commit hook:提交前跑 go vet + gofmt 检查,快速拦住坏代码。
+# 不跑完整测试(留给 pre-push),保持提交速度。
+set -e
+
+# 切到仓库根目录
+cd "$(git rev-parse --show-toplevel)"
+
+echo "▶ go vet..."
+go vet ./...
+
+echo "▶ gofmt 检查..."
+DIFF=$(gofmt -l . 2>&1)
+if [ -n "$DIFF" ]; then
+  echo "❌ 以下文件未 gofmt,请先运行 gofmt -w:"
+  echo "$DIFF"
+  exit 1
+fi
+
+echo "✅ pre-commit 检查通过"

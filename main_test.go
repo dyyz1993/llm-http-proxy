@@ -105,10 +105,22 @@ func wsEchoBackend() *httptest.Server {
 
 // --- 公共:用代理封装后端,返回代理 URL ------------------------------------
 
-// startProxy 启动一个用 newProxyHandler 的测试服务器(带统计采集)。
+// startProxy 启动测试服务器,路由与 main 一致(/__version、/__stats + 代理)。
 func startProxy(t *testing.T) *httptest.Server {
 	t.Helper()
-	return httptest.NewServer(newProxyHandler(newStatsCollector()))
+	stats := newStatsCollector()
+	mux := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		switch req.URL.Path {
+		case "/__version":
+			versionHandler(w, req)
+			return
+		case "/__stats":
+			statsHandler(stats).ServeHTTP(w, req)
+			return
+		}
+		newProxyHandler(stats).ServeHTTP(w, req)
+	})
+	return httptest.NewServer(mux)
 }
 
 // proxyURL 把后端 URL 拼到代理路径上:proxy + "/" + backend。
@@ -415,6 +427,60 @@ func TestEmptyPath(t *testing.T) {
 	}
 }
 
+// TestVersionEndpoint 验证 /__version 返回版本/编译时间/启动时间/运行时长。
+func TestVersionEndpoint(t *testing.T) {
+	proxy := startProxy(t)
+	defer proxy.Close()
+
+	resp, err := noCompressClient.Get(proxy.URL + "/__version")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		t.Fatalf("状态码 = %d,期望 200", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Errorf("Content-Type = %q,期望 application/json", ct)
+	}
+
+	var info versionInfo
+	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+		t.Fatal(err)
+	}
+	// version/buildTime 在测试时是默认值 "dev"/"unknown"
+	if info.Version == "" {
+		t.Error("version 为空")
+	}
+	if info.BuildTime == "" {
+		t.Error("build_time 为空")
+	}
+	// start_time 必须是合法的 RFC3339
+	if _, err := time.Parse(time.RFC3339, info.StartTime); err != nil {
+		t.Errorf("start_time %q 不是合法 RFC3339: %v", info.StartTime, err)
+	}
+	// uptime 必须非空且包含时间单位
+	if info.Uptime == "" || !strings.ContainsAny(info.Uptime, "smh") {
+		t.Errorf("uptime %q 不合法", info.Uptime)
+	}
+}
+
+// TestVersionMethodNotAllowed 验证 /__version 只接受 GET。
+func TestVersionMethodNotAllowed(t *testing.T) {
+	proxy := startProxy(t)
+	defer proxy.Close()
+
+	resp, err := noCompressClient.Post(proxy.URL+"/__version", "application/json", strings.NewReader("{}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 405 {
+		t.Errorf("POST /__version 状态码 = %d,期望 405", resp.StatusCode)
+	}
+}
+
 // 额外:大体积二进制透传校验,确保 body 不被损坏。
 func TestBinaryBody(t *testing.T) {
 	backend := echoBackend()
@@ -461,8 +527,8 @@ func TestMaskKey(t *testing.T) {
 		{"sk-ant-aaa111bbb222ccc333ddd444", "sk-************************d444"},
 		// GLM: 无 '-',prefix=前4位。25 字符 - 4 - 4 = 17 个 *
 		{"f8dcf55ef4cb.lAwRTT5GCxS4", "f8dc*****************CxS4"},
-		{"short", "*****"},       // <=8 全掩码
-		{"12345678", "********"}, // 恰好 8 全掩码
+		{"short", "*****"},            // <=8 全掩码
+		{"12345678", "********"},      // 恰好 8 全掩码
 		{"123456789", "1234****6789"}, // 9 字符,空隙=1≤4,用 4 个 *
 	}
 	for _, c := range cases {

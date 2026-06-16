@@ -10,8 +10,10 @@ RUN go mod download
 # 拷源码
 COPY . .
 
-# 纯静态编译(CGO 关闭),产出 /out/llm-http-proxy
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/llm-http-proxy .
+# 纯静态编译(CGO 关闭),注入版本号和编译时间,产出 /out/llm-http-proxy
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath \
+    -ldflags="-s -w -X main.version=docker -X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    -o /out/llm-http-proxy .
 
 # ---- 运行阶段 ----
 # 用 alpine 而非 scratch:代理要转发 https:// 上游,必须有 CA 根证书。

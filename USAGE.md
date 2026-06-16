@@ -180,6 +180,32 @@ llm-http-proxy -addr :8080 -persist /var/lib/llm-http-proxy/stats.json
 
 `GET /__stats` —— 查询请求来源统计（只统计，不泄露隐私）。
 
+## 版本端点
+
+`GET /__version` —— 查询版本号、编译时间、启动时间、运行时长。
+
+```bash
+curl http://localhost:8080/__version
+```
+
+返回：
+
+```json
+{
+  "version": "v1.5.0",
+  "build_time": "2026-06-17T10:00:00Z",
+  "start_time": "2026-06-17T18:30:00+08:00",
+  "uptime": "2h15m30s"
+}
+```
+
+| 字段 | 说明 |
+|------|------|
+| `version` | 版本号（tag 注入，如 `v1.5.0`；本地 `go run` 为 `dev`） |
+| `build_time` | 二进制编译时刻（CI 构建时注入） |
+| `start_time` | 当前进程启动时刻 |
+| `uptime` | 已运行时长（每次查询实时计算） |
+
 ### 查询参数
 
 | 参数 | 取值 | 说明 |
@@ -307,6 +333,28 @@ curl -fsSL -o /tmp/p.tar.gz \
 tar -xzf /tmp/p.tar.gz -C /usr/local/bin
 systemctl restart llm-http-proxy
 ```
+
+---
+
+## 开发：Git Hooks（本地检查）
+
+仓库提供 pre-commit / pre-push 钩子，本地开发时自动检查代码质量：
+
+- **pre-commit**（提交时）：跑 `go vet` + `gofmt` 检查，快速拦截坏代码
+- **pre-push**（推送时）：跑完整 `go test -race`，确保不推坏代码
+
+**安装**（clone 后执行一次）：
+```bash
+bash scripts/install-hooks.sh
+```
+
+**跳过**（紧急情况）：
+```bash
+git commit --no-verify
+git push --no-verify
+```
+
+> CI 也会跑同样的检查，hooks 只是让你在本地更早发现问题。
 
 ---
 

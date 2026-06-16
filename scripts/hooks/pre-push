@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# pre-push hook:推送前跑完整测试(含竞态检测),确保不会把坏代码推到远程。
+# 比 pre-commit 严格,但慢一些。
+set -e
+
+cd "$(git rev-parse --show-toplevel)"
+
+echo "▶ go test -race..."
+if ! go test -race -count=1 ./...; then
+  echo "❌ 测试失败,推送被阻止"
+  exit 1
+fi
+
+echo "✅ pre-push 测试通过"

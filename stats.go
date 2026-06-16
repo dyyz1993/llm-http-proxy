@@ -28,12 +28,12 @@ import (
 
 // keyEntry 是单个 (IP, 掩码key) 的累计统计。
 type keyEntry struct {
-	Count        int64           `json:"count"`
-	FirstSeen    time.Time       `json:"first_seen"`           // 首次访问时间(创建时设,不变)
-	LastSeen     time.Time       `json:"last_seen"`            // 最后访问时间
-	LastStatus   int             `json:"last_status"`
-	LastTarget   string          `json:"last_target"`          // 只记 host,不记 path
-	StatusCounts map[int]int64   `json:"status_counts"`        // 各状态码累计计数
+	Count        int64         `json:"count"`
+	FirstSeen    time.Time     `json:"first_seen"` // 首次访问时间(创建时设,不变)
+	LastSeen     time.Time     `json:"last_seen"`  // 最后访问时间
+	LastStatus   int           `json:"last_status"`
+	LastTarget   string        `json:"last_target"`   // 只记 host,不记 path
+	StatusCounts map[int]int64 `json:"status_counts"` // 各状态码累计计数
 }
 
 // ipStats 是某个 IP 下的若干 key 的统计。
@@ -43,9 +43,9 @@ type ipStats struct {
 
 // statsCollector 是全局统计收集器,线程安全。
 type statsCollector struct {
-	mu      sync.Mutex
-	data    map[string]*ipStats // key = IP
-	hours   [24]hourBucket      // 最近 24 小时调用量(环形缓冲)
+	mu    sync.Mutex
+	data  map[string]*ipStats // key = IP
+	hours [24]hourBucket      // 最近 24 小时调用量(环形缓冲)
 }
 
 // hourBucket 是一个小时桶:起始时间 + 调用次数。
@@ -499,8 +499,9 @@ func extractKey(r *http.Request) (string, bool) {
 
 // maskKey 把 key 掩码:保留前缀(到第一个 '-')+ 后 4 位,中间用 * 填充(至少 4 个)。
 // 例:sk-abcd1234efgh5678 -> sk-ab**********5678
-//     sk-ant-xxx...yyyy   -> sk-ant-***yyyy
-//     mytoken             -> myto***oken  (无 '-' 时保留前 4 + 后 4)
+//
+//	sk-ant-xxx...yyyy   -> sk-ant-***yyyy
+//	mytoken             -> myto***oken  (无 '-' 时保留前 4 + 后 4)
 func maskKey(k string) string {
 	n := len(k)
 	// 太短的全掩码,避免泄露

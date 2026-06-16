@@ -17,6 +17,7 @@ package main
 import (
 	"bufio"
 	"crypto/tls"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -57,8 +58,13 @@ func tlsDialWithServerName(hostport string) (net.Conn, error) {
 	return tls.Dial("tcp", hostport, &tls.Config{ServerName: host})
 }
 
-// version 在构建时通过 -ldflags "-X main.version=..." 注入,默认 dev。
-var version = "dev"
+// version / buildTime 在构建时通过 -ldflags "-X main.version=... -X main.buildTime=..." 注入。
+// startTime 是进程启动时刻(运行时记录)。
+var (
+	version   = "dev"
+	buildTime = "unknown"
+	startTime = time.Now() // 进程启动时即记录
+)
 
 func main() {
 	addr := flag.String("addr", ":8080", "监听地址")
@@ -67,7 +73,7 @@ func main() {
 	flag.Parse()
 
 	if *ver {
-		fmt.Println("llm-http-proxy", version)
+		fmt.Printf("llm-http-proxy %s (built %s)\n", version, buildTime)
 		return
 	}
 
@@ -83,9 +89,13 @@ func main() {
 		stats.startPersistLoop(*persist, 30*time.Second)
 	}
 
-	// 顶层路由:/__stats 查看统计,其余全部走代理。
+	// 顶层路由:/__version 和 /__stats 是内置端点,其余全部走代理。
 	topHandler := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		if req.URL.Path == "/__stats" {
+		switch req.URL.Path {
+		case "/__version":
+			versionHandler(w, req)
+			return
+		case "/__stats":
 			statsHandler(stats).ServeHTTP(w, req)
 			return
 		}
@@ -93,10 +103,36 @@ func main() {
 	})
 
 	log.Printf("透传代理已启动: http://localhost%s  (支持 HTTP / SSE / WebSocket)", *addr)
+	log.Printf("版本: %s (built %s)", version, buildTime)
 	log.Printf("统计查看: http://localhost%s/__stats", *addr)
 	if err := http.ListenAndServe(*addr, topHandler); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// versionInfo 是 /__version 返回的结构。
+type versionInfo struct {
+	Version   string `json:"version"`    // 版本号(tag 注入,如 v1.5.0)
+	BuildTime string `json:"build_time"` // 编译时刻
+	StartTime string `json:"start_time"` // 进程启动时刻
+	Uptime    string `json:"uptime"`     // 已运行时长(人类可读)
+}
+
+// versionHandler 处理 GET /__version,返回版本号、编译时间、启动时间、运行时长。
+func versionHandler(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	uptime := time.Since(startTime)
+	info := versionInfo{
+		Version:   version,
+		BuildTime: buildTime,
+		StartTime: startTime.Format(time.RFC3339),
+		Uptime:    uptime.Round(time.Second).String(),
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	json.NewEncoder(w).Encode(info)
 }
 
 // newProxyHandler 构造代理的 http.Handler。测试和 main 共用同一份逻辑。
@@ -145,7 +181,7 @@ func newProxyHandler(stats *statsCollector) http.Handler {
 			}
 			return
 		}
-		outReq.Header = req.Header.Clone()    // 原样复制,不追加任何 header
+		outReq.Header = req.Header.Clone()       // 原样复制,不追加任何 header
 		outReq.ContentLength = req.ContentLength // 显式带上 body 长度,避免 body 不被发送
 
 		resp, err := client.Do(outReq)

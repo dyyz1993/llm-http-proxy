@@ -41,10 +41,11 @@ jobs:
           CGO_ENABLED: 0
         run: |
           mkdir -p out
-          # 文件名带平台后缀,windows 加 .exe(本仓库暂不含 windows,保留扩展逻辑)
           ext=""
           if [ "$GOOS" = "windows" ]; then ext=".exe"; fi
-          go build -trimpath -ldflags="-s -w -X main.version=${GITHUB_REF_NAME}" \
+          go build -trimpath -ldflags="-s -w \
+            -X main.version=${GITHUB_REF_NAME} \
+            -X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             -o "out/llm-http-proxy-${GOOS}-${GOARCH}${ext}" .
 
       - name: Package
