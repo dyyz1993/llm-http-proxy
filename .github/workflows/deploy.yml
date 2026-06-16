@@ -1,7 +1,6 @@
 name: Deploy to jd
 
-# 打 tag(v*)时触发,在 release 构建二进制之后部署到 jd 服务器
-# 也可手动触发(workflow_dispatch)
+# 打 tag(release 完成后)自动部署到 jd,也可手动触发
 on:
   workflow_run:
     workflows: ["Release"]
@@ -13,31 +12,36 @@ jobs:
   deploy:
     name: Deploy to jd server
     runs-on: ubuntu-latest
-    # 只在 release 成功完成时部署
     if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     steps:
-      - name: Set up SSH
+      - name: Configure SSH
+        env:
+          SSH_KEY: ${{ secrets.JD_SSH_KEY }}
+          HOST: ${{ secrets.JD_HOST }}
         run: |
           mkdir -p ~/.ssh
-          echo "${{ secrets.JD_SSH_KEY }}" > ~/.ssh/jd_deploy_key
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/jd_deploy_key
           chmod 600 ~/.ssh/jd_deploy_key
-          ssh-keyscan -H ${{ secrets.JD_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+          # host key 容错收集(keyscan 对某些 key 类型可能返回非 0)
+          ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
 
-      - name: Test connectivity (连通性测试)
+      - name: Test connectivity
+        env:
+          HOST: ${{ secrets.JD_HOST }}
+          JD_USER: ${{ secrets.JD_USER }}
         run: |
           echo "=== 测试 SSH 连接到 jd ==="
-          ssh -o ConnectTimeout=20 -i ~/.ssh/jd_deploy_key \
-            ${{ secrets.JD_USER }}@${{ secrets.JD_HOST }} \
-            'echo "✅ CI 已连上 jd"; hostname; uname -m; /usr/local/bin/llm-http-proxy -version'
+          ssh -o ConnectTimeout=25 -o StrictHostKeyChecking=accept-new \
+            -i ~/.ssh/jd_deploy_key "$JD_USER@$HOST" \
+            'echo "CI connected"; hostname; /usr/local/bin/llm-http-proxy -version'
 
       - name: Get latest release tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         id: tag
         run: |
-          TAG=$(curl -fsSL \
-            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            "https://api.github.com/repos/${{ github.repository }}/releases/latest" \
-            | jq -r .tag_name)
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          TAG=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "最新 release tag: $TAG"
 
       - name: Download binary to runner
@@ -51,32 +55,37 @@ jobs:
           ls -lh /tmp/proxy.tar.gz
 
       - name: SCP binary to jd
+        env:
+          HOST: ${{ secrets.JD_HOST }}
+          JD_USER: ${{ secrets.JD_USER }}
         run: |
           echo "=== 推送二进制到 jd ==="
           scp -o ConnectTimeout=20 -i ~/.ssh/jd_deploy_key \
-            /tmp/proxy.tar.gz \
-            ${{ secrets.JD_USER }}@${{ secrets.JD_HOST }}:/tmp/proxy-ci.tar.gz
+            /tmp/proxy.tar.gz "$JD_USER@$HOST:/tmp/proxy-ci.tar.gz"
 
       - name: Install and restart on jd
+        env:
+          HOST: ${{ secrets.JD_HOST }}
+          JD_USER: ${{ secrets.JD_USER }}
         run: |
           echo "=== 解压、替换、重启 ==="
-          ssh -o ConnectTimeout=20 -i ~/.ssh/jd_deploy_key \
-            ${{ secrets.JD_USER }}@${{ secrets.JD_HOST }} << 'REMOTE'
-            set -e
-            cd /tmp
-            tar -xzf proxy-ci.tar.gz
-            chmod 755 llm-http-proxy-linux-amd64
-            mv llm-http-proxy-linux-amd64 /usr/local/bin/llm-http-proxy
-            rm proxy-ci.tar.gz
-            echo "新版本: $(/usr/local/bin/llm-http-proxy -version)"
-            systemctl restart llm-http-proxy
-            sleep 2
-            echo "服务状态: $(systemctl is-active llm-http-proxy)"
-            curl -s -o /dev/null -w "本地健康检查 HTTP %{http_code}\n" http://localhost:8080/
-          REMOTE
+          ssh -o ConnectTimeout=20 -i ~/.ssh/jd_deploy_key "$JD_USER@$HOST" \
+            'set -e
+             cd /tmp
+             tar -xzf proxy-ci.tar.gz
+             chmod 755 llm-http-proxy-linux-amd64
+             mv llm-http-proxy-linux-amd64 /usr/local/bin/llm-http-proxy
+             rm proxy-ci.tar.gz
+             echo "新版本: $(/usr/local/bin/llm-http-proxy -version)"
+             systemctl restart llm-http-proxy
+             sleep 2
+             echo "服务状态: $(systemctl is-active llm-http-proxy)"
+             curl -s -o /dev/null -w "本地健康检查 HTTP %{http_code}\n" http://localhost:8080/'
 
-      - name: Verify from runner (公网验证)
+      - name: Verify from runner
+        env:
+          HOST: ${{ secrets.JD_HOST }}
         run: |
-          echo "=== 从 GitHub runner 公网验证服务 ==="
+          echo "=== 从 runner 公网验证 ==="
           curl -s -o /dev/null -w "HTTP %{http_code} 耗时 %{time_total}s\n" \
-            "http://${{ secrets.JD_HOST }}:8080/__stats"
+            "http://${HOST}:8080/__stats"
