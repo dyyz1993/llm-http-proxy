@@ -103,10 +103,10 @@ func wsEchoBackend() *httptest.Server {
 
 // --- 公共:用代理封装后端,返回代理 URL ------------------------------------
 
-// startProxy 启动一个用 newProxyHandler 的测试服务器。
+// startProxy 启动一个用 newProxyHandler 的测试服务器(带统计采集)。
 func startProxy(t *testing.T) *httptest.Server {
 	t.Helper()
-	return httptest.NewServer(newProxyHandler())
+	return httptest.NewServer(newProxyHandler(newStatsCollector()))
 }
 
 // proxyURL 把后端 URL 拼到代理路径上:proxy + "/" + backend。
@@ -445,6 +445,162 @@ func TestBinaryBody(t *testing.T) {
 	gotHash := sha256.Sum256(got)
 	if gotHash != want {
 		t.Errorf("二进制 body 哈希不匹配,内容被损坏")
+	}
+}
+
+// --- 统计采集测试 --------------------------------------------------------
+
+// TestMaskKey 验证 key 掩码规则:保留前缀(到首个'-')+ 后4位,中间 *。
+func TestMaskKey(t *testing.T) {
+	cases := []struct{ in, want string }{
+		// OpenAI: sk- 前缀。19 字符 - 3(prefix) - 4(tail) = 12 个 *
+		{"sk-abcd1234efgh5678", "sk-************5678"},
+		// Claude: 第一个 '-' 后 prefix=sk-。
+		{"sk-ant-aaa111bbb222ccc333ddd444", "sk-************************d444"},
+		// GLM: 无 '-',prefix=前4位。25 字符 - 4 - 4 = 17 个 *
+		{"f8dcf55ef4cb.lAwRTT5GCxS4", "f8dc*****************CxS4"},
+		{"short", "*****"},       // <=8 全掩码
+		{"12345678", "********"}, // 恰好 8 全掩码
+		{"123456789", "1234****6789"}, // 9 字符,空隙=1≤4,用 4 个 *
+	}
+	for _, c := range cases {
+		got := maskKey(c.in)
+		if got != c.want {
+			t.Errorf("maskKey(%q) = %q,期望 %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestMaskKeyShort 确保 key 过短时不会泄露。
+func TestMaskKeyShort(t *testing.T) {
+	for _, k := range []string{"a", "ab", "abc", "1234", "12345678"} {
+		m := maskKey(k)
+		// 过短的 key 全部掩码,不应出现任何明文字符
+		if strings.Trim(m, "*") != "" {
+			t.Errorf("短 key %q 掩码后 %q 仍有明文", k, m)
+		}
+	}
+}
+
+// TestExtractKey 验证三种 header 位置的 key 提取。
+func TestExtractKey(t *testing.T) {
+	// Authorization: Bearer
+	r1, _ := http.NewRequest("POST", "/", nil)
+	r1.Header.Set("Authorization", "Bearer sk-test1234567")
+	if k, ok := extractKey(r1); !ok || k != "sk-test1234567" {
+		t.Errorf("Bearer 提取: got %q ok=%v", k, ok)
+	}
+
+	// x-api-key (Claude)
+	r2, _ := http.NewRequest("POST", "/", nil)
+	r2.Header.Set("x-api-key", "sk-ant-xyz")
+	if k, ok := extractKey(r2); !ok || k != "sk-ant-xyz" {
+		t.Errorf("x-api-key 提取: got %q ok=%v", k, ok)
+	}
+
+	// api-key (Azure)
+	r3, _ := http.NewRequest("POST", "/", nil)
+	r3.Header.Set("api-key", "azure-key-123")
+	if k, ok := extractKey(r3); !ok || k != "azure-key-123" {
+		t.Errorf("api-key 提取: got %q ok=%v", k, ok)
+	}
+
+	// 无 key
+	r4, _ := http.NewRequest("POST", "/", nil)
+	if _, ok := extractKey(r4); ok {
+		t.Errorf("无 key 时应返回 false")
+	}
+}
+
+// TestStatsRecordAndAggregate 验证经代理的请求被正确统计到 /__stats。
+func TestStatsRecordAndAggregate(t *testing.T) {
+	backend := echoBackend()
+	defer backend.Close()
+
+	stats := newStatsCollector()
+	mux := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Path == "/__stats" {
+			statsHandler(stats).ServeHTTP(w, req)
+			return
+		}
+		newProxyHandler(stats).ServeHTTP(w, req)
+	})
+	proxy := httptest.NewServer(mux)
+	defer proxy.Close()
+
+	// 用 Authorization: Bearer 发 2 次请求
+	for i := 0; i < 2; i++ {
+		req, _ := http.NewRequest("POST",
+			proxyURL(proxy.URL, backend.URL+"/api"), strings.NewReader("{}"))
+		req.Header.Set("Authorization", "Bearer sk-abcd1234efgh5678")
+		resp, err := noCompressClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+	}
+	// 用 x-api-key 发 1 次(Claude 风格)
+	req, _ := http.NewRequest("POST",
+		proxyURL(proxy.URL, backend.URL+"/api"), strings.NewReader("{}"))
+	req.Header.Set("x-api-key", "sk-ant-aaa111bbb222ccc")
+	resp, err := noCompressClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	// 拉 /__stats
+	resp, err = noCompressClient.Get(proxy.URL + "/__stats")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	var snap map[string]*ipStats
+	if err := json.NewDecoder(resp.Body).Decode(&snap); err != nil {
+		t.Fatal(err)
+	}
+
+	// 应该只有一个 IP(127.0.0.1),下面有两个掩码 key
+	if len(snap) != 1 {
+		t.Fatalf("IP 数 = %d,期望 1: %+v", len(snap), snap)
+	}
+	// 找到那个 IP 的条目
+	var is *ipStats
+	for _, v := range snap {
+		is = v
+	}
+	if len(is.Keys) != 2 {
+		t.Fatalf("掩码 key 数 = %d,期望 2: %+v", len(is.Keys), is.Keys)
+	}
+	// Bearer key 应计数 2
+	bearerMasked := maskKey("sk-abcd1234efgh5678")
+	if ke := is.Keys[bearerMasked]; ke == nil || ke.Count != 2 {
+		t.Errorf("Bearer key 计数: %+v,期望 2", ke)
+	}
+	// x-api-key 应计数 1
+	claudeMasked := maskKey("sk-ant-aaa111bbb222ccc")
+	if ke := is.Keys[claudeMasked]; ke == nil || ke.Count != 1 {
+		t.Errorf("Claude key 计数: %+v,期望 1", ke)
+	}
+}
+
+// TestStatsNoPlaintextKey 确保日志和统计里不含明文 key。
+func TestStatsNoPlaintextKey(t *testing.T) {
+	// 构造一个请求,原始 key 较长
+	r, _ := http.NewRequest("POST", "/", nil)
+	plainKey := "sk-supersecret-key-1234567890abcdef"
+	r.Header.Set("Authorization", "Bearer "+plainKey)
+
+	masked := maskedKeyFromRequest(r)
+	if masked == plainKey {
+		t.Fatal("掩码结果等于明文 key!")
+	}
+	if strings.Contains(masked, "supersecret") {
+		t.Fatalf("掩码结果 %q 包含明文片段", masked)
+	}
+	if !strings.Contains(masked, "*") {
+		t.Fatalf("掩码结果 %q 不含 *", masked)
 	}
 }
 

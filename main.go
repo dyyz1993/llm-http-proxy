@@ -15,6 +15,7 @@
 package main
 
 import (
+	"bufio"
 	"crypto/tls"
 	"flag"
 	"fmt"
@@ -60,16 +61,27 @@ func main() {
 	addr := flag.String("addr", ":8080", "监听地址")
 	flag.Parse()
 
-	handler := newProxyHandler()
+	stats := newStatsCollector()
+
+	// 顶层路由:/__stats 查看统计,其余全部走代理。
+	topHandler := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Path == "/__stats" {
+			statsHandler(stats).ServeHTTP(w, req)
+			return
+		}
+		newProxyHandler(stats).ServeHTTP(w, req)
+	})
 
 	log.Printf("透传代理已启动: http://localhost%s  (支持 HTTP / SSE / WebSocket)", *addr)
-	if err := http.ListenAndServe(*addr, handler); err != nil {
+	log.Printf("统计查看: http://localhost%s/__stats", *addr)
+	if err := http.ListenAndServe(*addr, topHandler); err != nil {
 		log.Fatal(err)
 	}
 }
 
 // newProxyHandler 构造代理的 http.Handler。测试和 main 共用同一份逻辑。
-func newProxyHandler() http.Handler {
+// stats 非 nil 时,记录每次请求的 IP/掩码key/状态码统计。
+func newProxyHandler(stats *statsCollector) http.Handler {
 	transport := &http.Transport{
 		DisableCompression: true, // 不偷偷加 Accept-Encoding: gzip
 	}
@@ -83,16 +95,34 @@ func newProxyHandler() http.Handler {
 			return
 		}
 
+		// 采集统计(在转发前抓取,因为 key/header 此时还在)。
+		ip := clientIP(req)
+		maskedKey := maskedKeyFromRequest(req)
+		// 目标 host,用于统计(不含 path)。
+		targetHost := hostFromRaw(raw)
+		start := time.Now()
+
+		// 用 statusRecorder 包一层,以便拿到最终状态码做统计。
+		rec := &statusRecorder{ResponseWriter: w, status: 200}
+
 		// WebSocket 分支:检测 Upgrade: websocket
 		if isWebSocketUpgrade(req) {
-			handleWebSocket(w, req, raw)
+			handleWebSocket(rec, req, raw)
+			if stats != nil {
+				stats.record(ip, maskedKey, targetHost, rec.status)
+				logRequest(ip, maskedKey, req.Method, targetHost, rec.status, time.Since(start))
+			}
 			return
 		}
 
 		// 普通 HTTP:原样转发
 		outReq, err := http.NewRequestWithContext(req.Context(), req.Method, raw, req.Body)
 		if err != nil {
-			http.Error(w, "目标 URL 无法解析: "+err.Error(), http.StatusBadRequest)
+			http.Error(rec, "目标 URL 无法解析: "+err.Error(), http.StatusBadRequest)
+			if stats != nil {
+				stats.record(ip, maskedKey, targetHost, rec.status)
+				logRequest(ip, maskedKey, req.Method, targetHost, rec.status, time.Since(start))
+			}
 			return
 		}
 		outReq.Header = req.Header.Clone()    // 原样复制,不追加任何 header
@@ -100,24 +130,28 @@ func newProxyHandler() http.Handler {
 
 		resp, err := client.Do(outReq)
 		if err != nil {
-			http.Error(w, "转发失败: "+err.Error(), http.StatusBadGateway)
+			http.Error(rec, "转发失败: "+err.Error(), http.StatusBadGateway)
+			if stats != nil {
+				stats.record(ip, maskedKey, targetHost, rec.status)
+				logRequest(ip, maskedKey, req.Method, targetHost, rec.status, time.Since(start))
+			}
 			return
 		}
 		defer resp.Body.Close()
 
-		dst := w.Header()
+		dst := rec.Header()
 		for k, vs := range resp.Header {
 			dst[k] = vs // 响应头也原样透传
 		}
-		w.WriteHeader(resp.StatusCode)
+		rec.WriteHeader(resp.StatusCode)
 
 		// 流式转发:支持 SSE,边收边 flush
-		if f, ok := w.(http.Flusher); ok {
+		if f, ok := rec.ResponseWriter.(http.Flusher); ok {
 			buf := make([]byte, 32*1024)
 			for {
 				n, rerr := resp.Body.Read(buf)
 				if n > 0 {
-					w.Write(buf[:n])
+					rec.Write(buf[:n])
 					f.Flush()
 				}
 				if rerr != nil {
@@ -125,9 +159,52 @@ func newProxyHandler() http.Handler {
 				}
 			}
 		} else {
-			io.Copy(w, resp.Body)
+			io.Copy(rec, resp.Body)
+		}
+
+		// 记录统计(只含 IP/掩码key/host/状态码,不含 body)
+		if stats != nil {
+			stats.record(ip, maskedKey, targetHost, rec.status)
+			logRequest(ip, maskedKey, req.Method, targetHost, rec.status, time.Since(start))
 		}
 	})
+}
+
+// statusRecorder 包装 ResponseWriter 以捕获状态码。
+// 必须转发 http.Hijacker / http.Flusher 接口,否则 WebSocket 和 SSE 会失败。
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.status = code
+	r.ResponseWriter.WriteHeader(code)
+}
+
+// Hijack 转发给底层 ResponseWriter,保证 WebSocket 可用。
+func (r *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hj, ok := r.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("ResponseWriter 不支持 Hijack")
+	}
+	return hj.Hijack()
+}
+
+// Flush 转发给底层 ResponseWriter,保证 SSE 可用。
+func (r *statusRecorder) Flush() {
+	if f, ok := r.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// hostFromRaw 从原始目标 URL 字符串里提取 host(不含端口/路径),用于统计。
+func hostFromRaw(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "-"
+	}
+	return u.Host
 }
 
 // isWebSocketUpgrade 判断是否为 WebSocket 升级请求。
