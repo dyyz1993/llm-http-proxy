@@ -1,0 +1,453 @@
+// glm-proxy 的测试。全部使用本地 echo 后端,零外网依赖,确定性可重跑。
+//
+// 覆盖类型:
+//   - 普通 HTTP:GET / POST+JSON / 表单 urlencoded / 文件上传 multipart / PUT / DELETE
+//   - 自定义 header 透传(含 Authorization)
+//   - 响应头透传
+//   - SSE 流式
+//   - WebSocket(wss 需证书,这里测 ws:// 明文隧道)
+//   - 错误输入(空路径)
+package main
+
+import (
+	"bufio"
+	"bytes"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"io"
+	"mime/multipart"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strings"
+	"testing"
+	"time"
+
+	"golang.org/x/net/websocket"
+)
+
+// --- 本地 echo 后端 -------------------------------------------------------
+
+// echoBackend 返回一个 HTTP 测试服务器,它把请求的关键信息回显为 JSON,
+// 同时在响应头里放一个自定义标记,方便测试响应头透传。
+func echoBackend() *httptest.Server {
+	mux := http.NewServeMux()
+
+	// echo 接口:回显 method/path/query/headers/body
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+
+		// 读取 query
+		query := r.URL.Query().Encode()
+
+		// 收集 header(用客户端发来的原始值)
+		headers := map[string]string{}
+		for k, vs := range r.Header {
+			if len(vs) > 0 {
+				headers[k] = vs[0]
+			}
+		}
+
+		w.Header().Set("X-Echo-Marker", "from-backend") // 响应头标记
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(200)
+
+		resp := map[string]interface{}{
+			"method":  r.Method,
+			"path":    r.URL.Path,
+			"query":   query,
+			"headers": headers,
+			"body":    string(body),
+		}
+		json.NewEncoder(w).Encode(resp)
+	})
+
+	// SSE 接口:逐行推送 data: 行
+	mux.HandleFunc("/sse", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl := w.(http.Flusher)
+		for i := 0; i < 3; i++ {
+			fmt.Fprintf(w, "data: chunk-%d\n\n", i)
+			fl.Flush()
+		}
+	})
+
+	// 二进制回显接口:把收到的 body 原样回写(含正确 Content-Type),
+	// 用于验证二进制 body 不被损坏。
+	mux.HandleFunc("/bin", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Write(body) // 原样回吐
+	})
+
+	return httptest.NewServer(mux)
+}
+
+// noCompressClient 是一个禁用自动压缩的 HTTP 客户端。
+// Go 的 DefaultClient 会在出站请求里自动加 "Accept-Encoding: gzip",
+// 这会干扰"代理是否追加 header"的判定。测试统一用它,排除噪音。
+var noCompressClient = &http.Client{
+	Transport: &http.Transport{DisableCompression: true},
+}
+
+// wsEchoBackend 返回一个 WebSocket echo 测试服务器。
+func wsEchoBackend() *httptest.Server {
+	handler := websocket.Handler(func(ws *websocket.Conn) {
+		io.Copy(ws, ws) // 收到什么就回什么
+	})
+	return httptest.NewServer(handler)
+}
+
+// --- 公共:用代理封装后端,返回代理 URL ------------------------------------
+
+// startProxy 启动一个用 newProxyHandler 的测试服务器。
+func startProxy(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(newProxyHandler())
+}
+
+// proxyURL 把后端 URL 拼到代理路径上:proxy + "/" + backend。
+func proxyURL(proxy, backend string) string {
+	return proxy + "/" + backend
+}
+
+// --- 测试用例 -------------------------------------------------------------
+
+func TestGET(t *testing.T) {
+	backend := echoBackend()
+	defer backend.Close()
+	proxy := startProxy(t)
+	defer proxy.Close()
+
+	resp, err := noCompressClient.Get(proxyURL(proxy.URL, backend.URL+"/get?x=1&y=2"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		t.Fatalf("状态码 = %d,期望 200", resp.StatusCode)
+	}
+	var got map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&got)
+	if got["method"] != "GET" {
+		t.Errorf("method = %v,期望 GET", got["method"])
+	}
+	if got["query"] != "x=1&y=2" {
+		t.Errorf("query = %v,期望 x=1&y=2", got["query"])
+	}
+	if got["path"] != "/get" {
+		t.Errorf("path = %v,期望 /get", got["path"])
+	}
+}
+
+func TestPOSTJSON(t *testing.T) {
+	backend := echoBackend()
+	defer backend.Close()
+	proxy := startProxy(t)
+	defer proxy.Close()
+
+	body := `{"hello":"world","n":42}`
+	resp, err := noCompressClient.Post(
+		proxyURL(proxy.URL, backend.URL+"/api"),
+		"application/json",
+		strings.NewReader(body),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	var got map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&got)
+	if got["body"] != body {
+		t.Errorf("body = %v,期望 %s", got["body"], body)
+	}
+	hdrs, _ := got["headers"].(map[string]interface{})
+	if hdrs["Content-Type"] != "application/json" {
+		t.Errorf("Content-Type 未透传: %v", hdrs["Content-Type"])
+	}
+}
+
+func TestFormURLEncoded(t *testing.T) {
+	backend := echoBackend()
+	defer backend.Close()
+	proxy := startProxy(t)
+	defer proxy.Close()
+
+	form := url.Values{"name": {"张三"}, "age": {"20"}}
+	resp, err := http.PostForm(proxyURL(proxy.URL, backend.URL+"/form"), form)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	var got map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&got)
+	if got["body"] != form.Encode() {
+		t.Errorf("表单 body = %v,期望 %s", got["body"], form.Encode())
+	}
+}
+
+func TestMultipartUpload(t *testing.T) {
+	backend := echoBackend()
+	defer backend.Close()
+	proxy := startProxy(t)
+	defer proxy.Close()
+
+	// 构造 multipart body
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	field, _ := mw.CreateFormField("desc")
+	field.Write([]byte("一个文件"))
+	file, _ := mw.CreateFormFile("file", "test.txt")
+	fileContent := []byte("hello-file-content\n")
+	file.Write(fileContent)
+	mw.Close()
+
+	resp, err := noCompressClient.Post(
+		proxyURL(proxy.URL, backend.URL+"/upload"),
+		mw.FormDataContentType(),
+		&buf,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	var got map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&got)
+	bodyStr, _ := got["body"].(string)
+	// multipart body 里应包含文件名和文件内容
+	if !strings.Contains(bodyStr, "test.txt") {
+		t.Errorf("multipart body 缺文件名 test.txt: %s", bodyStr)
+	}
+	if !strings.Contains(bodyStr, string(fileContent)) {
+		t.Errorf("multipart body 缺文件内容: %s", bodyStr)
+	}
+}
+
+func TestPUT(t *testing.T) {
+	backend := echoBackend()
+	defer backend.Close()
+	proxy := startProxy(t)
+	defer proxy.Close()
+
+	req, _ := http.NewRequest("PUT",
+		proxyURL(proxy.URL, backend.URL+"/item"),
+		strings.NewReader(`{"update":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := noCompressClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	var got map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&got)
+	if got["method"] != "PUT" {
+		t.Errorf("method = %v,期望 PUT", got["method"])
+	}
+}
+
+func TestDELETE(t *testing.T) {
+	backend := echoBackend()
+	defer backend.Close()
+	proxy := startProxy(t)
+	defer proxy.Close()
+
+	req, _ := http.NewRequest("DELETE",
+		proxyURL(proxy.URL, backend.URL+"/item/5"), nil)
+	resp, err := noCompressClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	var got map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&got)
+	if got["method"] != "DELETE" {
+		t.Errorf("method = %v,期望 DELETE", got["method"])
+	}
+}
+
+func TestCustomHeaderPassthrough(t *testing.T) {
+	backend := echoBackend()
+	defer backend.Close()
+	proxy := startProxy(t)
+	defer proxy.Close()
+
+	// 关键:验证 Authorization 等自定义头原样透传,代理不追加额外头
+	req, _ := http.NewRequest("GET",
+		proxyURL(proxy.URL, backend.URL+"/auth"), nil)
+	req.Header.Set("Authorization", "Bearer my-secret-token")
+	req.Header.Set("X-Custom", "自定义值")
+	resp, err := noCompressClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	var got map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&got)
+	hdrs, _ := got["headers"].(map[string]interface{})
+
+	if hdrs["Authorization"] != "Bearer my-secret-token" {
+		t.Errorf("Authorization 未透传: %v", hdrs["Authorization"])
+	}
+	if hdrs["X-Custom"] != "自定义值" {
+		t.Errorf("X-Custom 未透传: %v", hdrs["X-Custom"])
+	}
+	// 代理不应追加 Accept-Encoding: gzip
+	if ae, ok := hdrs["Accept-Encoding"]; ok && strings.Contains(ae.(string), "gzip") {
+		t.Errorf("代理追加了 Accept-Encoding: gzip,破坏透传: %v", ae)
+	}
+}
+
+func TestResponseHeaderPassthrough(t *testing.T) {
+	backend := echoBackend()
+	defer backend.Close()
+	proxy := startProxy(t)
+	defer proxy.Close()
+
+	resp, err := noCompressClient.Get(proxyURL(proxy.URL, backend.URL+"/"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.Header.Get("X-Echo-Marker") != "from-backend" {
+		t.Errorf("响应头 X-Echo-Marker 未透传: %q",
+			resp.Header.Get("X-Echo-Marker"))
+	}
+}
+
+func TestSSE(t *testing.T) {
+	backend := echoBackend()
+	defer backend.Close()
+	proxy := startProxy(t)
+	defer proxy.Close()
+
+	resp, err := noCompressClient.Get(proxyURL(proxy.URL, backend.URL+"/sse"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if !strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
+		t.Errorf("SSE Content-Type 未透传: %q", resp.Header.Get("Content-Type"))
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	var chunks []string
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "data: ") {
+			chunks = append(chunks, line)
+		}
+	}
+	if len(chunks) != 3 {
+		t.Fatalf("收到 %d 个 SSE chunk,期望 3", len(chunks))
+	}
+	if chunks[0] != "data: chunk-0" || chunks[2] != "data: chunk-2" {
+		t.Errorf("SSE 内容不对: %v", chunks)
+	}
+}
+
+func TestWebSocket(t *testing.T) {
+	wsBackend := wsEchoBackend()
+	defer wsBackend.Close()
+	proxy := startProxy(t)
+	defer proxy.Close()
+
+	// 代理监听是 http://,WS 客户端要用 ws:// 协议访问代理。
+	// 目标后端 URL(ws://...)拼在代理路径后。
+	// proxy.URL 形如 http://127.0.0.1:port -> 改成 ws://127.0.0.1:port
+	proxyWS := "ws:" + strings.TrimPrefix(proxy.URL, "http:")
+	wsTarget := "ws:" + strings.TrimPrefix(wsBackend.URL, "http:")
+	proxyTarget := proxyWS + "/" + wsTarget
+
+	// 用 golang.org/x/net/websocket 客户端
+	cfg, err := websocket.NewConfig(proxyTarget, "http://localhost/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := websocket.DialConfig(cfg)
+	if err != nil {
+		t.Fatalf("WS 握手失败: %v", err)
+	}
+	defer conn.Close()
+
+	messages := []string{"WS-测试-1", "second", "中文消息✓"}
+	for _, msg := range messages {
+		if _, err := conn.Write([]byte(msg)); err != nil {
+			t.Fatalf("发送失败: %v", err)
+		}
+		buf := make([]byte, 256)
+		n, err := conn.Read(buf)
+		if err != nil {
+			t.Fatalf("接收失败: %v", err)
+		}
+		got := string(buf[:n])
+		if got != msg {
+			t.Errorf("回显不匹配: got %q,期望 %q", got, msg)
+		}
+	}
+}
+
+func TestEmptyPath(t *testing.T) {
+	proxy := startProxy(t)
+	defer proxy.Close()
+
+	resp, err := http.Get(proxy.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 400 {
+		t.Errorf("空路径状态码 = %d,期望 400", resp.StatusCode)
+	}
+}
+
+// 额外:大体积二进制透传校验,确保 body 不被损坏。
+func TestBinaryBody(t *testing.T) {
+	backend := echoBackend()
+	defer backend.Close()
+	proxy := startProxy(t)
+	defer proxy.Close()
+
+	// 生成 256KB 随机二进制(含各种字节值,含 0x00)
+	payload := make([]byte, 256*1024)
+	rand.Read(payload)
+	want := sha256.Sum256(payload)
+
+	resp, err := noCompressClient.Post(
+		proxyURL(proxy.URL, backend.URL+"/bin"),
+		"application/octet-stream",
+		bytes.NewReader(payload),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	got, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(payload) {
+		t.Fatalf("二进制 body 长度变化: got %d,期望 %d", len(got), len(payload))
+	}
+	gotHash := sha256.Sum256(got)
+	if gotHash != want {
+		t.Errorf("二进制 body 哈希不匹配,内容被损坏")
+	}
+}
+
+// 防止编译时未使用的 import 报错(部分场景下 url/time/base64 可能未被引用)
+var _ = time.Second
+var _ = base64.StdEncoding
