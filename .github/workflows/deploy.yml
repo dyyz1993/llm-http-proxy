@@ -31,9 +31,7 @@ jobs:
           JD_USER: ${{ secrets.JD_USER }}
         run: |
           echo "=== 测试 SSH 连接到 jd ==="
-          ssh -o ConnectTimeout=25 -o StrictHostKeyChecking=accept-new \
-            -i ~/.ssh/jd_deploy_key "$JD_USER@$HOST" \
-            'echo "CI connected"; hostname; /usr/local/bin/llm-http-proxy -version'
+          ssh -o ConnectTimeout=25 -o StrictHostKeyChecking=no -i ~/.ssh/jd_deploy_key "${JD_USER}@${HOST}" "echo CI-connected; hostname; /usr/local/bin/llm-http-proxy -version"
 
       - name: Get latest release tag
         env:
