@@ -22,8 +22,14 @@ jobs:
           mkdir -p ~/.ssh
           printf '%s\n' "$SSH_KEY" > ~/.ssh/jd_deploy_key
           chmod 600 ~/.ssh/jd_deploy_key
-          # host key 容错收集(keyscan 对某些 key 类型可能返回非 0)
+          # 诊断:验证私钥完整(打印指纹,不泄露内容)
+          echo "私钥首行: $(head -1 ~/.ssh/jd_deploy_key)"
+          echo "私钥末行: $(tail -1 ~/.ssh/jd_deploy_key)"
+          ssh-keygen -lf ~/.ssh/jd_deploy_key
+          # host key 容错收集
           ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
+          # ssh 版本(排查 unknown option)
+          ssh -V
 
       - name: Test connectivity
         env:
@@ -31,7 +37,8 @@ jobs:
           JD_USER: ${{ secrets.JD_USER }}
         run: |
           echo "=== 测试 SSH 连接到 jd ==="
-          ssh -o ConnectTimeout=25 -o StrictHostKeyChecking=no -i ~/.ssh/jd_deploy_key "${JD_USER}@${HOST}" "echo CI-connected; hostname; /usr/local/bin/llm-http-proxy -version"
+          set -x
+          ssh -o ConnectTimeout=25 -o StrictHostKeyChecking=no -i ~/.ssh/jd_deploy_key "${JD_USER}@${HOST}" "echo CI-connected"
 
       - name: Get latest release tag
         env:
