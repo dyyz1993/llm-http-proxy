@@ -19,6 +19,8 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -26,11 +28,12 @@ import (
 
 // keyEntry 是单个 (IP, 掩码key) 的累计统计。
 type keyEntry struct {
-	Count      int64     `json:"count"`
-	FirstSeen  time.Time `json:"first_seen"`           // 首次访问时间(创建时设,不变)
-	LastSeen   time.Time `json:"last_seen"`            // 最后访问时间
-	LastStatus int       `json:"last_status"`
-	LastTarget string    `json:"last_target"`          // 只记 host,不记 path
+	Count        int64           `json:"count"`
+	FirstSeen    time.Time       `json:"first_seen"`           // 首次访问时间(创建时设,不变)
+	LastSeen     time.Time       `json:"last_seen"`            // 最后访问时间
+	LastStatus   int             `json:"last_status"`
+	LastTarget   string          `json:"last_target"`          // 只记 host,不记 path
+	StatusCounts map[int]int64   `json:"status_counts"`        // 各状态码累计计数
 }
 
 // ipStats 是某个 IP 下的若干 key 的统计。
@@ -40,8 +43,15 @@ type ipStats struct {
 
 // statsCollector 是全局统计收集器,线程安全。
 type statsCollector struct {
-	mu   sync.Mutex
-	data map[string]*ipStats // key = IP
+	mu      sync.Mutex
+	data    map[string]*ipStats // key = IP
+	hours   [24]hourBucket      // 最近 24 小时调用量(环形缓冲)
+}
+
+// hourBucket 是一个小时桶:起始时间 + 调用次数。
+type hourBucket struct {
+	Hour  time.Time // 该桶代表的小时(截断到整点)
+	Count int64
 }
 
 func newStatsCollector() *statsCollector {
@@ -61,13 +71,30 @@ func (s *statsCollector) record(ip, maskedKey, targetHost string, status int) {
 	ke, ok := is.Keys[maskedKey]
 	if !ok {
 		now := time.Now()
-		ke = &keyEntry{FirstSeen: now} // 首次访问,记录起点
+		ke = &keyEntry{FirstSeen: now, StatusCounts: make(map[int]int64)} // 首次访问
 		is.Keys[maskedKey] = ke
 	}
 	ke.Count++
 	ke.LastSeen = time.Now()
 	ke.LastStatus = status
 	ke.LastTarget = targetHost
+	ke.StatusCounts[status]++
+
+	// 时间桶:当前小时 +1
+	s.bumpHour(time.Now())
+}
+
+// bumpHour 在当前小时桶上 +1,必要时滚动新桶(环形)。
+func (s *statsCollector) bumpHour(now time.Time) {
+	curHour := now.Truncate(time.Hour)
+	slot := int(curHour.Unix() / 3600 % 24)
+	b := &s.hours[slot]
+	if !b.Hour.Equal(curHour) {
+		// 新的小时,重置桶
+		b.Hour = curHour
+		b.Count = 0
+	}
+	b.Count++
 }
 
 // snapshot 返回当前统计的快照(深拷贝,避免持锁渲染 JSON)。
@@ -79,6 +106,13 @@ func (s *statsCollector) snapshot() map[string]*ipStats {
 		is2 := &ipStats{Keys: make(map[string]*keyEntry, len(is.Keys))}
 		for k, ke := range is.Keys {
 			ke2 := *ke
+			// 深拷贝 StatusCounts
+			if ke.StatusCounts != nil {
+				ke2.StatusCounts = make(map[int]int64, len(ke.StatusCounts))
+				for k, v := range ke.StatusCounts {
+					ke2.StatusCounts[k] = v
+				}
+			}
 			is2.Keys[k] = &ke2
 		}
 		out[ip] = is2
@@ -86,14 +120,43 @@ func (s *statsCollector) snapshot() map[string]*ipStats {
 	return out
 }
 
+// hoursSnapshot 返回最近 N 小时的调用量(从最早到最近),跳过空桶。
+func (s *statsCollector) hoursSnapshot(n int) []hourEntry {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	curHour := now.Truncate(time.Hour)
+
+	var out []hourEntry
+	for i := n - 1; i >= 0; i-- {
+		h := curHour.Add(-time.Duration(i) * time.Hour)
+		slot := int(h.Unix() / 3600 % 24)
+		b := s.hours[slot]
+		// 只算 Hour 匹配的桶(不匹配说明是更早的数据,应视为空)
+		count := int64(0)
+		if b.Hour.Equal(h) {
+			count = b.Count
+		}
+		out = append(out, hourEntry{Hour: h.Format("15:04"), Count: count})
+	}
+	return out
+}
+
+// hourEntry 是时间窗口输出的单条记录。
+type hourEntry struct {
+	Hour  string `json:"hour"`
+	Count int64  `json:"count"`
+}
+
 // statsHandler 处理 GET /__stats,返回统计汇总。
 //
 // 查询参数:
 //
-//	by=ip    (默认)按来源 IP 聚合,看每个 IP 用了哪些 key
-//	by=key   按 key 聚合,看每个 key 触发了哪些 IP(反向查询)
-//	format=json (默认)返回 JSON
-//	format=table 返回 ASCII 表格(人读友好)
+//	by=ip       (默认)按来源 IP 聚合
+//	by=key      按 key 聚合(反向)
+//	by=window   返回最近 N 小时的调用量时间序列
+//	format=json (默认)/ format=table ASCII 表格
+//	top=N       只返回调用最多的 N 个(配合 by=ip/key)
 func statsHandler(s *statsCollector) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -102,15 +165,44 @@ func statsHandler(s *statsCollector) http.HandlerFunc {
 		}
 
 		by := r.URL.Query().Get("by")
-		if by != "key" {
+		if by != "key" && by != "window" {
 			by = "ip" // 默认
 		}
 		format := r.URL.Query().Get("format")
 		if format != "table" {
 			format = "json" // 默认
 		}
+		top := 0
+		if t := r.URL.Query().Get("top"); t != "" {
+			if v, err := strconv.Atoi(t); err == nil && v > 0 {
+				top = v
+			}
+		}
+
+		// 时间窗口视图,单独处理
+		if by == "window" {
+			n := 24
+			if w2 := r.URL.Query().Get("hours"); w2 != "" {
+				if v, err := strconv.Atoi(w2); err == nil && v > 0 && v <= 24 {
+					n = v
+				}
+			}
+			if format == "table" {
+				w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+				renderWindowTable(w, s.hoursSnapshot(n))
+				return
+			}
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			json.NewEncoder(w).Encode(struct {
+				Window []hourEntry `json:"window"`
+			}{s.hoursSnapshot(n)})
+			return
+		}
 
 		snap := s.snapshot()
+		if top > 0 {
+			snap = topN(snap, by, top)
+		}
 
 		if format == "table" {
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -120,12 +212,37 @@ func statsHandler(s *statsCollector) http.HandlerFunc {
 
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		if by == "key" {
-			// 反向视图:以 key 为顶层
 			json.NewEncoder(w).Encode(statsByKey(snap))
 		} else {
 			json.NewEncoder(w).Encode(statsByIP(snap))
 		}
 	}
+}
+
+// topN 返回调用量最高的前 N 个 IP(及其所有 key)。
+func topN(snap map[string]*ipStats, by string, n int) map[string]*ipStats {
+	type ipCount struct {
+		ip    string
+		total int64
+	}
+	var list []ipCount
+	for ip, is := range snap {
+		var t int64
+		for _, ke := range is.Keys {
+			t += ke.Count
+		}
+		list = append(list, ipCount{ip, t})
+	}
+	// 降序
+	sort.Slice(list, func(i, j int) bool { return list[i].total > list[j].total })
+	if n > len(list) {
+		n = len(list)
+	}
+	out := make(map[string]*ipStats, n)
+	for i := 0; i < n; i++ {
+		out[list[i].ip] = snap[list[i].ip]
+	}
+	return out
 }
 
 // rowView 是表格/列表里的一行:一个 (维度值, 对端, 统计) 三元组。
@@ -141,22 +258,25 @@ type rowView struct {
 
 // statsByIP 生成按 IP 聚合的 JSON 视图,带去重计数。
 type ipAggView struct {
-	Keys       map[string]*keyEntry `json:"keys"`
-	DistinctKeys int                `json:"distinct_keys"` // 该 IP 用了多少个不同 key
-	TotalCount  int64              `json:"total_count"`    // 该 IP 总调用数
+	Keys         map[string]*keyEntry `json:"keys"`
+	DistinctKeys int                  `json:"distinct_keys"`
+	TotalCount   int64                `json:"total_count"`
+	SuccessRate  float64              `json:"success_rate"` // 2xx 占比,0-1
 }
 
 func statsByIP(snap map[string]*ipStats) map[string]*ipAggView {
 	out := make(map[string]*ipAggView, len(snap))
 	for ip, is := range snap {
-		var total int64
+		var total, ok2xx int64
 		for _, ke := range is.Keys {
 			total += ke.Count
+			ok2xx += count2xx(ke)
 		}
 		out[ip] = &ipAggView{
 			Keys:         is.Keys,
 			DistinctKeys: len(is.Keys),
 			TotalCount:   total,
+			SuccessRate:  ratio(ok2xx, total),
 		}
 	}
 	return out
@@ -164,9 +284,10 @@ func statsByIP(snap map[string]*ipStats) map[string]*ipAggView {
 
 // keyAggView 是反向视图:某个 key 被哪些 IP 使用。
 type keyAggView struct {
-	IPs        map[string]*keyEntry `json:"ips"`
-	DistinctIPs int                 `json:"distinct_ips"` // 该 key 触发了多少个不同 IP
-	TotalCount  int64               `json:"total_count"`
+	IPs         map[string]*keyEntry `json:"ips"`
+	DistinctIPs int                  `json:"distinct_ips"`
+	TotalCount  int64                `json:"total_count"`
+	SuccessRate float64              `json:"success_rate"`
 }
 
 func statsByKey(snap map[string]*ipStats) map[string]*keyAggView {
@@ -185,8 +306,32 @@ func statsByKey(snap map[string]*ipStats) map[string]*keyAggView {
 	}
 	for _, kv := range out {
 		kv.DistinctIPs = len(kv.IPs)
+		var ok2xx int64
+		for _, ke := range kv.IPs {
+			ok2xx += count2xx(ke)
+		}
+		kv.SuccessRate = ratio(ok2xx, kv.TotalCount)
 	}
 	return out
+}
+
+// count2xx 统计一个 keyEntry 里 2xx 状态码的次数。
+func count2xx(ke *keyEntry) int64 {
+	var n int64
+	for code, c := range ke.StatusCounts {
+		if code >= 200 && code < 300 {
+			n += c
+		}
+	}
+	return n
+}
+
+// ratio 计算 a/b,避免除零。
+func ratio(a, b int64) float64 {
+	if b == 0 {
+		return 0
+	}
+	return float64(a) / float64(b)
 }
 
 // renderStatsTable 渲染 ASCII 表格。
@@ -248,6 +393,31 @@ func renderStatsTable(w io.Writer, snap map[string]*ipStats, by string) {
 		fmt.Fprintf(w, "\n去重统计(按 IP):%d 个不同 IP,共 %d 个不同 key,总计调用 %d 次\n",
 			len(snap), distinctKeyCount(snap), totalCount(snap))
 	}
+}
+
+// renderWindowTable 渲染时间窗口表格(最近 N 小时调用量)。
+func renderWindowTable(w io.Writer, hours []hourEntry) {
+	fmt.Fprintf(w, "%-12s %8s %s\n", "HOUR", "COUNT", "BAR")
+	fmt.Fprintf(w, "%s\n", strings.Repeat("-", 50))
+	// 找最大值用于归一化柱状图
+	var maxC int64
+	for _, h := range hours {
+		if h.Count > maxC {
+			maxC = h.Count
+		}
+	}
+	var total int64
+	for _, h := range hours {
+		var bar string
+		if maxC > 0 {
+			n := int(h.Count * 30 / maxC)
+			bar = strings.Repeat("█", n)
+		}
+		fmt.Fprintf(w, "%-12s %8d %s\n", h.Hour, h.Count, bar)
+		total += h.Count
+	}
+	fmt.Fprintf(w, "%s\n", strings.Repeat("-", 50))
+	fmt.Fprintf(w, "总计 %d 小时,共 %d 次调用\n", len(hours), total)
 }
 
 // trunc 把字符串截断到 maxLen,超出加省略号(用于表格对齐)。

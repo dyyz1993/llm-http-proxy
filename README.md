@@ -144,19 +144,33 @@ ReadWritePaths=/var/lib/llm-http-proxy
 
 ## 统计端点
 
-代理自带请求来源统计(只统计,不泄露隐私)。支持**双向查询**和**表格视图**:
+代理自带请求来源统计(只统计,不泄露隐私)。支持**多维查询**和**表格视图**:
 
 ```bash
-# 默认:按 IP 聚合(看每个 IP 用了哪些 key)
+# 按 IP 聚合(默认)
 curl http://localhost:8080/__stats
 
-# 反向:按 key 聚合(看每个 key 触发了哪些 IP)
+# 按 key 聚合(反向:看 key 触发了哪些 IP)
 curl "http://localhost:8080/__stats?by=key"
 
-# ASCII 表格视图(人读友好)
+# 时间窗口:最近 N 小时调用量(带柱状图)
+curl "http://localhost:8080/__stats?by=window&hours=12"
+curl "http://localhost:8080/__stats?by=window&format=table"
+
+# Top N:只看调用最多的 N 个 IP
+curl "http://localhost:8080/__stats?top=5"
+
+# 表格视图(任何维度都支持)
 curl "http://localhost:8080/__stats?format=table"
 curl "http://localhost:8080/__stats?by=key&format=table"
 ```
+
+每条统计含:
+- `count` 累计调用数
+- `first_seen` / `last_seen` 首次/最后访问时间
+- `status_counts` 各状态码计数(如 `{"200":42,"500":3}`)
+- `success_rate` 成功率(2xx 占比,0-1)
+- `distinct_keys` / `distinct_ips` 去重计数
 
 **by=ip**(默认)—— 每个 IP 用了多少个不同 key:
 

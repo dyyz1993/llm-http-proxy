@@ -685,6 +685,78 @@ func TestStatsLoadMissingFile(t *testing.T) {
 	}
 }
 
+// TestStatsStatusCounts 验证状态码计数 + 成功率派生。
+func TestStatsStatusCounts(t *testing.T) {
+	stats := newStatsCollector()
+	// 3 次 200,1 次 500
+	stats.record("10.0.0.1", "sk-****0001", "a.com", 200)
+	stats.record("10.0.0.1", "sk-****0001", "a.com", 200)
+	stats.record("10.0.0.1", "sk-****0001", "a.com", 200)
+	stats.record("10.0.0.1", "sk-****0001", "a.com", 500)
+
+	snap := stats.snapshot()
+	ke := snap["10.0.0.1"].Keys["sk-****0001"]
+	if ke.Count != 4 {
+		t.Errorf("count = %d, 期望 4", ke.Count)
+	}
+	if ke.StatusCounts[200] != 3 {
+		t.Errorf("status_counts[200] = %d, 期望 3", ke.StatusCounts[200])
+	}
+	if ke.StatusCounts[500] != 1 {
+		t.Errorf("status_counts[500] = %d, 期望 1", ke.StatusCounts[500])
+	}
+
+	// 成功率 = 2xx/总数 = 3/4 = 0.75
+	byIP := statsByIP(snap)
+	if r := byIP["10.0.0.1"].SuccessRate; r < 0.74 || r > 0.76 {
+		t.Errorf("success_rate = %v, 期望 ~0.75", r)
+	}
+}
+
+// TestStatsWindow 验证时间窗口:record 后 hoursSnapshot 应有计数。
+func TestStatsWindow(t *testing.T) {
+	stats := newStatsCollector()
+	for i := 0; i < 5; i++ {
+		stats.record("10.0.0.1", "sk-****0001", "a.com", 200)
+	}
+	hours := stats.hoursSnapshot(3)
+	if len(hours) != 3 {
+		t.Fatalf("hours 长度 = %d, 期望 3", len(hours))
+	}
+	// 最后一桶(当前小时)应有 5 次
+	last := hours[len(hours)-1]
+	if last.Count != 5 {
+		t.Errorf("当前小时 count = %d, 期望 5", last.Count)
+	}
+}
+
+// TestStatsTopN 验证 top=N 只返回调用最多的 N 个。
+func TestStatsTopN(t *testing.T) {
+	stats := newStatsCollector()
+	// IP-A: 10 次, IP-B: 3 次, IP-C: 1 次
+	for i := 0; i < 10; i++ {
+		stats.record("10.0.0.1", "sk-****0001", "a.com", 200)
+	}
+	for i := 0; i < 3; i++ {
+		stats.record("10.0.0.2", "sk-****0002", "a.com", 200)
+	}
+	stats.record("10.0.0.3", "sk-****0003", "a.com", 200)
+
+	snap := stats.snapshot()
+	top2 := topN(snap, "ip", 2)
+	if len(top2) != 2 {
+		t.Fatalf("top2 长度 = %d, 期望 2", len(top2))
+	}
+	// 应包含调用最多的 10.0.0.1
+	if _, ok := top2["10.0.0.1"]; !ok {
+		t.Errorf("top2 应包含 10.0.0.1")
+	}
+	// 不应包含最少的 10.0.0.3
+	if _, ok := top2["10.0.0.3"]; ok {
+		t.Errorf("top2 不应包含 10.0.0.3(调用最少)")
+	}
+}
+
 // TestStatsByKeyView 验证 by=key 反向视图:以 key 为顶层聚合 IP。
 func TestStatsByKeyView(t *testing.T) {
 	backend := echoBackend()
