@@ -12,7 +12,7 @@ COPY . .
 
 # 纯静态编译(CGO 关闭),注入版本号和编译时间,产出 /out/llm-http-proxy
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath \
-    -ldflags="-s -w -X main.version=docker -X main.buildTime=$(TZ=Asia/Shanghai date +%Y-%m-%dT%H:%M:%S%z)" \
+    -ldflags="-s -w -X main.version=docker -X main.buildTime=$(TZ=Asia/Shanghai date +%Y-%m-%dT%H:%M:%S%:z)" \
     -o /out/llm-http-proxy .
 
 # ---- 运行阶段 ----
