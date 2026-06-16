@@ -25,10 +25,11 @@ import (
 
 // keyEntry 是单个 (IP, 掩码key) 的累计统计。
 type keyEntry struct {
-	Count       int64     `json:"count"`
-	LastSeen    time.Time `json:"last_seen"`
-	LastStatus  int       `json:"last_status"`
-	LastTarget  string    `json:"last_target"` // 只记 host,不记 path
+	Count      int64     `json:"count"`
+	FirstSeen  time.Time `json:"first_seen"`           // 首次访问时间(创建时设,不变)
+	LastSeen   time.Time `json:"last_seen"`            // 最后访问时间
+	LastStatus int       `json:"last_status"`
+	LastTarget string    `json:"last_target"`          // 只记 host,不记 path
 }
 
 // ipStats 是某个 IP 下的若干 key 的统计。
@@ -58,7 +59,8 @@ func (s *statsCollector) record(ip, maskedKey, targetHost string, status int) {
 	}
 	ke, ok := is.Keys[maskedKey]
 	if !ok {
-		ke = &keyEntry{}
+		now := time.Now()
+		ke = &keyEntry{FirstSeen: now} // 首次访问,记录起点
 		is.Keys[maskedKey] = ke
 	}
 	ke.Count++
@@ -127,12 +129,13 @@ func statsHandler(s *statsCollector) http.HandlerFunc {
 
 // rowView 是表格/列表里的一行:一个 (维度值, 对端, 统计) 三元组。
 type rowView struct {
-	Primary string // 维度值(IP 或 key)
-	Peer    string // 对端(key 或 IP)
-	Count   int64
-	LastSeen    time.Time
-	LastStatus  int
-	LastTarget  string
+	Primary    string // 维度值(IP 或 key)
+	Peer       string // 对端(key 或 IP)
+	Count      int64
+	FirstSeen  time.Time
+	LastSeen   time.Time
+	LastStatus int
+	LastTarget string
 }
 
 // statsByIP 生成按 IP 聚合的 JSON 视图,带去重计数。
@@ -193,7 +196,7 @@ func renderStatsTable(w io.Writer, snap map[string]*ipStats, by string) {
 			for k, ke := range is.Keys {
 				rows = append(rows, rowView{
 					Primary: k, Peer: ip,
-					Count: ke.Count, LastSeen: ke.LastSeen,
+					Count: ke.Count, FirstSeen: ke.FirstSeen, LastSeen: ke.LastSeen,
 					LastStatus: ke.LastStatus, LastTarget: ke.LastTarget,
 				})
 			}
@@ -203,7 +206,7 @@ func renderStatsTable(w io.Writer, snap map[string]*ipStats, by string) {
 			for k, ke := range is.Keys {
 				rows = append(rows, rowView{
 					Primary: ip, Peer: k,
-					Count: ke.Count, LastSeen: ke.LastSeen,
+					Count: ke.Count, FirstSeen: ke.FirstSeen, LastSeen: ke.LastSeen,
 					LastStatus: ke.LastStatus, LastTarget: ke.LastTarget,
 				})
 			}
@@ -221,16 +224,17 @@ func renderStatsTable(w io.Writer, snap map[string]*ipStats, by string) {
 		primaryCol, peerCol = "IP", "KEY"
 		primaryW, peerW = 18, 48
 	}
-	totalW := primaryW + peerW + 6 + 6 + 26 + 12
+	totalW := primaryW + peerW + 6 + 6 + 19 + 19 + 12
 
-	fmt.Fprintf(w, "%-*s %-*s %6s %6s %-26s %s\n",
-		primaryW, primaryCol, peerW, peerCol, "COUNT", "STATUS", "LAST_SEEN", "TARGET")
+	fmt.Fprintf(w, "%-*s %-*s %6s %6s %-19s %-19s %s\n",
+		primaryW, primaryCol, peerW, peerCol, "COUNT", "STATUS", "FIRST_SEEN", "LAST_SEEN", "TARGET")
 	fmt.Fprintf(w, "%s\n", strings.Repeat("-", totalW))
 	for _, r := range rows {
-		ts := r.LastSeen.Format("2006-01-02 15:04:05")
-		fmt.Fprintf(w, "%-*s %-*s %6d %6d %-26s %s\n",
+		fs := r.FirstSeen.Format("2006-01-02 15:04:05")
+		ls := r.LastSeen.Format("2006-01-02 15:04:05")
+		fmt.Fprintf(w, "%-*s %-*s %6d %6d %-19s %-19s %s\n",
 			primaryW, trunc(r.Primary, primaryW), peerW, trunc(r.Peer, peerW),
-			r.Count, r.LastStatus, ts, r.LastTarget)
+			r.Count, r.LastStatus, fs, ls, r.LastTarget)
 	}
 	fmt.Fprintf(w, "%s\n", strings.Repeat("-", totalW))
 

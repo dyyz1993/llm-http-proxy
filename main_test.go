@@ -604,6 +604,36 @@ func TestStatsNoPlaintextKey(t *testing.T) {
 	}
 }
 
+// TestStatsFirstSeen 验证 first_seen 字段:首次访问时记录,后续不变,且早于 last_seen。
+func TestStatsFirstSeen(t *testing.T) {
+	stats := newStatsCollector()
+
+	// 第一次记录
+	stats.record("10.0.0.1", "sk-****1111", "host.com", 200)
+	snap1 := stats.snapshot()
+	ke1 := snap1["10.0.0.1"].Keys["sk-****1111"]
+	if ke1.FirstSeen.IsZero() {
+		t.Fatal("first_seen 未记录")
+	}
+	first := ke1.FirstSeen
+
+	// 等待一小段,再次记录,first_seen 不应变
+	time.Sleep(20 * time.Millisecond)
+	stats.record("10.0.0.1", "sk-****1111", "host.com", 200)
+	snap2 := stats.snapshot()
+	ke2 := snap2["10.0.0.1"].Keys["sk-****1111"]
+
+	if !ke2.FirstSeen.Equal(first) {
+		t.Errorf("first_seen 变了: 第一次 %v, 第二次 %v", first, ke2.FirstSeen)
+	}
+	if !ke2.LastSeen.After(ke2.FirstSeen) {
+		t.Errorf("last_seen(%v) 不晚于 first_seen(%v)", ke2.LastSeen, ke2.FirstSeen)
+	}
+	if ke2.Count != 2 {
+		t.Errorf("count = %d, 期望 2", ke2.Count)
+	}
+}
+
 // TestStatsByKeyView 验证 by=key 反向视图:以 key 为顶层聚合 IP。
 func TestStatsByKeyView(t *testing.T) {
 	backend := echoBackend()
