@@ -1,0 +1,50 @@
+# llm-http-proxy SSH 隔离盒子 - jkj 部署
+#
+# 安全要点:
+#   - privileged: false (非特权)
+#   - 无 docker.sock 挂载
+#   - 独立网络 llm-proxy-net (隔离其他容器)
+#   - 只挂 logs 持久化统计
+#
+# 用法:
+#   1. 复制 .env.ssh.example 为 .env.ssh,改密码
+#   2. docker compose -f docker-compose.ssh.yml --env-file .env.ssh up -d
+#
+# 访问:
+#   SSH(访客只读): ssh guest@<host> -p 2202  (密码见 .env.ssh)
+#   SSH(管理):     ssh deploy@<host> -p 2202
+#   代理:          http://<host>:9093/<目标URL>
+
+services:
+  llm-proxy-box:
+    image: ghcr.io/dyyz1993/llm-http-proxy:ssh
+    build:
+      context: .
+      dockerfile: Dockerfile.ssh
+    container_name: llm-proxy-box
+    restart: unless-stopped
+    privileged: false        # ← 非特权!关键安全项
+    ports:
+      - "9093:8080"          # 代理服务
+      - "2202:22"            # SSH(访客 + 管理)
+    environment:
+      - GUEST_PASSWORD=${GUEST_PASSWORD:-guest}
+      - DEPLOY_PASSWORD=${DEPLOY_PASSWORD:-changeme}
+      - DEPLOY_SSH_KEY=${DEPLOY_SSH_KEY:-}
+    volumes:
+      # 只挂持久化统计和日志,不挂宿主机敏感路径
+      - llm-proxy-data:/data
+      - llm-proxy-logs:/public/logs
+    networks:
+      - llm-proxy-net
+
+networks:
+  llm-proxy-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.99.0.0/24   # 独立子网,跟其他容器隔离
+
+volumes:
+  llm-proxy-data:
+  llm-proxy-logs:

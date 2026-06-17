@@ -67,10 +67,17 @@ jobs:
           name: binary-${{ matrix.goos }}-${{ matrix.goarch }}
           path: out/*.tar.gz
 
-  # --- Job 2: 多架构 Docker 镜像 -> GHCR ---
+  # --- Job 2: 多架构 Docker 镜像 -> GHCR(两个变体) ---
   docker:
-    name: Docker image -> GHCR
+    name: Docker ${{ matrix.variant.suffix }}
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        variant:
+          - dockerfile: Dockerfile
+            suffix: ""
+          - dockerfile: Dockerfile.ssh
+            suffix: "-ssh"
     steps:
       - uses: actions/checkout@v6
 
@@ -92,17 +99,16 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository }}
-          # tag=v1.0.0 -> 镜像 tag: 1.0.0, latest
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern={{version}}${{ matrix.variant.suffix }}
+            type=semver,pattern={{major}}.{{minor}}${{ matrix.variant.suffix }}
+            type=raw,value=latest${{ matrix.variant.suffix }},enable={{is_default_branch}}
 
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
           context: .
+          file: ${{ matrix.variant.dockerfile }}
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}

@@ -1,0 +1,101 @@
+# Dockerfile.ssh — llm-http-proxy 带 SSH 访问的隔离盒子
+#
+# 两个用途:
+#   1. 对外 SSH(只读访客 guest + 管理 deploy)
+#   2. llm-http-proxy 代理服务(端口 8080)
+#
+# 安全设计:
+#   - 非特权容器(配合 docker-compose 的 privileged: false)
+#   - guest 用户: ForceCommand internal-sftp + chroot /public,拿不到 shell
+#   - deploy 用户: bash,但无 sudo(如需重启服务用 supervisorctl)
+#   - 不挂载 docker.sock / 宿主机路径(除 logs 持久化)
+#
+# 用法(构建时注入版本):
+#   docker build -f Dockerfile.ssh -t llm-http-proxy:ssh \
+#     --build-arg VERSION=$(git describe --tags --always --dirty) \
+#     --build-arg BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ) .
+
+FROM golang:1.25-alpine AS builder
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+# 多阶段:先编译 Go 二进制
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath \
+    -ldflags="-s -w -X main.version=ssh-box -X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    -o /out/llm-http-proxy .
+
+# --- 运行阶段:Debian + sshd ---
+FROM debian:bookworm-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=Asia/Shanghai
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    openssh-server \
+    supervisor \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime \
+    && echo $TZ > /etc/timezone
+
+# --- SSH 服务配置 ---
+RUN mkdir -p /run/sshd \
+    # 允许密码登录(公开共享密码场景);如只走 key 可设 no
+    && sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config \
+    && sed -i 's/^#\?PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config \
+    # 禁止 root SSH(走普通用户)
+    && sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
+
+# --- 两个用户:guest(只读访客) + deploy(管理) ---
+# guest: /usr/sbin/nologin 防止 shell 登录,实际靠 Match 块强制 sftp
+# deploy: /bin/bash 可登录管理
+RUN useradd -m -d /home/guest -s /usr/sbin/nologin guest \
+    && useradd -m -d /home/deploy -s /bin/bash deploy
+
+# --- guest 的 sftp-only 牢笼(chroot 到 /public) ---
+# chroot 要求:chroot 目录及其所有父目录属主是 root,不可被其他用户写
+RUN mkdir -p /public/source /public/binary /public/deploy /public/logs \
+    && chown -R root:root /public \
+    && chmod 755 /public \
+    # logs 目录让 guest 可读(放运行日志供查看)
+    && chmod 755 /public/logs /public/source /public/binary /public/deploy
+
+# 在 sshd_config 末尾追加 Match 块:guest 只能 sftp + chroot
+RUN printf '\n# --- guest: sftp-only, chroot ---\n\
+Match User guest\n\
+    ChrootDirectory /public\n\
+    ForceCommand internal-sftp\n\
+    AllowTcpForwarding no\n\
+    X11Forwarding no\n\
+    PermitTunnel no\n\
+    AllowAgentForwarding no\n\
+    PermitTTY no\n' >> /etc/ssh/sshd_config
+
+# --- 拷贝 Go 二进制和源码(给访客看) ---
+COPY --from=builder /out/llm-http-proxy /usr/local/bin/llm-http-proxy
+RUN chmod 755 /usr/local/bin/llm-http-proxy
+
+# 源码拷到 /public/source 供访客只读浏览
+COPY . /public/source/
+RUN rm -rf /public/source/.git && chown -R root:root /public/source && chmod -R a-w /public/source
+
+# 二进制也放一份到 /public/binary(含版本说明)
+COPY --from=builder /out/llm-http-proxy /public/binary/llm-http-proxy
+RUN chmod 755 /public/binary/llm-http-proxy
+
+# --- supervisor 配置(sshd + 代理) ---
+COPY supervisord-ssh.conf /etc/supervisor/supervisord.conf
+
+# --- entrypoint(初始化密码/key) ---
+COPY entrypoint-ssh.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+# 持久化目录(挂载用)
+RUN mkdir -p /data
+
+EXPOSE 22 8080
+
+ENTRYPOINT ["/entrypoint.sh"]
+CMD ["/usr/bin/supervisord", "-n"]
