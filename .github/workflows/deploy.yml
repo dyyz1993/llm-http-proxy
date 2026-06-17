@@ -21,10 +21,11 @@ jobs:
       matrix:
         include:
           # --- 服务器 1: jd ---
-          # host/user 在 secret 里(JD_HOST/JD_USER),不写进仓库
+          # host/user 留在 workflow(公网 VPS 地址不敏感,知道也连不上)
+          # 真正敏感的 SSH key 在 secret(JD_SSH_KEY)
           - name: jd
-            host_secret: JD_HOST
-            user_secret: JD_USER
+            host: 36.151.142.174
+            user: root
             port: 22
             arch: amd64
             ssh_key_secret: JD_SSH_KEY
@@ -39,14 +40,12 @@ jobs:
       - name: Configure SSH
         env:
           SSH_KEY: ${{ secrets[matrix.ssh_key_secret] }}
-          TARGET_HOST: ${{ secrets[matrix.host_secret] }}
-          TARGET_USER: ${{ secrets[matrix.user_secret] }}
         run: |
           set -e
           mkdir -p ~/.ssh
           printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          printf 'Host target\n  HostName %s\n  User %s\n  Port %s\n  IdentityFile ~/.ssh/deploy_key\n  StrictHostKeyChecking no\n  UserKnownHostsFile /dev/null\n  ConnectTimeout 25\n' "$TARGET_HOST" "$TARGET_USER" "${{ matrix.port }}" > ~/.ssh/config
+          printf 'Host target\n  HostName %s\n  User %s\n  Port %s\n  IdentityFile ~/.ssh/deploy_key\n  StrictHostKeyChecking no\n  UserKnownHostsFile /dev/null\n  ConnectTimeout 25\n' "${{ matrix.host }}" "${{ matrix.user }}" "${{ matrix.port }}" > ~/.ssh/config
           chmod 600 ~/.ssh/config
 
       - name: Test connectivity
@@ -86,12 +85,10 @@ jobs:
             systemctl is-active llm-http-proxy 2>/dev/null && echo "服务已启动" || echo "(无 systemd 服务,请确认已配置)"'
 
       - name: Verify
-        env:
-          HOST: ${{ secrets[matrix.host_secret] }}
         run: |
           echo "=== 公网验证 ${{ matrix.name }} ==="
           curl -s -o /dev/null -w "HTTP %{http_code} 耗时 %{time_total}s\n" \
-            "http://${HOST}:8080/__version"
+            "http://${{ matrix.host }}:8080/__version"
 
   # --- jkj 容器:进容器换二进制(不碰宿主机 docker) ---
   deploy-jkj-box:
@@ -102,14 +99,13 @@ jobs:
       - name: Configure SSH (to container)
         env:
           SSH_KEY: ${{ secrets.JKJ_BOX_DEPLOY_KEY }}
-          BOX_HOST: ${{ secrets.JKJ_BOX_HOST }}
-          BOX_PORT: ${{ secrets.JKJ_BOX_PORT }}
         run: |
           set -e
           mkdir -p ~/.ssh
           printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          printf 'Host jkj\n  HostName %s\n  Port %s\n  User deploy\n  IdentityFile ~/.ssh/deploy_key\n  StrictHostKeyChecking no\n  UserKnownHostsFile /dev/null\n  ConnectTimeout 25\n' "$BOX_HOST" "$BOX_PORT" > ~/.ssh/config
+          # 域名/端口不敏感(知道也连不上,密码/key 在 secret),写进 config
+          printf 'Host jkj\n  HostName llm-ssh.19930810.xyz\n  Port 22022\n  User deploy\n  IdentityFile ~/.ssh/deploy_key\n  StrictHostKeyChecking no\n  UserKnownHostsFile /dev/null\n  ConnectTimeout 25\n' > ~/.ssh/config
           chmod 600 ~/.ssh/config
 
       - name: Test connectivity
@@ -152,9 +148,6 @@ jobs:
             supervisorctl status llm-http-proxy'
 
       - name: Verify
-        env:
-          PROXY_HOST: ${{ secrets.JKJ_PROXY_HOST }}
-          PROXY_PORT: ${{ secrets.JKJ_PROXY_PORT }}
         run: |
           echo "=== 公网验证 jkj 代理 ==="
-          curl -sk -o /dev/null -w "HTTP %{http_code} %{time_total}s\n" "https://${PROXY_HOST}:${PROXY_PORT}/__version"
+          curl -sk -o /dev/null -w "HTTP %{http_code} %{time_total}s\n" "https://p.19930810.xyz:8443/__version"
