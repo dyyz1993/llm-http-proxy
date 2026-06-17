@@ -1,5 +1,9 @@
-name: Deploy to jd
+name: Deploy
 
+# 打 tag(release 完成后)自动同时部署到所有配置的服务器,也可手动触发。
+#
+# 新增服务器:在 strategy.matrix.include 下加一条,并在 GitHub secret 里
+# 配对应的 SSH 私钥(<NAME>_SSH_KEY)。IP/用户写在这里即可(不敏感)。
 on:
   workflow_run:
     workflows: ["Release"]
@@ -9,24 +13,46 @@ on:
 
 jobs:
   deploy:
-    name: Deploy to jd server
+    name: Deploy to ${{ matrix.name }}
     runs-on: ubuntu-latest
     if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    strategy:
+      fail-fast: false   # 一台失败不影响其他台
+      matrix:
+        include:
+          # --- 服务器 1: jd ---
+          - name: jd
+            host: 36.151.142.174
+            user: root
+            port: 22
+            arch: amd64
+            ssh_key_secret: JD_SSH_KEY
+          # --- 服务器 2: 新增服务器时取消注释并填写 ---
+          # - name: <name>
+          #   host: <ip>
+          #   user: <user>
+          #   port: 22
+          #   arch: amd64     # 或 arm64
+          #   ssh_key_secret: <NAME>_SSH_KEY
     steps:
-      - name: Configure SSH and test
+      - name: Configure SSH
         env:
-          SSH_KEY: ${{ secrets.JD_SSH_KEY }}
+          SSH_KEY: ${{ secrets[matrix.ssh_key_secret] }}
         run: |
           set -e
           mkdir -p ~/.ssh
-          printf '%s\n' "$SSH_KEY" > ~/.ssh/jd_deploy_key
-          chmod 600 ~/.ssh/jd_deploy_key
-          ssh-keygen -lf ~/.ssh/jd_deploy_key
-          # IP 和 user 不是敏感信息,直接写死(避免 secret 屏蔽干扰 ssh config)
-          printf 'Host jd\n  HostName 36.151.142.174\n  User root\n  IdentityFile ~/.ssh/jd_deploy_key\n  StrictHostKeyChecking no\n  UserKnownHostsFile /dev/null\n  ConnectTimeout 25\n' > ~/.ssh/config
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          # IP/user 写进 ssh config(这些是 matrix 字面量,不会被 GitHub 屏蔽)
+          printf 'Host target\n  HostName %s\n  User %s\n  Port %s\n  IdentityFile ~/.ssh/deploy_key\n  StrictHostKeyChecking no\n  UserKnownHostsFile /dev/null\n  ConnectTimeout 25\n' \
+            "${{ matrix.host }}" "${{ matrix.user }}" "${{ matrix.port }}" > ~/.ssh/config
           chmod 600 ~/.ssh/config
-          echo "--- 测试连接 ---"
-          ssh jd 'echo CI-OK; hostname; /usr/local/bin/llm-http-proxy -version'
+          ssh-keygen -lf ~/.ssh/deploy_key
+
+      - name: Test connectivity
+        run: |
+          echo "=== 测试连接 ${{ matrix.name }} (${{ matrix.host }}) ==="
+          ssh target 'echo connected; hostname; uname -m'
 
       - name: Get latest release tag
         env:
@@ -36,27 +62,31 @@ jobs:
           TAG=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
-      - name: Download and deploy
+      - name: Download binary
         env:
           TAG: ${{ steps.tag.outputs.tag }}
           REPO: ${{ github.repository }}
         run: |
           curl -fsSL -o /tmp/proxy.tar.gz \
-            "https://github.com/${REPO}/releases/download/${TAG}/llm-http-proxy-linux-amd64.tar.gz"
-          scp /tmp/proxy.tar.gz jd:/tmp/proxy-ci.tar.gz
-          ssh jd 'set -e
+            "https://github.com/${REPO}/releases/download/${TAG}/llm-http-proxy-linux-${{ matrix.arch }}.tar.gz"
+          ls -lh /tmp/proxy.tar.gz
+
+      - name: SCP and install
+        run: |
+          scp /tmp/proxy.tar.gz target:/tmp/proxy-ci.tar.gz
+          ssh target 'set -e
             cd /tmp
             tar -xzf proxy-ci.tar.gz
-            chmod 755 llm-http-proxy-linux-amd64
-            mv llm-http-proxy-linux-amd64 /usr/local/bin/llm-http-proxy
+            chmod 755 llm-http-proxy-linux-*
+            mv llm-http-proxy-linux-* /usr/local/bin/llm-http-proxy
             rm proxy-ci.tar.gz
             echo "新版本: $(/usr/local/bin/llm-http-proxy -version)"
-            systemctl restart llm-http-proxy
+            systemctl restart llm-http-proxy || echo "systemctl 不可用,可能需要手动配置服务管理"
             sleep 2
-            echo "状态: $(systemctl is-active llm-http-proxy)"'
+            systemctl is-active llm-http-proxy 2>/dev/null && echo "服务已启动" || echo "(无 systemd 服务,请确认已配置)"'
 
       - name: Verify
-        env:
-          JD_HOST: ${{ secrets.JD_HOST }}
         run: |
-          curl -s -o /dev/null -w "HTTP %{http_code}\n" "http://${JD_HOST}:8080/__stats"
+          echo "=== 公网验证 ${{ matrix.name }} ==="
+          curl -s -o /dev/null -w "HTTP %{http_code} 耗时 %{time_total}s\n" \
+            "http://${{ matrix.host }}:8080/__version"
