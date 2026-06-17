@@ -90,3 +90,64 @@ jobs:
           echo "=== 公网验证 ${{ matrix.name }} ==="
           curl -s -o /dev/null -w "HTTP %{http_code} 耗时 %{time_total}s\n" \
             "http://${{ matrix.host }}:8080/__version"
+
+  # --- jkj 容器:进容器换二进制(不碰宿主机 docker) ---
+  deploy-jkj-box:
+    name: Deploy to jkj box (in-container)
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    steps:
+      - name: Configure SSH (to container 22022)
+        env:
+          SSH_KEY: ${{ secrets.JKJ_BOX_DEPLOY_KEY }}
+        run: |
+          set -e
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf 'Host jkj\n  HostName llm-ssh.19930810.xyz\n  Port 22022\n  User deploy\n  IdentityFile ~/.ssh/deploy_key\n  StrictHostKeyChecking no\n  UserKnownHostsFile /dev/null\n  ConnectTimeout 25\n' > ~/.ssh/config
+          chmod 600 ~/.ssh/config
+
+      - name: Test connectivity
+        run: |
+          echo "=== 连接 jkj 容器(22022 deploy) ==="
+          ssh jkj 'echo connected; whoami; uname -m; /opt/proxy/llm-http-proxy -version'
+
+      - name: Get latest release tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        id: tag
+        run: |
+          TAG=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Download and deploy binary
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          REPO: ${{ github.repository }}
+        run: |
+          RAW_ARCH=$(ssh jkj 'uname -m')
+          case "${RAW_ARCH}" in
+            x86_64)  ARCH="amd64" ;;
+            aarch64) ARCH="arm64" ;;
+          esac
+          echo "=== 下载 ${TAG} 的 linux-${ARCH} 二进制 ==="
+          curl -fsSL -o /tmp/proxy.tar.gz \
+            "https://github.com/${REPO}/releases/download/${TAG}/llm-http-proxy-linux-${ARCH}.tar.gz"
+          tar -xzf /tmp/proxy.tar.gz
+          echo "=== scp 到容器 /tmp ==="
+          scp "llm-http-proxy-linux-${ARCH}" jkj:/tmp/llm-http-proxy-new
+          echo "=== 替换 + 重启(CI 不碰宿主机,只在容器内)==="
+          ssh jkj 'set -e
+            mv /tmp/llm-http-proxy-new /opt/proxy/llm-http-proxy
+            chmod 755 /opt/proxy/llm-http-proxy
+            chown deploy:deploy /opt/proxy/llm-http-proxy
+            echo "新版本: $(/opt/proxy/llm-http-proxy -version)"
+            supervisorctl restart llm-http-proxy
+            sleep 1
+            supervisorctl status llm-http-proxy'
+
+      - name: Verify
+        run: |
+          echo "=== 公网验证 jkj 代理 ==="
+          curl -sk -o /dev/null -w "HTTP %{http_code} %{time_total}s\n" "https://p.19930810.xyz:8443/__version"

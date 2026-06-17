@@ -76,6 +76,9 @@ Match User guest\n\
 # --- 拷贝 Go 二进制和源码(给访客看) ---
 COPY --from=builder /out/llm-http-proxy /usr/local/bin/llm-http-proxy
 RUN chmod 755 /usr/local/bin/llm-http-proxy
+# 运行时副本到 /opt/proxy(deploy 可写,CI 更新这里)
+COPY --from=builder /out/llm-http-proxy /opt/proxy/llm-http-proxy
+RUN chown deploy:deploy /opt/proxy/llm-http-proxy && chmod 755 /opt/proxy/llm-http-proxy
 
 # 源码拷到 /public/source 供访客只读浏览
 COPY . /public/source/
@@ -91,6 +94,9 @@ COPY supervisord-ssh.conf /etc/supervisor/supervisord.conf
 # --- entrypoint(初始化密码/key) ---
 COPY entrypoint-ssh.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
+
+# /opt/proxy:运行时二进制位置,deploy 可写(CI 通过 scp 更新这里)
+RUN mkdir -p /opt/proxy && chown deploy:deploy /opt/proxy
 
 # 持久化目录(挂载用)
 RUN mkdir -p /data
