@@ -182,6 +182,7 @@ func newProxyHandler(stats *statsCollector) http.Handler {
 			return
 		}
 		outReq.Header = req.Header.Clone()       // 原样复制,不追加任何 header
+		stripProxyHeaders(outReq.Header)         // 剥离上游网关注入的反代特征头,保持原始性
 		outReq.ContentLength = req.ContentLength // 显式带上 body 长度,避免 body 不被发送
 
 		resp, err := client.Do(outReq)
@@ -251,6 +252,28 @@ func (r *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 func (r *statusRecorder) Flush() {
 	if f, ok := r.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
+	}
+}
+
+// stripProxyHeaders 剥离上游反向代理/网关可能注入的"指纹"头,
+// 让转发出去的请求保持客户端原始样貌,避免被目标 API 发现经过了中间层。
+// 剥离范围: X-Forwarded-* / Via / X-Real-IP / X-Request-ID / X-Forwarded-Proto 等。
+func stripProxyHeaders(h http.Header) {
+	for k := range h {
+		lk := strings.ToLower(k)
+		// X-Forwarded-* 系列(含 Scheme/For/Proto/Host/Server 等)
+		if strings.HasPrefix(lk, "x-forwarded-") {
+			delete(h, k)
+			continue
+		}
+		// 其他常见反代指纹头
+		switch lk {
+		case "via", "x-real-ip", "x-request-id", "x-requested-with",
+			"x-original-url", "x-rewrite-url", "x-nginx-proxy",
+			"true-client-ip", "cf-connecting-ip", "cf-ipcountry",
+			"cf-ray", "cf-visitor":
+			delete(h, k)
+		}
 	}
 }
 

@@ -102,7 +102,7 @@ jobs:
           tags: |
             type=semver,pattern={{version}}${{ matrix.variant.suffix }}
             type=semver,pattern={{major}}.{{minor}}${{ matrix.variant.suffix }}
-            type=raw,value=latest${{ matrix.variant.suffix }},enable={{is_default_branch}}
+            type=raw,value=latest${{ matrix.variant.suffix }}
 
       - name: Build and push
         uses: docker/build-push-action@v6

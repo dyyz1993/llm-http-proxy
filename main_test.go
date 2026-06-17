@@ -321,6 +321,55 @@ func TestCustomHeaderPassthrough(t *testing.T) {
 	}
 }
 
+// TestStripProxyHeaders 验证反代特征头被剥离,客户端正常头保留。
+func TestStripProxyHeaders(t *testing.T) {
+	backend := echoBackend()
+	defer backend.Close()
+	proxy := startProxy(t)
+	defer proxy.Close()
+
+	// 客户端模拟"经过上游网关"的请求:既带正常头,又带反代指纹头
+	req, _ := http.NewRequest("GET",
+		proxyURL(proxy.URL, backend.URL+"/strip"), nil)
+	// 正常头(应保留)
+	req.Header.Set("Authorization", "Bearer keepme")
+	req.Header.Set("X-Custom", "keep")
+	// 反代指纹头(应被剥离)
+	req.Header.Set("X-Forwarded-For", "1.2.3.4")
+	req.Header.Set("X-Forwarded-Scheme", "https")
+	req.Header.Set("X-Forwarded-Proto", "https")
+	req.Header.Set("Via", "1.1 proxy")
+	req.Header.Set("X-Real-Ip", "1.2.3.4")
+	req.Header.Set("X-Request-Id", "abc123")
+	req.Header.Set("CF-Connecting-IP", "1.2.3.4")
+
+	resp, err := noCompressClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	var got map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&got)
+	hdrs, _ := got["headers"].(map[string]interface{})
+
+	// 正常头应保留
+	if hdrs["Authorization"] != "Bearer keepme" {
+		t.Errorf("正常头 Authorization 被误删: %v", hdrs["Authorization"])
+	}
+	if hdrs["X-Custom"] != "keep" {
+		t.Errorf("正常头 X-Custom 被误删: %v", hdrs["X-Custom"])
+	}
+	// 反代指纹头应被剥离
+	stripped := []string{"X-Forwarded-For", "X-Forwarded-Scheme", "X-Forwarded-Proto",
+		"Via", "X-Real-Ip", "X-Request-Id", "Cf-Connecting-Ip"}
+	for _, h := range stripped {
+		if _, exists := hdrs[h]; exists {
+			t.Errorf("反代特征头 %s 未被剥离,仍出现在后端: %v", h, hdrs[h])
+		}
+	}
+}
+
 func TestResponseHeaderPassthrough(t *testing.T) {
 	backend := echoBackend()
 	defer backend.Close()
