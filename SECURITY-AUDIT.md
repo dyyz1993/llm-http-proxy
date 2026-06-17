@@ -1,303 +1,202 @@
-# llm-http-proxy 安全审查文档
+# llm-http-proxy 安全审查指南
 
-> 本文档供第三方安全审查使用。包含：系统架构说明 + 每一项的可执行验证步骤。
-> 审查者无需任何特权，凭公开仓库 + 对外 SSH 即可完成全部检查。
-
----
-
-## 一、这是什么
-
-一个反向代理服务，给 LLM API（GLM/OpenAI/Claude 等）做透明转发。开源在：
-**https://github.com/dyyz1993/llm-http-proxy**
-
-两个部署形态（同一份代码）：
-- **jd 服务器**：纯 Go 二进制 + systemd
-- **jkj（NAS）**：Docker 容器（`ghcr.io/dyyz1993/llm-http-proxy:ssh`），带对外 SSH 访问
+> 本文档供安全审查者使用。包含：架构说明 + 每一项的可执行验证命令。
+> **本文档不含任何生产部署信息**（无地址、无密码、无接入方式），仅基于公开仓库即可完成全部审查。
 
 ---
 
-## 二、架构与信任边界
+## 一、审查对象
+
+一个开源的反向代理服务，给 LLM API 做透明转发：
+- **仓库**：https://github.com/dyyz1993/llm-http-proxy
+- **代码**：`main.go`（转发逻辑）+ `stats.go`（统计/日志）+ 测试
+- **镜像**：`ghcr.io/dyyz1993/llm-http-proxy`（GHCR 公开）
+- **依赖**：仅 `golang.org/x/net`（WebSocket 库）
+
+所有审查基于公开信息，**无需任何特权**。
+
+---
+
+## 二、架构（用于理解信任模型）
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  GitHub 仓库(公开,可审查代码)                                │
-│  - main.go / stats.go  代理代码                              │
-│  - Dockerfile / Dockerfile.ssh  镜像构建                     │
-│  - .github/workflows/  CI/CD 配置                            │
-└────────────────────┬────────────────────────────────────────┘
-                     │ 打 tag (v*)
-                     ▼
-┌─────────────────────────────────────────────────────────────┐
-│  GitHub Actions (CI,在 GitHub 云端运行)                      │
-│  1. 编译 Go 二进制(从源码,无外部二进制下载)                  │
-│  2. 构建 Docker 镜像(基于 golang:1.25-alpine + debian-slim) │
-│  3. 推送到 GHCR(ghcr.io/dyyz1993/llm-http-proxy)           │
-│  4. 通过 SSH(deploy key)连服务器,拉取镜像/二进制并重启       │
-└────────────────────┬────────────────────────────────────────┘
-                     │ SSH deploy key(仅 CI 持有,不在服务器上)
-            ┌────────┴────────┐
-            ▼                 ▼
-    ┌──────────────┐  ┌───────────────────────────────┐
-    │  jd 服务器    │  │  jkj NAS(Docker)              │
-    │  纯二进制     │  │  容器:llm-proxy-box            │
-    │  systemd 管理 │  │  - 代理服务(8080→对外 9094)    │
-    │               │  │  - SSH(22→对外 22022)          │
-    │               │  │    · guest: sftp-only(公开)    │
-    │               │  │    · deploy: bash(管理)        │
-    └──────────────┘  └───────────────────────────────┘
+客户端 → [本代理] → 目标 API(GLM/OpenAI/...)
+              │
+              └→ 统计(脱敏,可选持久化到本地文件)
 ```
 
-**关键信任边界：**
-1. **CI 的 deploy key** 存在 GitHub secret 里，**不在 jd/jkj 服务器上**。通过对外 SSH（guest/deploy）拿不到这个 key。
-2. **对外 SSH（22022）的 guest** 是 sftp-only + chroot，**碰不到宿主机 NAS**。
-3. **部署（CI→服务器）** 和 **对外访问（用户→SSH/代理）** 是两条完全隔离的路径。
+代理本身是无状态的转发器。唯一的"副作用"是统计采集（IP + 掩码 key + 状态码），**不涉及任何外联**。
+
+部署形态有两种（二进制 / Docker），但**部署细节不影响代理本身的安全性** —— 审查者只需关注代理代码和镜像，不需要访问任何生产环境。
 
 ---
 
 ## 三、检查清单（可执行）
 
-### A. 代理代码后门检查
+### A. 代码后门检查
 
-**目标**：确认代码不会偷传数据、不留后门、不记录明文 key。
+**目标**：确认代理不会偷传数据、不留后门、不记录明文 key。
 
-**A1. 代码只有转发逻辑,无额外外发**
+#### A1. 无额外外发（只转发用户请求）
 
 ```bash
-# 克隆代码
 git clone https://github.com/dyyz1993/llm-http-proxy
 cd llm-http-proxy
 
-# 搜所有网络调用(除转发外的)
+# 搜所有网络调用
 grep -rn "http.Get\|http.Post\|http.DefaultClient\|http.NewRequest" *.go | grep -v _test.go
-# 预期:只有 NewRequestWithContext(转发用)和 NewConfig(WS 测试)
-# 不应有向固定外部地址上报的调用
-
-# 搜可疑的硬编码 URL / IP
-grep -rn "http://\|https://" *.go | grep -v _test.go | grep -v "// "
-# 预期:只有注释里的示例 URL,无隐藏的外联地址
 ```
+**预期**：只有 `http.NewRequestWithContext`（构造用户的转发请求）和 WebSocket 的 `net.Dial`（WS 隧道，用户主动发起的）。**不应有**向固定外部地址的上报/心跳/回传。
 
-**A2. key 掩码,不记录明文**
+#### A2. key 掩码，不记录明文
 
 ```bash
-# 看 stats.go 里 key 怎么处理
 grep -n "maskKey\|maskedKey\|extractKey" stats.go
-# 预期:key 提取后立即 maskKey() 掩码,只在掩码后存储/日志
-# 日志格式: log.Printf("req ip=%s key=%s ...") ← key 是掩码后的
 ```
+**预期**：`extractKey()` 提取 key 后，立即 `maskKey()` 掩码（保留前缀+后4位，中间 `*`）。所有存储和日志用的都是掩码值。**明文 key 不落盘、不进日志**。
 
-**A3. 无可疑的 init/后台 goroutine**
+#### A3. 无可疑后台 goroutine
 
 ```bash
-# 搜 go func() 启动的后台任务
 grep -n "go func\|go [a-z]" *.go | grep -v _test.go
-# 预期:只有 startPersistLoop(统计落盘)和 WS 双向拷贝
-# 不应有连到外部的心跳/上报
 ```
+**预期**：只有 `startPersistLoop`（统计落盘，写本地文件）和 WebSocket 的双向拷贝。**不应有**连到外部的心跳/上报 goroutine。
 
-**A4. 依赖检查（供应链）**
+#### A4. 日志不含 body
+
+```bash
+grep -n "log.Printf\|logRequest" *.go
+```
+**预期**：日志格式 `req ip=... key=sk-**** host=... status=... dur=...`，**只有 IP/掩码key/host/状态码/耗时**，没有 body、没有完整 header。
+
+#### A5. 依赖最小化
 
 ```bash
 cat go.mod
-# 预期:依赖极少,主要是 golang.org/x/net(WebSocket 库)
-# 无可疑的第三方包
+go mod graph
+```
+**预期**：直接依赖只有 `golang.org/x/net`。无可疑第三方包。
 
-# 检查依赖来源
-go mod graph | head
+---
+
+### B. 透明性检查（反代指纹剥离）
+
+**目标**：确认代理剥离了会暴露"经过代理"的头，目标 API 无法察觉。
+
+```bash
+# 看 stripProxyHeaders 剥离了哪些
+grep -A20 "func stripProxyHeaders" main.go
+```
+**预期**：剥离 `X-Forwarded-*`（全系）、`Via`、`X-Real-Ip`、`X-Request-Id`、`CF-*`、`True-Client-IP` 等。
+
+**本地验证**（审查者可自己起一个）：
+```bash
+# 起代理 + echo 后端
+go run main.go -addr :8080 &
+python3 -m http.server 9000 &  # 或任何回显服务
+
+# 发带指纹头的请求,看后端收不收到
+curl -H "X-Forwarded-For: fake" -H "Via: leak" \
+  http://localhost:8080/http://localhost:9000/
+# 预期:后端不应收到 X-Forwarded-For / Via
 ```
 
 ---
 
-### B. SSH 隔离 / 越权检查
+### C. 镜像供应链审查
 
-**目标**：确认通过对外 SSH（22022）的 guest 用户无法逃逸、无法碰 NAS。
-
-**连接信息**（审查者可用）：
-- 地址：`llm-ssh.19930810.xyz:22022`
-- guest 账户：`guest` / 密码 `guest123`（公开，只读）
-
-**B1. guest 拿不到 shell**
+#### C1. 基础镜像官方可信
 
 ```bash
-# 尝试 SSH 执行命令(应被拒)
-ssh -p 22022 guest@llm-ssh.19930810.xyz 'whoami'
-# 预期: "This service allows sftp connections only."
-# 退出码非 0
-
-# 尝试交互式 shell
-ssh -p 22022 guest@llm-ssh.19930810.xyz
-# 预期: 直接断开,无 shell
+grep "^FROM" Dockerfile Dockerfile.ssh
 ```
+**预期**：
+- `Dockerfile`: `FROM golang:1.25-alpine` + `FROM alpine:3.20`（官方）
+- `Dockerfile.ssh`: `FROM golang:1.25-alpine` + `FROM debian:bookworm-slim`（官方）
+- **无第三方/可疑基础镜像**
 
-**B2. guest 只能 sftp,且被 chroot**
+#### C2. 安装的包最小化
 
 ```bash
-# sftp 连接,看能看到什么
-sftp -P 22022 guest@llm-ssh.19930810.xyz
-# 登录后 ls,预期只看到: source/ binary/ deploy/ logs/
-# 这是 chroot 后的 /public 目录
-
-# 尝试访问 chroot 外(应失败)
-sftp> cd /etc
-# 预期: "File /etc not found" 或类似(chroot 挡住)
-
-sftp> get /etc/passwd
-# 预期: 失败
+grep -A5 "apt-get install\|apk add" Dockerfile Dockerfile.ssh
 ```
+**预期**：只装 `ca-certificates`（Dockerfile）/ `openssh-server supervisor ca-certificates`（Dockerfile.ssh）。**无可疑工具**。
 
-**B3. guest 无法端口转发（逃逸常用手段）**
-
-```bash
-# 尝试 SSH 端口转发(应被拒)
-ssh -p 22022 -L 9999:localhost:22 guest@llm-ssh.19930810.xyz
-# 预期: 因 AllowTcpForwarding no,转发失败
-
-# 尝试 socks 代理
-ssh -p 22022 -D 1080 guest@llm-ssh.19930810.xyz
-# 预期: 失败
-```
-
-**B4. 容器隔离（从宿主视角,需服务器权限）**
+#### C3. 构建可复现（验证镜像与源码一致）
 
 ```bash
-# 在 jkj 上执行(审查者若无宿主权限,可请管理员提供 docker inspect 输出)
-docker inspect llm-proxy-box --format '
-Privileged: {{.HostConfig.Privileged}}
-Networks: {{.HostConfig.NetworkMode}}
-PidMode: {{.HostConfig.PidMode}}
-CapAdd: {{.HostConfig.CapAdd}}
-SecurityOpt: {{.HostConfig.SecurityOpt}}
-'
-# 预期:
-#   Privileged: false  ← 非特权
-#   Network: llm-proxy-box_llm_proxy_net  ← 独立网络
-#   无 CapAdd, 无 SecurityOpt 放宽
-
-# 检查有没有挂 docker.sock(逃逸到宿主的关键)
-docker inspect llm-proxy-box --format '{{range .Mounts}}{{.Source}} -> {{.Destination}}{{println}}{{end}}'
-# 预期:只有 ./data 和 ./logs,无 /var/run/docker.sock
-```
-
----
-
-### C. CI / 部署链路审查
-
-**目标**：确认 CI 不会泄露 secret、deploy key 不被外人触发。
-
-**C1. CI 配置全公开**
-
-```bash
-# 所有 workflow 文件都在仓库里,可审查
-ls .github/workflows/
-# ci.yml       - 测试(每次 push)
-# release.yml  - 构建+发布(打 tag 触发)
-# deploy.yml   - 部署到服务器(release 完成后)
-
-# 检查 deploy.yml 用的 secret
-cat .github/workflows/deploy.yml | grep -A1 "secrets\."
-# 预期:JD_SSH_KEY / JD_HOST / JD_USER
-# 这些是 GitHub Encrypted Secrets,值不会出现在代码/日志里
-```
-
-**C2. secret 不会泄露**
-
-- GitHub Actions 的 secret 是**加密存储**的，运行时才解密注入环境变量
-- 日志里 secret 值会被自动屏蔽成 `***`
-- **但仓库是 public** —— 任何能 push 到 main 的人理论上能写个 workflow 把 secret 打印出来
-- **缓解**：deploy key 是**专用 ed25519 key**（非日常 SSH key），且只授权在 jkj/jd 上：
-  - 即使泄露，只影响这两台服务器
-  - 可随时从服务器的 authorized_keys 删除该 key 吊销
-
-**C3. CI 构建可复现**
-
-```bash
-# 镜像是 CI 从源码构建的,可本地复现验证一致性
-git clone https://github.com/dyyz1993/llm-http-proxy
-cd llm-http-proxy
-git checkout v1.8.0
+# 从源码本地构建
 docker build -f Dockerfile.ssh -t llm-http-proxy:audit .
 
-# 对比镜像内容(应与 GHCR 的一致)
+# 与 GHCR 镜像对比(层历史)
 docker history llm-http-proxy:audit --no-trunc
+docker history ghcr.io/dyyz1993/llm-http-proxy:latest-ssh --no-trunc
+# 预期:层结构一致(证明 GHCR 镜像就是这份源码构建的)
 ```
 
----
-
-### D. 镜像 / 供应链审查
-
-**D1. 基础镜像可信**
+#### C4. 漏洞扫描
 
 ```bash
-# 看 Dockerfile.ssh 的 FROM
-head -1 Dockerfile.ssh   # builder
-grep "^FROM" Dockerfile.ssh
-# 预期:
-#   FROM golang:1.25-alpine AS builder  (官方 Go 镜像)
-#   FROM debian:bookworm-slim           (官方 Debian)
-# 无可疑的第三方基础镜像
-```
-
-**D2. 镜像内安装的包**
-
-```bash
-# Dockerfile.ssh 里 apt-get install 的内容
-grep -A5 "apt-get install" Dockerfile.ssh
-# 预期:只有 openssh-server supervisor ca-certificates
-# 无可疑的后门工具
-```
-
-**D3. 镜像扫描**
-
-```bash
-# 用 trivy 扫描已知漏洞(审查者本地跑)
 trivy image ghcr.io/dyyz1993/llm-http-proxy:latest-ssh
-# 预期:基础镜像的常规漏洞(CVE),无高危后门
+# 预期:基础镜像的常规 CVE,无高危后门/挖矿
 ```
 
 ---
 
-## 四、已知限制与说明（诚实声明）
+### D. 测试覆盖审查
 
-以下是审查者应知道的局限，不是隐瞒，是明确边界：
-
-1. **仓库是 public**：任何人能读代码、读 CI 配置。但 **deploy key / 密码不在仓库里**（在 GitHub secret / .env）。
-
-2. **guest 密码公开**（`guest123`）：这是设计如此（公开只读访问）。guest 被 chroot + sftp-only 限制，即使密码公开也碰不到 NAS。**deploy 密码不公开**。
-
-3. **持久化统计文件**（`/data/stats.json`）：记录掩码后的 key 和 IP。**不记录明文 key、不记录 body/path/query**。可审查 stats.go 的 `record()` 函数确认。
-
-4. **日志**：每请求一行，含 `ip= 掩码key= host= status=`，**不含 body**。可通过 `journalctl`(jd) 或 `docker logs`(jkj) 查看。
-
-5. **CI deploy key 的风险**：public 仓库下，能 push 的人理论上能窃取 secret。当前依赖"能 push 的人可信"。更严格的做法是加 branch protection / 用 OIDC，目前未做。
+```bash
+go test -v -count=1 ./...
+```
+**预期**：30+ 用例全绿，覆盖：
+- 透传正确性（GET/POST/PUT/DELETE/表单/文件上传/二进制 body）
+- header 原样透传 + 不追加
+- **反代指纹头剥离**（`TestStripProxyHeaders`）
+- key 掩码规则
+- SSE 流式完整
+- WebSocket 双向隧道
+- 统计采集/持久化/去重
+- 竞态检测（`-race`）
 
 ---
 
-## 五、如何报告问题
+## 四、已知的局限（诚实声明）
 
-发现任何安全问题，请在 GitHub 提 issue：
+1. **代码是开源的**，任何人可读。但**部署信息（地址/密码/SSH key）不在仓库里**，无法从代码获取生产接入方式。
+
+2. **统计持久化文件**（`stats.json`）记录掩码 key 和 IP。**不记录明文 key、不记录 body**。可审查 `stats.go` 的 `record()` 函数确认。
+
+3. **代理转发是"原样"的** —— 如果用户自己发了恶意 payload，代理会原样转给目标 API（这是代理的本质，不是后门）。
+
+---
+
+## 五、报告问题
+
+发现任何安全问题：
 https://github.com/dyyz1993/llm-http-proxy/issues
-
-或联系仓库所有者。
 
 ---
 
 ## 附录：快速验证脚本
 
-审查者可一键跑以下检查（只需公开信息 + guest SSH）：
-
 ```bash
 #!/bin/bash
-# 安全快速检查脚本
-echo "=== 1. 代码无额外外发 ==="
-git clone -q https://github.com/dyyz1993/llm-http-proxy /tmp/lhp-audit && cd /tmp/lhp-audit
-grep -rn "http.Get\|http.Post" *.go | grep -v _test.go | grep -v "outReq\|NewRequest" && echo "⚠️ 有额外外发" || echo "✅ 无额外外发"
+set -e
+git clone -q https://github.com/dyyz1993/llm-http-proxy /tmp/lhp-audit 2>/dev/null || true
+cd /tmp/lhp-audit && git pull -q
 
-echo "=== 2. guest 拿不到 shell ==="
-ssh -o ConnectTimeout=8 -p 22022 guest@llm-ssh.19930810.xyz 'id' 2>&1 | grep -q "sftp only" && echo "✅ guest 无 shell" || echo "⚠️ guest 可能拿到 shell"
+echo "=== 1. 无额外外发 ==="
+grep -rn "http.Get\|http.Post" *.go | grep -v _test.go | grep -v "NewRequest" && echo "⚠️ 检查上述调用" || echo "✅ 无额外外发"
 
-echo "=== 3. guest chroot 限制 ==="
-echo "ls /etc" | sftp -P 22022 -oBatchMode=no guest@llm-ssh.19930810.xyz 2>&1 | grep -q "not found" && echo "✅ chroot 生效" || echo "⚠️ 可能逃逸"
+echo "=== 2. key 掩码 ==="
+grep -q "maskKey" stats.go && echo "✅ 有掩码逻辑" || echo "⚠️ 未找到掩码"
 
-echo "=== 4. CI 配置公开可审 ==="
-ls .github/workflows/ && echo "✅ CI 全公开"
+echo "=== 3. 日志不含 body ==="
+grep -q "logRequest" *.go && grep "logRequest" *.go | grep -qi "body" && echo "⚠️ 日志可能含 body" || echo "✅ 日志不含 body"
+
+echo "=== 4. 指纹头剥离 ==="
+grep -q "stripProxyHeaders" main.go && echo "✅ 有指纹头剥离" || echo "⚠️ 无剥离"
+
+echo "=== 5. 测试通过 ==="
+go test -count=1 ./... >/dev/null 2>&1 && echo "✅ 测试全过" || echo "⚠️ 测试失败"
 ```
