@@ -21,9 +21,10 @@ jobs:
       matrix:
         include:
           # --- 服务器 1: jd ---
+          # host/user 在 secret 里(JD_HOST/JD_USER),不写进仓库
           - name: jd
-            host: 36.151.142.174
-            user: root
+            host_secret: JD_HOST
+            user_secret: JD_USER
             port: 22
             arch: amd64
             ssh_key_secret: JD_SSH_KEY
@@ -38,20 +39,19 @@ jobs:
       - name: Configure SSH
         env:
           SSH_KEY: ${{ secrets[matrix.ssh_key_secret] }}
+          TARGET_HOST: ${{ secrets[matrix.host_secret] }}
+          TARGET_USER: ${{ secrets[matrix.user_secret] }}
         run: |
           set -e
           mkdir -p ~/.ssh
           printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          # IP/user 写进 ssh config(这些是 matrix 字面量,不会被 GitHub 屏蔽)
-          printf 'Host target\n  HostName %s\n  User %s\n  Port %s\n  IdentityFile ~/.ssh/deploy_key\n  StrictHostKeyChecking no\n  UserKnownHostsFile /dev/null\n  ConnectTimeout 25\n' \
-            "${{ matrix.host }}" "${{ matrix.user }}" "${{ matrix.port }}" > ~/.ssh/config
+          printf 'Host target\n  HostName %s\n  User %s\n  Port %s\n  IdentityFile ~/.ssh/deploy_key\n  StrictHostKeyChecking no\n  UserKnownHostsFile /dev/null\n  ConnectTimeout 25\n' "$TARGET_HOST" "$TARGET_USER" "${{ matrix.port }}" > ~/.ssh/config
           chmod 600 ~/.ssh/config
-          ssh-keygen -lf ~/.ssh/deploy_key
 
       - name: Test connectivity
         run: |
-          echo "=== 测试连接 ${{ matrix.name }} (${{ matrix.host }}) ==="
+          echo "=== 测试连接 ${{ matrix.name }} ==="
           ssh target 'echo connected; hostname; uname -m'
 
       - name: Get latest release tag
@@ -86,10 +86,12 @@ jobs:
             systemctl is-active llm-http-proxy 2>/dev/null && echo "服务已启动" || echo "(无 systemd 服务,请确认已配置)"'
 
       - name: Verify
+        env:
+          HOST: ${{ secrets[matrix.host_secret] }}
         run: |
           echo "=== 公网验证 ${{ matrix.name }} ==="
           curl -s -o /dev/null -w "HTTP %{http_code} 耗时 %{time_total}s\n" \
-            "http://${{ matrix.host }}:8080/__version"
+            "http://${HOST}:8080/__version"
 
   # --- jkj 容器:进容器换二进制(不碰宿主机 docker) ---
   deploy-jkj-box:
@@ -97,20 +99,22 @@ jobs:
     runs-on: ubuntu-latest
     if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     steps:
-      - name: Configure SSH (to container 22022)
+      - name: Configure SSH (to container)
         env:
           SSH_KEY: ${{ secrets.JKJ_BOX_DEPLOY_KEY }}
+          BOX_HOST: ${{ secrets.JKJ_BOX_HOST }}
+          BOX_PORT: ${{ secrets.JKJ_BOX_PORT }}
         run: |
           set -e
           mkdir -p ~/.ssh
           printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          printf 'Host jkj\n  HostName llm-ssh.19930810.xyz\n  Port 22022\n  User deploy\n  IdentityFile ~/.ssh/deploy_key\n  StrictHostKeyChecking no\n  UserKnownHostsFile /dev/null\n  ConnectTimeout 25\n' > ~/.ssh/config
+          printf 'Host jkj\n  HostName %s\n  Port %s\n  User deploy\n  IdentityFile ~/.ssh/deploy_key\n  StrictHostKeyChecking no\n  UserKnownHostsFile /dev/null\n  ConnectTimeout 25\n' "$BOX_HOST" "$BOX_PORT" > ~/.ssh/config
           chmod 600 ~/.ssh/config
 
       - name: Test connectivity
         run: |
-          echo "=== 连接 jkj 容器(22022 deploy) ==="
+          echo "=== 连接 jkj 容器(deploy) ==="
           ssh jkj 'echo connected; whoami; uname -m; /opt/proxy/llm-http-proxy -version'
 
       - name: Get latest release tag
@@ -148,6 +152,9 @@ jobs:
             supervisorctl status llm-http-proxy'
 
       - name: Verify
+        env:
+          PROXY_HOST: ${{ secrets.JKJ_PROXY_HOST }}
+          PROXY_PORT: ${{ secrets.JKJ_PROXY_PORT }}
         run: |
           echo "=== 公网验证 jkj 代理 ==="
-          curl -sk -o /dev/null -w "HTTP %{http_code} %{time_total}s\n" "https://p.19930810.xyz:8443/__version"
+          curl -sk -o /dev/null -w "HTTP %{http_code} %{time_total}s\n" "https://${PROXY_HOST}:${PROXY_PORT}/__version"
