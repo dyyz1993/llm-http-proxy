@@ -95,6 +95,61 @@ SDK 里设置 `stream=True` 即可，代理对流式完全透明。
 
 ---
 
+## 🔑 Key 注入模式（无需自带 key）
+
+除了上面的"自带 key 透传"模式，还支持 **key 注入模式**：你不需要带 API key，代理根据路径标识自动注入对应的 key。
+
+### 用法
+
+```
+https://p.19930810.xyz:8443/k/{标识}/https://目标URL
+```
+
+**示例（GLM）**：
+```bash
+# 用户不需要带 Authorization!代理自动注入
+curl https://p.19930810.xyz:8443/k/glm/https://open.bigmodel.cn/api/coding/paas/v4/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"glm-4.6","messages":[{"role":"user","content":"你好"}]}'
+```
+
+**Python SDK**：
+```python
+client = OpenAI(
+    base_url="https://p.19930810.xyz:8443/k/glm/https://open.bigmodel.cn/api/coding/paas/v4",
+    api_key="not-needed",  # key 由代理注入,这里随便填
+)
+```
+
+### 可用的路径标识
+
+联系管理员获取你可用的标识（如 `glm`、`claude`、`azure`）。每个标识对应一个预配置的 key + 目标域名。
+
+### 两种模式对比
+
+| | 自带 key 透传 | key 注入模式 |
+|---|---|---|
+| 路径 | `/https://目标` | `/k/{标识}/https://目标` |
+| 需要带 key | ✅ 是 | ❌ 不需要 |
+| key 安全性 | 用户持有 | **服务端持有，用户看不到** |
+| 限流 | 无 | 按标识限流（可配） |
+| 换 key | 需通知所有用户 | 改配置即可，用户无感 |
+
+### 限流说明
+
+key 注入模式支持按标识限流。超过限额返回 `429 Too Many Requests`，响应头含 `Retry-After`。
+
+---
+
+## 🔒 隐私声明：我们不收集什么
+
+这是开源项目，代码完全公开。我们**明确声明**：
+
+### ❌ 绝对不收集、不记录
+
+| 数据 | 说明 |
+|------|------|
+
 ## 🔒 隐私声明：我们不收集什么
 
 这是开源项目，代码完全公开。我们**明确声明**：

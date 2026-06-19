@@ -69,6 +69,7 @@ var (
 func main() {
 	addr := flag.String("addr", ":8080", "监听地址")
 	persist := flag.String("persist", "", "统计持久化文件路径(为空则不持久化,重启清空)")
+	keys := flag.String("keys", "", "key 注入配置文件路径(keys.yaml,为空则不启用 /k/ 模式)")
 	ver := flag.Bool("version", false, "打印版本号并退出")
 	flag.Parse()
 
@@ -89,17 +90,35 @@ func main() {
 		stats.startPersistLoop(*persist, 30*time.Second)
 	}
 
-	// 顶层路由:/__version 和 /__stats 是内置端点,其余全部走代理。
+	// key 注入模式:加载 keys.yaml + 启动热加载
+	var ks *keyStore
+	if *keys != "" {
+		ks = newKeyStore()
+		if err := ks.load(*keys); err != nil {
+			log.Printf("加载 key 配置失败: %v", err)
+		} else {
+			log.Printf("已从 %s 加载 key 配置", *keys)
+		}
+		ks.startReloadLoop(10 * time.Second)
+	}
+
+	// 顶层路由。
 	topHandler := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		switch req.URL.Path {
-		case "/__version":
+		switch {
+		case req.URL.Path == "/__version":
 			versionHandler(w, req)
 			return
-		case "/__stats":
+		case req.URL.Path == "/__stats":
 			statsHandler(stats).ServeHTTP(w, req)
 			return
+		case ks != nil && strings.HasPrefix(req.URL.Path, "/k/"):
+			// key 注入模式:/k/{alias}/https://目标
+			handleKeyRoute(w, req, ks, stats)
+			return
+		default:
+			// 纯透传模式:/https://目标
+			newProxyHandler(stats, nil, "").ServeHTTP(w, req)
 		}
-		newProxyHandler(stats).ServeHTTP(w, req)
 	})
 
 	log.Printf("透传代理已启动: http://localhost%s  (支持 HTTP / SSE / WebSocket)", *addr)
@@ -135,9 +154,78 @@ func versionHandler(w http.ResponseWriter, req *http.Request) {
 	json.NewEncoder(w).Encode(info)
 }
 
+// handleKeyRoute 处理 key 注入模式: /k/{alias}/https://目标
+// 从 keyStore 查 alias 配置,限流检查,注入真实 key 到 header,然后走转发。
+// 用户不需要带 key(带了也会被配置的 key 覆盖)。
+func handleKeyRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, stats *statsCollector) {
+	// 原始 RequestURI 形如: /k/glm/https://open.bigmodel.cn/api/...
+	// 去掉前导 / 得: k/glm/https://open.bigmodel.cn/api/...
+	raw := strings.TrimPrefix(req.RequestURI, "/")
+
+	// 解析 k/{alias}/{target}
+	// 先去掉 "k/" 前缀
+	rest := strings.TrimPrefix(raw, "k/")
+	if rest == raw {
+		http.Error(w, "路径格式应为 /k/{alias}/https://目标\n", http.StatusBadRequest)
+		return
+	}
+	// 取第一个 / 之前的部分作为 alias
+	slash := strings.IndexByte(rest, '/')
+	if slash < 0 {
+		http.Error(w, "缺少目标 URL,格式应为 /k/{alias}/https://目标\n", http.StatusBadRequest)
+		return
+	}
+	alias := rest[:slash]
+	target := rest[slash+1:]
+	if !strings.Contains(target, "://") {
+		http.Error(w, "目标 URL 需以 http:// 或 https:// 开头\n", http.StatusBadRequest)
+		return
+	}
+
+	// 查 alias 配置
+	cfg, ok := ks.lookup(alias)
+	if !ok {
+		http.Error(w, "未知的 key 标识: "+alias+"\n", http.StatusNotFound)
+		return
+	}
+
+	// 限流检查
+	if !ks.allow(alias) {
+		w.Header().Set("Retry-After", "60")
+		http.Error(w, "请求过于频繁,请稍后重试 (alias: "+alias+")\n", http.StatusTooManyRequests)
+		return
+	}
+
+	// 构造注入 header:真实 key 覆盖配置指定的 header
+	headerName := cfg.Header
+	if headerName == "" {
+		headerName = "Authorization" // 默认
+	}
+	headerVal := cfg.Key
+	if cfg.Prefix != "" {
+		headerVal = cfg.Prefix + cfg.Key
+	} else if headerName == "Authorization" {
+		// Authorization 默认加 "Bearer " 前缀(除非显式配置 prefix)
+		headerVal = "Bearer " + cfg.Key
+	}
+	inject := http.Header{}
+	inject[headerName] = []string{headerVal}
+
+	// 重写 RequestURI 让 newProxyHandler 解析出正确的 target
+	// newProxyHandler 会 TrimPrefix "/",所以这里 target 前面加 "/"
+	req2 := req.Clone(req.Context())
+	req2.RequestURI = "/" + target
+	// 统计标签用 alias(如 "glm"),不暴露真实 key
+	statLabel := "key:" + alias
+
+	newProxyHandler(stats, inject, statLabel).ServeHTTP(w, req2)
+}
+
 // newProxyHandler 构造代理的 http.Handler。测试和 main 共用同一份逻辑。
 // stats 非 nil 时,记录每次请求的 IP/掩码key/状态码统计。
-func newProxyHandler(stats *statsCollector) http.Handler {
+// injectHeaders 非 nil 时(key 注入模式),这些 header 会在转发前覆盖进请求头。
+// statKeyLabel 用于统计里替代掩码 key 显示(如 key 注入模式显示 alias "glm")。
+func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLabel string) http.Handler {
 	transport := &http.Transport{
 		DisableCompression: true, // 不偷偷加 Accept-Encoding: gzip
 	}
@@ -153,7 +241,12 @@ func newProxyHandler(stats *statsCollector) http.Handler {
 
 		// 采集统计(在转发前抓取,因为 key/header 此时还在)。
 		ip := clientIP(req)
-		maskedKey := maskedKeyFromRequest(req)
+		// 统计用 key 标签:key 注入模式用 statKeyLabel(如 "glm"),
+		// 纯透传模式用掩码 key(如 "sk-****wxyz")。
+		statKey := statKeyLabel
+		if statKey == "" {
+			statKey = maskedKeyFromRequest(req)
+		}
 		// 目标 host,用于统计(不含 path)。
 		targetHost := hostFromRaw(raw)
 		start := time.Now()
@@ -165,8 +258,8 @@ func newProxyHandler(stats *statsCollector) http.Handler {
 		if isWebSocketUpgrade(req) {
 			handleWebSocket(rec, req, raw)
 			if stats != nil {
-				stats.record(ip, maskedKey, targetHost, rec.status)
-				logRequest(ip, maskedKey, req.Method, targetHost, rec.status, time.Since(start))
+				stats.record(ip, statKey, targetHost, rec.status)
+				logRequest(ip, statKey, req.Method, targetHost, rec.status, time.Since(start))
 			}
 			return
 		}
@@ -176,12 +269,18 @@ func newProxyHandler(stats *statsCollector) http.Handler {
 		if err != nil {
 			http.Error(rec, "目标 URL 无法解析: "+err.Error(), http.StatusBadRequest)
 			if stats != nil {
-				stats.record(ip, maskedKey, targetHost, rec.status)
-				logRequest(ip, maskedKey, req.Method, targetHost, rec.status, time.Since(start))
+				stats.record(ip, statKey, targetHost, rec.status)
+				logRequest(ip, statKey, req.Method, targetHost, rec.status, time.Since(start))
 			}
 			return
 		}
-		outReq.Header = req.Header.Clone()       // 原样复制,不追加任何 header
+		outReq.Header = req.Header.Clone() // 原样复制,不追加任何 header
+		// key 注入模式:用配置的 key 覆盖对应 header(真实 key 不进日志/统计)
+		if injectHeaders != nil {
+			for k, vs := range injectHeaders {
+				outReq.Header[k] = vs
+			}
+		}
 		stripProxyHeaders(outReq.Header)         // 剥离上游网关注入的反代特征头,保持原始性
 		outReq.ContentLength = req.ContentLength // 显式带上 body 长度,避免 body 不被发送
 
@@ -189,8 +288,8 @@ func newProxyHandler(stats *statsCollector) http.Handler {
 		if err != nil {
 			http.Error(rec, "转发失败: "+err.Error(), http.StatusBadGateway)
 			if stats != nil {
-				stats.record(ip, maskedKey, targetHost, rec.status)
-				logRequest(ip, maskedKey, req.Method, targetHost, rec.status, time.Since(start))
+				stats.record(ip, statKey, targetHost, rec.status)
+				logRequest(ip, statKey, req.Method, targetHost, rec.status, time.Since(start))
 			}
 			return
 		}
@@ -221,8 +320,8 @@ func newProxyHandler(stats *statsCollector) http.Handler {
 
 		// 记录统计(只含 IP/掩码key/host/状态码,不含 body)
 		if stats != nil {
-			stats.record(ip, maskedKey, targetHost, rec.status)
-			logRequest(ip, maskedKey, req.Method, targetHost, rec.status, time.Since(start))
+			stats.record(ip, statKey, targetHost, rec.status)
+			logRequest(ip, statKey, req.Method, targetHost, rec.status, time.Since(start))
 		}
 	})
 }

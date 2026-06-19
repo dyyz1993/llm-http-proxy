@@ -118,7 +118,29 @@ func startProxy(t *testing.T) *httptest.Server {
 			statsHandler(stats).ServeHTTP(w, req)
 			return
 		}
-		newProxyHandler(stats).ServeHTTP(w, req)
+		newProxyHandler(stats, nil, "").ServeHTTP(w, req)
+	})
+	return httptest.NewServer(mux)
+}
+
+// startProxyWithKeys 启动带 key 注入模式的代理(模拟 main 的完整路由)。
+func startProxyWithKeys(t *testing.T, ks *keyStore) *httptest.Server {
+	t.Helper()
+	stats := newStatsCollector()
+	mux := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		switch {
+		case req.URL.Path == "/__version":
+			versionHandler(w, req)
+			return
+		case req.URL.Path == "/__stats":
+			statsHandler(stats).ServeHTTP(w, req)
+			return
+		case strings.HasPrefix(req.URL.Path, "/k/"):
+			handleKeyRoute(w, req, ks, stats)
+			return
+		default:
+			newProxyHandler(stats, nil, "").ServeHTTP(w, req)
+		}
 	})
 	return httptest.NewServer(mux)
 }
@@ -640,7 +662,7 @@ func TestStatsRecordAndAggregate(t *testing.T) {
 			statsHandler(stats).ServeHTTP(w, req)
 			return
 		}
-		newProxyHandler(stats).ServeHTTP(w, req)
+		newProxyHandler(stats, nil, "").ServeHTTP(w, req)
 	})
 	proxy := httptest.NewServer(mux)
 	defer proxy.Close()
@@ -883,7 +905,7 @@ func TestStatsByKeyView(t *testing.T) {
 			statsHandler(stats).ServeHTTP(w, req)
 			return
 		}
-		newProxyHandler(stats).ServeHTTP(w, req)
+		newProxyHandler(stats, nil, "").ServeHTTP(w, req)
 	})
 	proxy := httptest.NewServer(mux)
 	defer proxy.Close()
@@ -941,7 +963,7 @@ func TestStatsDistinctCount(t *testing.T) {
 			statsHandler(stats).ServeHTTP(w, req)
 			return
 		}
-		newProxyHandler(stats).ServeHTTP(w, req)
+		newProxyHandler(stats, nil, "").ServeHTTP(w, req)
 	})
 	proxy := httptest.NewServer(mux)
 	defer proxy.Close()
@@ -1007,7 +1029,7 @@ func TestStatsFormatTable(t *testing.T) {
 			statsHandler(stats).ServeHTTP(w, req)
 			return
 		}
-		newProxyHandler(stats).ServeHTTP(w, req)
+		newProxyHandler(stats, nil, "").ServeHTTP(w, req)
 	})
 	proxy := httptest.NewServer(mux)
 	defer proxy.Close()
@@ -1048,3 +1070,199 @@ func TestStatsFormatTable(t *testing.T) {
 // 防止编译时未使用的 import 报错(部分场景下 url/time/base64 可能未被引用)
 var _ = time.Second
 var _ = base64.StdEncoding
+
+// --- key 注入模式测试 ----------------------------------------------------
+
+// TestKeyInjectionBasic 验证 /k/{alias}/ 目标 能注入正确的 Authorization 头。
+func TestKeyInjectionBasic(t *testing.T) {
+	backend := echoBackend()
+	defer backend.Close()
+
+	ks := newKeyStore()
+	ks.configs["glm"] = KeyConfig{
+		Key:    "sk-secret-glm-key",
+		Header: "Authorization",
+		Prefix: "Bearer ",
+	}
+
+	proxy := startProxyWithKeys(t, ks)
+	defer proxy.Close()
+
+	// 用户不带 key 请求 /k/glm/目标
+	resp, err := noCompressClient.Get(
+		proxy.URL + "/k/glm/" + backend.URL + "/api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	var got map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&got)
+	hdrs, _ := got["headers"].(map[string]interface{})
+
+	// 后端应收到注入的 Authorization
+	if hdrs["Authorization"] != "Bearer sk-secret-glm-key" {
+		t.Errorf("Authorization 注入错误: got %v, 期望 'Bearer sk-secret-glm-key'",
+			hdrs["Authorization"])
+	}
+	// 目标 URL 正确转发(path 应是 /api)
+	if got["path"] != "/api" {
+		t.Errorf("path = %v, 期望 /api", got["path"])
+	}
+}
+
+// TestKeyInjectionMultiHeader 验证 x-api-key(Claude) 和 api-key(Azure) 注入。
+func TestKeyInjectionMultiHeader(t *testing.T) {
+	backend := echoBackend()
+	defer backend.Close()
+
+	ks := newKeyStore()
+	ks.configs["claude"] = KeyConfig{
+		Key:    "sk-ant-claude-real-key",
+		Header: "x-api-key",
+	}
+	ks.configs["azure"] = KeyConfig{
+		Key:    "azure-real-key",
+		Header: "api-key",
+	}
+
+	proxy := startProxyWithKeys(t, ks)
+	defer proxy.Close()
+
+	// Claude: x-api-key
+	resp, _ := noCompressClient.Get(proxy.URL + "/k/claude/" + backend.URL + "/v1")
+	var got map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&got)
+	resp.Body.Close()
+	hdrs, _ := got["headers"].(map[string]interface{})
+	if hdrs["X-Api-Key"] != "sk-ant-claude-real-key" {
+		t.Errorf("Claude x-api-key 注入错误: %v", hdrs["X-Api-Key"])
+	}
+
+	// Azure: api-key
+	resp2, _ := noCompressClient.Get(proxy.URL + "/k/azure/" + backend.URL + "/v1")
+	var got2 map[string]interface{}
+	json.NewDecoder(resp2.Body).Decode(&got2)
+	resp2.Body.Close()
+	hdrs2, _ := got2["headers"].(map[string]interface{})
+	if hdrs2["Api-Key"] != "azure-real-key" {
+		t.Errorf("Azure api-key 注入错误: %v", hdrs2["Api-Key"])
+	}
+}
+
+// TestKeyInjectionUnknownAlias 验证未知 alias 返回 404。
+func TestKeyInjectionUnknownAlias(t *testing.T) {
+	backend := echoBackend()
+	defer backend.Close()
+
+	ks := newKeyStore()
+	proxy := startProxyWithKeys(t, ks)
+	defer proxy.Close()
+
+	resp, err := noCompressClient.Get(proxy.URL + "/k/nonexistent/" + backend.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 404 {
+		t.Errorf("未知 alias 状态码 = %d, 期望 404", resp.StatusCode)
+	}
+}
+
+// TestKeyRateLimit 验证按 alias 限流:超限返回 429。
+func TestKeyRateLimit(t *testing.T) {
+	backend := echoBackend()
+	defer backend.Close()
+
+	ks := newKeyStore()
+	// rate=120/min = 2/sec, burst=2 → 前几次能过,快速发会被限
+	ks.configs["limited"] = KeyConfig{
+		Key:    "sk-limited",
+		Header: "Authorization",
+		Rate:   120,
+		Burst:  2,
+	}
+	// 创建限流器
+	ks.mu.Lock()
+	ks.getOrCreateLimiter("limited", ks.configs["limited"])
+	ks.mu.Unlock()
+
+	proxy := startProxyWithKeys(t, ks)
+	defer proxy.Close()
+
+	url := proxy.URL + "/k/limited/" + backend.URL + "/"
+	var lastStatus int
+	// 快速发 10 次(burst=2,前 2 次能过,后面应 429)
+	for i := 0; i < 10; i++ {
+		resp, err := noCompressClient.Get(url)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lastStatus = resp.StatusCode
+		resp.Body.Close()
+	}
+	if lastStatus != 429 {
+		t.Errorf("限流后状态码 = %d, 期望 429(最后几次应被限)", lastStatus)
+	}
+}
+
+// TestKeyHotReload 验证改配置文件后限流参数生效。
+func TestKeyHotReload(t *testing.T) {
+	tmpFile := filepath.Join(t.TempDir(), "keys.yaml")
+	t.Cleanup(func() { os.Remove(tmpFile) })
+
+	// 初始:不限流
+	os.WriteFile(tmpFile, []byte("test:\n  key: sk-v1\n  header: Authorization\n"), 0600)
+
+	ks := newKeyStore()
+	ks.load(tmpFile)
+
+	cfg, ok := ks.lookup("test")
+	if !ok || cfg.Key != "sk-v1" {
+		t.Fatalf("初始加载失败: %v", cfg)
+	}
+
+	// 改文件:换 key + 加限流
+	os.WriteFile(tmpFile, []byte("test:\n  key: sk-v2\n  header: Authorization\n  rate: 60\n  burst: 1\n"), 0600)
+	// 模拟热加载(手动调 reloadIfChanged)
+	// 需要 mtime 变化,睡一下确保 mtime 不同
+	time.Sleep(20 * time.Millisecond)
+	os.Chtimes(tmpFile, time.Now(), time.Now())
+	ks.reloadIfChanged()
+
+	cfg2, ok := ks.lookup("test")
+	if !ok || cfg2.Key != "sk-v2" {
+		t.Errorf("热加载后 key 应为 sk-v2, got %v", cfg2)
+	}
+	if cfg2.Rate != 60 {
+		t.Errorf("热加载后 rate 应为 60, got %d", cfg2.Rate)
+	}
+}
+
+// TestPassthroughStillWorks 验证纯透传模式(不带 /k/)仍正常。
+func TestPassthroughStillWorks(t *testing.T) {
+	backend := echoBackend()
+	defer backend.Close()
+
+	ks := newKeyStore()
+	ks.configs["glm"] = KeyConfig{Key: "sk-should-not-appear", Header: "Authorization"}
+
+	proxy := startProxyWithKeys(t, ks)
+	defer proxy.Close()
+
+	// 纯透传:用户自己带 key,不带 /k/
+	resp, err := noCompressClient.Get(proxy.URL + "/" + backend.URL + "/api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		t.Fatalf("纯透传状态码 = %d, 期望 200", resp.StatusCode)
+	}
+	var got map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&got)
+	if got["path"] != "/api" {
+		t.Errorf("纯透传 path = %v, 期望 /api", got["path"])
+	}
+}

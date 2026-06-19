@@ -1,0 +1,41 @@
+# llm-http-proxy key 注入配置示例
+#
+# 用户通过 /k/{alias}/https://目标 访问,代理自动注入对应的 key。
+# 用户永远看不到真实 key(配置在服务端,不出网)。
+#
+# 用法:
+#   1. 复制此文件为 keys.yaml,填入真实 key
+#   2. 启动代理加 -keys /path/to/keys.yaml
+#   3. 访问 https://代理地址/k/glm/https://open.bigmodel.cn/...
+#
+# 改完配置后无需重启,代理每 10 秒自动重读(检测到文件变化才重载)。
+
+# === GLM (智谱) ===
+# OpenAI 兼容接口,用 Authorization: Bearer
+glm:
+  key: "你的GLM真实key"
+  header: Authorization
+  prefix: "Bearer "
+  rate: 60    # 每分钟最多 60 次(可选,不写则不限流)
+  burst: 10   # 突发上限 10(可选)
+
+# === Claude (Anthropic) ===
+# Claude 官方用 x-api-key
+claude:
+  key: "sk-ant-你的Claude真实key"
+  header: x-api-key
+  rate: 30
+  burst: 5
+
+# === Azure OpenAI ===
+# Azure 用 api-key header
+azure:
+  key: "你的Azure真实key"
+  header: api-key
+
+# === 不限流的内部用途 ===
+# 不写 rate/burst 即不限流
+internal:
+  key: "sk-内部key"
+  header: Authorization
+  prefix: "Bearer "
