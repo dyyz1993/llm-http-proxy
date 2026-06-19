@@ -121,7 +121,7 @@ jobs:
           TAG=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
-      - name: Download and deploy binary
+      - name: Deploy binary (in-container curl download)
         env:
           TAG: ${{ steps.tag.outputs.tag }}
           REPO: ${{ github.repository }}
@@ -131,21 +131,19 @@ jobs:
             x86_64)  ARCH="amd64" ;;
             aarch64) ARCH="arm64" ;;
           esac
-          echo "=== 下载 ${TAG} 的 linux-${ARCH} 二进制 ==="
-          curl -fsSL -o /tmp/proxy.tar.gz \
-            "https://github.com/${REPO}/releases/download/${TAG}/llm-http-proxy-linux-${ARCH}.tar.gz"
-          tar -xzf /tmp/proxy.tar.gz
-          echo "=== scp 到容器 /tmp ==="
-          scp "llm-http-proxy-linux-${ARCH}" jkj:/tmp/llm-http-proxy-new
-          echo "=== 替换 + 重启(CI 不碰宿主机,只在容器内)==="
-          ssh jkj 'set -e
-            mv /tmp/llm-http-proxy-new /opt/proxy/llm-http-proxy
+          # 容器内直接 curl 从 GitHub 下载(不再 scp 跨境中转)
+          URL="https://github.com/${REPO}/releases/download/${TAG}/llm-http-proxy-linux-${ARCH}.tar.gz"
+          echo "=== 容器内下载 ${TAG} (${ARCH}) ==="
+          ssh jkj "set -e
+            curl -fsSL --max-time 120 -o /tmp/proxy.tar.gz '${URL}'
+            cd /tmp && tar -xzf proxy.tar.gz && rm proxy.tar.gz
+            mv llm-http-proxy-linux-${ARCH} /opt/proxy/llm-http-proxy
             chmod 755 /opt/proxy/llm-http-proxy
             chown deploy:deploy /opt/proxy/llm-http-proxy
-            echo "新版本: $(/opt/proxy/llm-http-proxy -version)"
+            echo '新版本:' \$(/opt/proxy/llm-http-proxy -version)
             supervisorctl restart llm-http-proxy
             sleep 1
-            supervisorctl status llm-http-proxy'
+            supervisorctl status llm-http-proxy"
 
       - name: Verify
         run: |
