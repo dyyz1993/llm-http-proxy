@@ -121,7 +121,7 @@ jobs:
           TAG=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
-      - name: Deploy binary (in-container curl download)
+      - name: Deploy binary (try in-container curl, fallback to scp+gzip)
         env:
           TAG: ${{ steps.tag.outputs.tag }}
           REPO: ${{ github.repository }}
@@ -131,19 +131,39 @@ jobs:
             x86_64)  ARCH="amd64" ;;
             aarch64) ARCH="arm64" ;;
           esac
-          # 容器内直接 curl 从 GitHub 下载(不再 scp 跨境中转)
           URL="https://github.com/${REPO}/releases/download/${TAG}/llm-http-proxy-linux-${ARCH}.tar.gz"
-          echo "=== 容器内下载 ${TAG} (${ARCH}) ==="
-          ssh jkj "set -e
-            curl -fsSL --max-time 120 -o /tmp/proxy.tar.gz '${URL}'
-            cd /tmp && tar -xzf proxy.tar.gz && rm proxy.tar.gz
-            mv llm-http-proxy-linux-${ARCH} /opt/proxy/llm-http-proxy
-            chmod 755 /opt/proxy/llm-http-proxy
-            chown deploy:deploy /opt/proxy/llm-http-proxy
-            echo '新版本:' \$(/opt/proxy/llm-http-proxy -version)
-            supervisorctl restart llm-http-proxy
-            sleep 1
-            supervisorctl status llm-http-proxy"
+
+          # 策略 1: 容器内有 curl 时,容器内直接下载(最快,不经 runner)
+          if ssh jkj 'command -v curl >/dev/null 2>&1'; then
+            echo "=== 容器内 curl 下载 ${TAG} (${ARCH}) ==="
+            ssh jkj "set -e
+              curl -fsSL --max-time 120 -o /tmp/proxy.tar.gz '${URL}'
+              cd /tmp && tar -xzf proxy.tar.gz && rm proxy.tar.gz
+              mv llm-http-proxy-linux-${ARCH} /opt/proxy/llm-http-proxy
+              chmod 755 /opt/proxy/llm-http-proxy
+              chown deploy:deploy /opt/proxy/llm-http-proxy
+              echo '新版本:' \$(/opt/proxy/llm-http-proxy -version)
+              supervisorctl restart llm-http-proxy
+              sleep 1
+              supervisorctl status llm-http-proxy"
+          else
+            # 策略 2: 容器无 curl,fallback 到 runner 下载 + scp+gzip(压缩减半传输)
+            echo "=== 容器无 curl,fallback scp+gzip 下载 ${TAG} (${ARCH}) ==="
+            curl -fsSL -o /tmp/proxy.tar.gz "${URL}"
+            tar -xzf /tmp/proxy.tar.gz
+            gzip -c llm-http-proxy-linux-${ARCH} > /tmp/proxy.gz
+            echo "传输大小: $(ls -lh /tmp/proxy.gz | awk '{print $5}')(gzip 压缩后)"
+            scp /tmp/proxy.gz jkj:/tmp/proxy.gz
+            ssh jkj 'set -e
+              gunzip -f /tmp/proxy.gz
+              mv /tmp/proxy /opt/proxy/llm-http-proxy
+              chmod 755 /opt/proxy/llm-http-proxy
+              chown deploy:deploy /opt/proxy/llm-http-proxy
+              echo "新版本: $(/opt/proxy/llm-http-proxy -version)"
+              supervisorctl restart llm-http-proxy
+              sleep 1
+              supervisorctl status llm-http-proxy'
+          fi
 
       - name: Verify
         run: |
