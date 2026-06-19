@@ -1150,6 +1150,43 @@ func TestKeyInjectionMultiHeader(t *testing.T) {
 	}
 }
 
+// TestKeyInjectionPOSTBody 验证 POST 请求的 body 在 key 注入模式下不丢失。
+// (之前 req.Clone 不复制 Body 导致 POST body 丢失,此测试防回归)
+func TestKeyInjectionPOSTBody(t *testing.T) {
+	backend := echoBackend()
+	defer backend.Close()
+
+	ks := newKeyStore()
+	ks.configs["glm"] = KeyConfig{
+		Key:    "sk-test-key",
+		Header: "Authorization",
+		Prefix: "Bearer ",
+	}
+
+	proxy := startProxyWithKeys(t, ks)
+	defer proxy.Close()
+
+	body := `{"model":"glm-4.6","messages":[{"role":"user","content":"hi"}]}`
+	resp, err := noCompressClient.Post(
+		proxy.URL+"/k/glm/"+backend.URL+"/chat", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	var got map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&got)
+	// body 应原样到达后端(不被 key 注入流程丢弃)
+	if got["body"] != body {
+		t.Errorf("POST body 丢失或损坏: got %v, 期望 %s", got["body"], body)
+	}
+	// Authorization 应被注入
+	hdrs, _ := got["headers"].(map[string]interface{})
+	if hdrs["Authorization"] != "Bearer sk-test-key" {
+		t.Errorf("Authorization 注入错误: %v", hdrs["Authorization"])
+	}
+}
+
 // TestKeyInjectionUnknownAlias 验证未知 alias 返回 404。
 func TestKeyInjectionUnknownAlias(t *testing.T) {
 	backend := echoBackend()

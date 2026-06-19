@@ -211,14 +211,15 @@ func handleKeyRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, stat
 	inject := http.Header{}
 	inject[headerName] = []string{headerVal}
 
-	// 重写 RequestURI 让 newProxyHandler 解析出正确的 target
-	// newProxyHandler 会 TrimPrefix "/",所以这里 target 前面加 "/"
-	req2 := req.Clone(req.Context())
-	req2.RequestURI = "/" + target
+	// 重写 RequestURI 让 newProxyHandler 解析出正确的 target。
+	// 直接改原 req(本函数之后不再用它),避免 Clone 不复制 Body 导致 POST body 丢失。
+	// 注意: http.Request.Clone 文档明确 Body 不会被克隆(io.Reader 不可复制),
+	// 所以 GET(无 body)能过但 POST 会丢 body。直接改原 req 最可靠。
+	req.RequestURI = "/" + target
 	// 统计标签用 alias(如 "glm"),不暴露真实 key
 	statLabel := "key:" + alias
 
-	newProxyHandler(stats, inject, statLabel).ServeHTTP(w, req2)
+	newProxyHandler(stats, inject, statLabel).ServeHTTP(w, req)
 }
 
 // newProxyHandler 构造代理的 http.Handler。测试和 main 共用同一份逻辑。
