@@ -203,10 +203,17 @@ type hourEntry struct {
 //	by=window   返回最近 N 小时的调用量时间序列
 //	format=json (默认)/ format=table ASCII 表格
 //	top=N       只返回调用最多的 N 个(配合 by=ip/key)
-func statsHandler(s *statsCollector) http.HandlerFunc {
+//
+// authCheck 非 nil 时,先校验鉴权(用于 /__stats 加密码保护)。
+func statsHandler(s *statsCollector, authCheck func(*http.Request) bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		// 鉴权检查(如果配置了)
+		if authCheck != nil && !authCheck(r) {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
 		}
 
@@ -579,10 +586,70 @@ func maskedKeyFromRequest(r *http.Request) string {
 	return maskKey(k)
 }
 
+// logEntry 是单条请求日志(给 admin UI 的日志页用)。
+type logEntry struct {
+	Time     string `json:"time"` // 北京时间
+	IP       string `json:"ip"`
+	Key      string `json:"key"` // 掩码 key 或 alias 标签
+	Method   string `json:"method"`
+	Host     string `json:"host"`
+	Status   int    `json:"status"`
+	Duration string `json:"dur"`
+}
+
+// logRing 是内存环形缓冲,存最近 N 条请求日志(给 admin UI 看)。
+type logRing struct {
+	mu      sync.Mutex
+	entries []logEntry
+	size    int
+	next    int // 下一个写入位置
+}
+
+var globalLogRing = &logRing{size: 500, entries: make([]logEntry, 500)}
+
+// add 追加一条日志到环形缓冲。
+func (r *logRing) add(e logEntry) {
+	r.mu.Lock()
+	r.entries[r.next] = e
+	r.next = (r.next + 1) % r.size
+	r.mu.Unlock()
+}
+
+// recent 返回最近 n 条日志(倒序,最新的在前)。
+func (r *logRing) recent(n int) []logEntry {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if n > r.size {
+		n = r.size
+	}
+	out := make([]logEntry, 0, n)
+	// 从最新(next-1)往回取
+	for i := 0; i < n; i++ {
+		idx := (r.next - 1 - i + r.size) % r.size
+		e := r.entries[idx]
+		if e.Time == "" {
+			break // 空槽位,说明还没写满
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
 // logRequest 打一行结构化日志,只含 IP/掩码key/host/状态码,不含 body。
+// 同时写入内存环形缓冲(给 admin UI 看)。
 func logRequest(ip, maskedKey, method, targetHost string, status int, dur time.Duration) {
-	log.Printf("req ip=%s key=%s method=%s host=%s status=%d dur=%s",
+	line := fmt.Sprintf("req ip=%s key=%s method=%s host=%s status=%d dur=%s",
 		ip, maskedKey, method, targetHost, status, dur)
+	log.Print(line)
+	globalLogRing.add(logEntry{
+		Time:     time.Now().In(beijing).Format("2006-01-02 15:04:05"),
+		IP:       ip,
+		Key:      maskedKey,
+		Method:   method,
+		Host:     targetHost,
+		Status:   status,
+		Duration: dur.Round(time.Millisecond).String(),
+	})
 }
 
 // --- 持久化 ---------------------------------------------------------------

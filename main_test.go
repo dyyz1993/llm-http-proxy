@@ -115,7 +115,7 @@ func startProxy(t *testing.T) *httptest.Server {
 			versionHandler(w, req)
 			return
 		case "/__stats":
-			statsHandler(stats).ServeHTTP(w, req)
+			statsHandler(stats, nil).ServeHTTP(w, req)
 			return
 		}
 		newProxyHandler(stats, nil, "").ServeHTTP(w, req)
@@ -133,10 +133,38 @@ func startProxyWithKeys(t *testing.T, ks *keyStore) *httptest.Server {
 			versionHandler(w, req)
 			return
 		case req.URL.Path == "/__stats":
-			statsHandler(stats).ServeHTTP(w, req)
+			statsHandler(stats, nil).ServeHTTP(w, req)
 			return
 		case strings.HasPrefix(req.URL.Path, "/k/"):
 			handleKeyRoute(w, req, ks, stats)
+			return
+		default:
+			newProxyHandler(stats, nil, "").ServeHTTP(w, req)
+		}
+	})
+	return httptest.NewServer(mux)
+}
+
+// startProxyWithAdmin 启动带管理界面的代理(模拟 main 的完整路由)。
+func startProxyWithAdmin(t *testing.T, password string, ks *keyStore) *httptest.Server {
+	t.Helper()
+	stats := newStatsCollector()
+	admin := newAdminServer(password, stats, ks)
+	mux := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if admin != nil && (req.URL.Path == "/__admin" || strings.HasPrefix(req.URL.Path, "/__admin/")) {
+			admin.handler().ServeHTTP(w, req)
+			return
+		}
+		switch {
+		case req.URL.Path == "/__version":
+			versionHandler(w, req)
+			return
+		case req.URL.Path == "/__stats":
+			var authFn func(*http.Request) bool
+			if admin != nil {
+				authFn = admin.authCheck
+			}
+			statsHandler(stats, authFn).ServeHTTP(w, req)
 			return
 		default:
 			newProxyHandler(stats, nil, "").ServeHTTP(w, req)
@@ -659,7 +687,7 @@ func TestStatsRecordAndAggregate(t *testing.T) {
 	stats := newStatsCollector()
 	mux := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if req.URL.Path == "/__stats" {
-			statsHandler(stats).ServeHTTP(w, req)
+			statsHandler(stats, nil).ServeHTTP(w, req)
 			return
 		}
 		newProxyHandler(stats, nil, "").ServeHTTP(w, req)
@@ -902,7 +930,7 @@ func TestStatsByKeyView(t *testing.T) {
 	stats := newStatsCollector()
 	mux := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if req.URL.Path == "/__stats" {
-			statsHandler(stats).ServeHTTP(w, req)
+			statsHandler(stats, nil).ServeHTTP(w, req)
 			return
 		}
 		newProxyHandler(stats, nil, "").ServeHTTP(w, req)
@@ -960,7 +988,7 @@ func TestStatsDistinctCount(t *testing.T) {
 	stats := newStatsCollector()
 	mux := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if req.URL.Path == "/__stats" {
-			statsHandler(stats).ServeHTTP(w, req)
+			statsHandler(stats, nil).ServeHTTP(w, req)
 			return
 		}
 		newProxyHandler(stats, nil, "").ServeHTTP(w, req)
@@ -1026,7 +1054,7 @@ func TestStatsFormatTable(t *testing.T) {
 	stats := newStatsCollector()
 	mux := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if req.URL.Path == "/__stats" {
-			statsHandler(stats).ServeHTTP(w, req)
+			statsHandler(stats, nil).ServeHTTP(w, req)
 			return
 		}
 		newProxyHandler(stats, nil, "").ServeHTTP(w, req)
@@ -1302,4 +1330,178 @@ func TestPassthroughStillWorks(t *testing.T) {
 	if got["path"] != "/api" {
 		t.Errorf("纯透传 path = %v, 期望 /api", got["path"])
 	}
+}
+
+// --- 管理界面测试 ----------------------------------------------------
+
+// TestAdminLoginRequired 验证未登录访问 /__admin 跳转登录页。
+func TestAdminLoginRequired(t *testing.T) {
+	proxy := startProxyWithAdmin(t, "secret123", nil)
+	defer proxy.Close()
+
+	// 用不跟随重定向的 client(否则会跟到 login 页返回 200)
+	noRedirect := &http.Client{
+		Transport: &http.Transport{DisableCompression: true},
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	resp, err := noRedirect.Get(proxy.URL + "/__admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 303 {
+		t.Errorf("未登录状态码 = %d, 期望 303(跳转登录)", resp.StatusCode)
+	}
+	loc := resp.Header.Get("Location")
+	if loc != "/__admin/login" {
+		t.Errorf("跳转地址 = %q, 期望 /__admin/login", loc)
+	}
+}
+
+// TestAdminLoginSuccess 验证正确密码登录成功 + 设 cookie。
+func TestAdminLoginSuccess(t *testing.T) {
+	proxy := startProxyWithAdmin(t, "secret123", nil)
+	defer proxy.Close()
+
+	noRedirect := &http.Client{
+		Transport: &http.Transport{DisableCompression: true},
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	resp, err := noRedirect.PostForm(proxy.URL+"/__admin/login",
+		url.Values{"password": {"secret123"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 303 {
+		t.Fatalf("登录状态码 = %d, 期望 303", resp.StatusCode)
+	}
+	cookies := resp.Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("登录后未设置 cookie")
+	}
+	if cookies[0].Name != "lhp_admin" {
+		t.Errorf("cookie 名 = %q, 期望 lhp_admin", cookies[0].Name)
+	}
+}
+
+// TestAdminLoginWrongPassword 验证错误密码登录失败。
+func TestAdminLoginWrongPassword(t *testing.T) {
+	proxy := startProxyWithAdmin(t, "secret123", nil)
+	defer proxy.Close()
+
+	resp, err := noCompressClient.PostForm(proxy.URL+"/__admin/login",
+		url.Values{"password": {"wrong"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 401 {
+		t.Errorf("错误密码状态码 = %d, 期望 401", resp.StatusCode)
+	}
+}
+
+// TestAdminFullFlow 登录后访问 dashboard + keys CRUD + stats。
+func TestAdminFullFlow(t *testing.T) {
+	ks := newKeyStore()
+	proxy := startProxyWithAdmin(t, "pw", ks)
+	defer proxy.Close()
+
+	// 用带 cookie 的 client 登录
+	jar := newTestCookieJar()
+	client := &http.Client{Jar: jar, Transport: &http.Transport{DisableCompression: true}}
+	resp, err := client.PostForm(proxy.URL+"/__admin/login",
+		url.Values{"password": {"pw"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	// 访问 dashboard(应 200)
+	resp, err = client.Get(proxy.URL + "/__admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Errorf("dashboard 状态码 = %d", resp.StatusCode)
+	}
+
+	// 新增 key
+	resp, err = client.PostForm(proxy.URL+"/__admin/keys/new",
+		url.Values{"alias": {"testalias"}, "key": {"sk-test"}, "header": {"Authorization"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	// 验证 key 已添加
+	cfg, ok := ks.lookup("testalias")
+	if !ok || cfg.Key != "sk-test" {
+		t.Errorf("新增 key 未生效: %v", cfg)
+	}
+
+	// 删除 key
+	resp, err = client.PostForm(proxy.URL+"/__admin/keys/delete?alias=testalias", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if _, ok := ks.lookup("testalias"); ok {
+		t.Error("删除后 key 仍存在")
+	}
+}
+
+// TestStatsAuthRequired 验证 /__stats 启用 admin 后需登录。
+func TestStatsAuthRequired(t *testing.T) {
+	proxy := startProxyWithAdmin(t, "pw", nil)
+	defer proxy.Close()
+
+	// 未登录访问 /__stats 应 401
+	resp, err := noCompressClient.Get(proxy.URL + "/__stats")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 401 {
+		t.Errorf("未登录 /__stats 状态码 = %d, 期望 401", resp.StatusCode)
+	}
+}
+
+// TestStatsNoAuthWhenAdminDisabled 验证不启用 admin 时 /__stats 仍公开。
+func TestStatsNoAuthWhenAdminDisabled(t *testing.T) {
+	proxy := startProxyWithAdmin(t, "", nil) // 空密码 = 不启用 admin
+	defer proxy.Close()
+
+	resp, err := noCompressClient.Get(proxy.URL + "/__stats")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	// 不启用 admin 时 /__stats 应正常返回(200)
+	if resp.StatusCode != 200 {
+		t.Errorf("未启用 admin 时 /__stats 状态码 = %d, 期望 200", resp.StatusCode)
+	}
+}
+
+// --- cookie jar 辅助 ---
+
+type testCookieJar struct {
+	cookies map[string][]*http.Cookie
+}
+
+func newTestCookieJar() *testCookieJar {
+	return &testCookieJar{cookies: make(map[string][]*http.Cookie)}
+}
+
+func (j *testCookieJar) SetCookies(u *url.URL, cookies []*http.Cookie) {
+	j.cookies[u.Host] = cookies
+}
+
+func (j *testCookieJar) Cookies(u *url.URL) []*http.Cookie {
+	return j.cookies[u.Host]
 }

@@ -174,3 +174,59 @@ func (ks *keyStore) allow(alias string) bool {
 	}
 	return false
 }
+
+// --- 管理用写方法(给 admin UI 用) ---
+
+// allConfigs 返回所有 alias 配置的快照(深拷贝)。
+func (ks *keyStore) allConfigs() map[string]KeyConfig {
+	ks.mu.RLock()
+	defer ks.mu.RUnlock()
+	out := make(map[string]KeyConfig, len(ks.configs))
+	for k, v := range ks.configs {
+		out[k] = v
+	}
+	return out
+}
+
+// save 写入 ks.path(原子写:tmp+rename)。调用方需持写锁。
+func (ks *keyStore) saveLocked() error {
+	if ks.path == "" {
+		return nil
+	}
+	data, err := yaml.Marshal(ks.configs)
+	if err != nil {
+		return err
+	}
+	tmp := ks.path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, ks.path); err != nil {
+		return err
+	}
+	// 更新 mtime,避免 reloadIfChanged 立刻重读
+	if fi, err := os.Stat(ks.path); err == nil {
+		ks.lastMtime = fi.ModTime()
+	}
+	return nil
+}
+
+// setConfig 新增/更新一个 alias 配置,并持久化到文件。
+func (ks *keyStore) setConfig(alias string, cfg KeyConfig) error {
+	ks.mu.Lock()
+	defer ks.mu.Unlock()
+	ks.configs[alias] = cfg
+	if cfg.Rate > 0 {
+		ks.getOrCreateLimiter(alias, cfg)
+	}
+	return ks.saveLocked()
+}
+
+// deleteConfig 删除一个 alias 配置,并持久化。
+func (ks *keyStore) deleteConfig(alias string) error {
+	ks.mu.Lock()
+	defer ks.mu.Unlock()
+	delete(ks.configs, alias)
+	delete(ks.limiters, alias)
+	return ks.saveLocked()
+}

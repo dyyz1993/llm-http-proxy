@@ -25,6 +25,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -70,12 +71,19 @@ func main() {
 	addr := flag.String("addr", ":8080", "监听地址")
 	persist := flag.String("persist", "", "统计持久化文件路径(为空则不持久化,重启清空)")
 	keys := flag.String("keys", "", "key 注入配置文件路径(keys.yaml,为空则不启用 /k/ 模式)")
+	adminPw := flag.String("admin-password", "", "管理界面密码(为空则不启用 /__admin)。也可用 ADMIN_PASSWORD 环境变量")
 	ver := flag.Bool("version", false, "打印版本号并退出")
 	flag.Parse()
 
 	if *ver {
 		fmt.Printf("llm-http-proxy %s (built %s)\n", version, buildTime)
 		return
+	}
+
+	// 管理密码:flag 优先,其次环境变量
+	adminPassword := *adminPw
+	if adminPassword == "" {
+		adminPassword = os.Getenv("ADMIN_PASSWORD")
 	}
 
 	stats := newStatsCollector()
@@ -102,14 +110,31 @@ func main() {
 		ks.startReloadLoop(10 * time.Second)
 	}
 
+	// 管理界面(密码非空才启用)
+	var admin *adminServer
+	if adminPassword != "" {
+		admin = newAdminServer(adminPassword, stats, ks)
+		log.Printf("管理界面已启用: http://localhost%s/__admin", *addr)
+	}
+
 	// 顶层路由。
 	topHandler := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		// /__admin/* 路由(管理界面,优先匹配)
+		if admin != nil && (req.URL.Path == "/__admin" || strings.HasPrefix(req.URL.Path, "/__admin/")) {
+			admin.handler().ServeHTTP(w, req)
+			return
+		}
 		switch {
 		case req.URL.Path == "/__version":
 			versionHandler(w, req)
 			return
 		case req.URL.Path == "/__stats":
-			statsHandler(stats).ServeHTTP(w, req)
+			// 统计端点鉴权:如果启用了管理界面,需登录才能看
+			var authFn func(*http.Request) bool
+			if admin != nil {
+				authFn = admin.authCheck
+			}
+			statsHandler(stats, authFn).ServeHTTP(w, req)
 			return
 		case ks != nil && strings.HasPrefix(req.URL.Path, "/k/"):
 			// key 注入模式:/k/{alias}/https://目标
