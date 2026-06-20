@@ -234,7 +234,8 @@ func (a *adminServer) handleKeyNew(w http.ResponseWriter, r *http.Request) {
 	alias := strings.TrimSpace(r.FormValue("alias"))
 	key := strings.TrimSpace(r.FormValue("key"))
 	header := strings.TrimSpace(r.FormValue("header"))
-	prefix := strings.TrimSpace(r.FormValue("prefix"))
+	// prefix 不 TrimSpace(保留尾空格,如 "Bearer "),但去掉首空格
+	prefix := strings.TrimLeft(r.FormValue("prefix"), " ")
 	rate := 0
 	burst := 0
 	fmt.Sscanf(r.FormValue("rate"), "%d", &rate)
@@ -246,6 +247,10 @@ func (a *adminServer) handleKeyNew(w http.ResponseWriter, r *http.Request) {
 	}
 	if header == "" {
 		header = "Authorization"
+	}
+	// 智能修正:Authorization + prefix="Bearer"(无尾空格) → 自动加空格
+	if header == "Authorization" && prefix == "Bearer" {
+		prefix = "Bearer "
 	}
 	cfg := KeyConfig{Key: key, Header: header, Prefix: prefix, Rate: rate, Burst: burst}
 	if err := a.keys.setConfig(alias, cfg); err != nil {
