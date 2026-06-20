@@ -200,7 +200,9 @@ func (a *adminServer) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		Uptime:    time.Since(startTime).Round(time.Second).String(),
 		TotalIPs:  len(snap),
 		TotalReq:  totalCount(snap),
-		KeysCount: len(a.keys.allConfigs()),
+	}
+	if a.keys != nil {
+		data.KeysCount = len(a.keys.allConfigs())
 	}
 	renderTemplate(w, "dashboard", data)
 }
