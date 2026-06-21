@@ -219,12 +219,13 @@ func (a *adminServer) handleKeys(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 传给模板,让每行显示可复制的调用地址
+	// 用相对路径(用户已知自己的代理地址,不用从请求推断)
 	data := struct {
-		Aliases map[string]KeyConfig
-		BaseURL string // 代理自己的地址(能从请求推断)
+		Aliases  map[string]KeyConfig
+		BasePath string
 	}{
-		Aliases: a.keys.allConfigs(),
-		BaseURL: fmt.Sprintf("https://%s", r.Host),
+		Aliases:  a.keys.allConfigs(),
+		BasePath: "/k/",
 	}
 	renderTemplate(w, "keys", data)
 }

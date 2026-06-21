@@ -46,7 +46,7 @@ button{padding:10px 20px;cursor:pointer}</style></head>
 {{range $alias, $cfg := .Aliases}}
 <tr>
 <td><b>{{$alias}}</b></td>
-<td><code style="font-size:12px">{{$.BaseURL}}/k/{{$alias}}/</code></td>
+<td><code style="font-size:12px">/k/{{$alias}}/</code></td>
 <td>{{$cfg.Header}}</td>
 <td>{{$cfg.Prefix}}</td>
 <td><code>{{$cfg.Key}}</code></td>
@@ -64,12 +64,12 @@ button{padding:10px 20px;cursor:pointer}</style></head>
 <tr><td>Key</td><td><input name="key" style="width:400px" required></td></tr>
 <tr><td>Header</td><td>
 <select name="header" onchange="setPrefix(this.value)">
-<option value="Authorization">Authorization (Bearer)</option>
+<option value="Authorization" selected>Authorization (Bearer)</option>
 <option value="x-api-key">x-api-key</option>
 <option value="api-key">api-key</option>
 </select>
 </td></tr>
-<tr><td>Prefix</td><td><input name="prefix" id="prefix-input" placeholder="留空自动处理 (Authorization 自动加 Bearer )"></td></tr>
+<tr><td>Prefix</td><td><input name="prefix" id="prefix-input" value="Bearer " placeholder="留空则 Authorization 自动加 Bearer "></td></tr>
 <script>
 function setPrefix(h) {
   var p = document.getElementById('prefix-input');
