@@ -1836,6 +1836,12 @@ func TestLoginFormAutocomplete(t *testing.T) {
 	if !strings.Contains(html, `autocomplete="current-password"`) {
 		t.Error("登录表单缺少 autocomplete=current-password,浏览器无法记住密码")
 	}
+	// 记住密码的 checkbox + localStorage 逻辑也应存在
+	for _, want := range []string{`id="rememberMe"`, `localStorage`, `llm_proxy_pw`} {
+		if !strings.Contains(html, want) {
+			t.Errorf("登录表单缺少记住密码相关元素 %q", want)
+		}
+	}
 }
 
 // --- quota 相关测试 ---

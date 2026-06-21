@@ -11,15 +11,36 @@ var adminTemplates = map[string]string{
 <html lang="zh-CN"><head><meta charset="utf-8"><title>登录 - llm-http-proxy</title>
 <style>body{font-family:system-ui;margin:40px auto;max-width:400px}
 input{display:block;margin:8px 0;padding:8px;width:100%;box-sizing:border-box}
-button{padding:10px 20px;cursor:pointer}</style></head>
+input[type=checkbox]{display:inline;width:auto;margin-right:6px}
+button{padding:10px 20px;cursor:pointer}
+.remember{display:flex;align-items:center;margin:4px 0 12px;font-size:14px;color:#555}
+.remember input{margin:0 6px 0 0}</style></head>
 <body><h2>llm-http-proxy 管理</h2>
-<form method="post" action="/__admin/login" autocomplete="on">
+<form method="post" action="/__admin/login" autocomplete="on" id="loginForm">
 <!-- 隐藏的用户名字段,让浏览器密码管理器能关联保存密码 -->
 <input type="text" name="username" value="admin" autocomplete="username" style="display:none">
 <label>密码:</label>
-<input type="password" name="password" autocomplete="current-password" autofocus required>
+<input type="password" name="password" id="pwInput" autocomplete="current-password" autofocus required>
+<label class="remember"><input type="checkbox" id="rememberMe">记住密码(仅存本机浏览器)</label>
 <button type="submit">登录</button>
-</form></body></html>`,
+</form>
+<script>
+(function(){
+  // 记住密码:勾选后明文存 localStorage(本机浏览器,仅自用,关闭即弃)
+  var KEY='llm_proxy_pw';
+  var pw=document.getElementById('pwInput');
+  var cb=document.getElementById('rememberMe');
+  // 页面加载:如果之前存过,自动填充并勾选
+  var saved=localStorage.getItem(KEY);
+  if(saved){pw.value=saved;cb.checked=true;}
+  // 登录提交时根据勾选状态决定存/删
+  document.getElementById('loginForm').addEventListener('submit',function(){
+    if(cb.checked){localStorage.setItem(KEY,pw.value);}
+    else{localStorage.removeItem(KEY);}
+  });
+})();
+</script>
+</body></html>`,
 
 	"dashboard": `<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8"><title>Dashboard - llm-http-proxy</title>
