@@ -133,6 +133,7 @@ func (a *adminServer) handler() http.Handler {
 	mux.HandleFunc("/__admin/keys/delete", a.requireAuth(a.handleKeyDelete))
 	mux.HandleFunc("/__admin/stats", a.requireAuth(a.handleStats))
 	mux.HandleFunc("/__admin/logs", a.requireAuth(a.handleLogs))
+	mux.HandleFunc("/__admin/quota/refresh", a.requireAuth(a.handleQuotaRefresh))
 	return mux
 }
 
@@ -214,6 +215,18 @@ func (a *adminServer) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	renderTemplate(w, "dashboard", data)
+}
+
+// handleQuotaRefresh 手动触发配额立即刷新,刷新完跳回 Dashboard。
+// 解决"刚加完 key 要等 5 分钟才看到配额"的问题。
+func (a *adminServer) handleQuotaRefresh(w http.ResponseWriter, r *http.Request) {
+	if a.quota == nil {
+		renderMsg(w, "配额刷新不可用", "启动时需加 -keys 参数才能拉取配额。")
+		return
+	}
+	n := a.quota.refreshNow(a.keys)
+	renderMsg(w, "配额已刷新",
+		fmt.Sprintf("已重新拉取 %d 个 key 的配额数据,返回 Dashboard 查看。", n))
 }
 
 // --- Keys 管理 ---

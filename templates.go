@@ -57,7 +57,7 @@ button{padding:10px 20px;cursor:pointer}
 <tr><td>Key 配置数</td><td>{{.KeysCount}}</td></tr>
 </table>
 {{if .QuotaHTML}}
-<h2>Key 配额</h2>
+<h2>Key 配额 <a href="/__admin/quota/refresh"><button type="button" style="font-size:13px;padding:3px 12px;vertical-align:middle">⟳ 立即刷新</button></a></h2>
 {{.QuotaHTML}}
 {{end}}
 </body></html>`,

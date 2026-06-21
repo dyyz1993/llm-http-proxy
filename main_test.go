@@ -149,7 +149,12 @@ func startProxyWithKeys(t *testing.T, ks *keyStore) *httptest.Server {
 func startProxyWithAdmin(t *testing.T, password string, ks *keyStore) *httptest.Server {
 	t.Helper()
 	stats := newStatsCollector()
-	admin := newAdminServer(password, stats, ks, nil)
+	// 跟 main.go 一致:ks != nil 时才建配额缓存
+	var qc *quotaCache
+	if ks != nil {
+		qc = newQuotaCache()
+	}
+	admin := newAdminServer(password, stats, ks, qc)
 	mux := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if admin != nil && (req.URL.Path == "/__admin" || strings.HasPrefix(req.URL.Path, "/__admin/")) {
 			admin.handler().ServeHTTP(w, req)
@@ -1841,6 +1846,45 @@ func TestLoginFormAutocomplete(t *testing.T) {
 		if !strings.Contains(html, want) {
 			t.Errorf("登录表单缺少记住密码相关元素 %q", want)
 		}
+	}
+}
+
+// TestAdminQuotaRefresh 验证配额刷新端点存在、需鉴权、登录后能触发。
+func TestAdminQuotaRefresh(t *testing.T) {
+	ks := newKeyStore()
+	// 故意放一个明显无效的 key,验证刷新不会因为拉取失败而 panic
+	ks.setConfig("fake", KeyConfig{Key: "sk-not-a-real-key", Header: "Authorization", Prefix: "Bearer "})
+	proxy := startProxyWithAdmin(t, "pw", ks)
+	defer proxy.Close()
+
+	// 未登录:requireAuth 会重定向到登录页(http.Get 默认跟随,最终落在 login 200)
+	noAuthClient := &http.Client{Transport: &http.Transport{DisableCompression: true}}
+	resp, err := noAuthClient.Get(proxy.URL + "/__admin/quota/refresh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	finalURL := resp.Request.URL.String()
+	resp.Body.Close()
+	if !strings.HasSuffix(finalURL, "/__admin/login") {
+		t.Errorf("未登录访问刷新端点应重定向到登录页, got %s", finalURL)
+	}
+
+	// 登录后访问应成功(即使 key 无效拉不到配额,也不应报错)
+	jar := newTestCookieJar()
+	client := &http.Client{Jar: jar, Transport: &http.Transport{DisableCompression: true}}
+	resp, _ = client.PostForm(proxy.URL+"/__admin/login", url.Values{"password": {"pw"}})
+	resp.Body.Close()
+
+	resp, err = client.Get(proxy.URL + "/__admin/quota/refresh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	html := string(body)
+	// 应显示刷新成功提示(无效 key 被跳过,数量为 0 也算正常)
+	if !strings.Contains(html, "配额已刷新") {
+		t.Errorf("刷新端点应返回成功提示, got: %s", html[:min(200, len(html))])
 	}
 }
 

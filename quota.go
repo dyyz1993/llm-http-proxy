@@ -146,6 +146,18 @@ func (qc *quotaCache) getAll() []cachedQuota {
 	return out
 }
 
+// refreshNow 立即同步刷新配额缓存(不等 ticker),返回刷新到的 key 数量。
+// 给 Dashboard 的手动"刷新"按钮用——刚加完 key 不用干等 5 分钟。
+func (qc *quotaCache) refreshNow(ks *keyStore) int {
+	if ks == nil {
+		return 0
+	}
+	qc.fetchAll(ks.allConfigs())
+	qc.mu.RLock()
+	defer qc.mu.RUnlock()
+	return len(qc.entries)
+}
+
 // startLoop 后台定时刷新配额缓存。
 func (qc *quotaCache) startLoop(ks *keyStore) {
 	go func() {
