@@ -2,7 +2,7 @@
 //
 // 流程:
 //   keyStore 每 5 分钟遍历 keys.yaml 里所有 key,调 api.z.ai 的 /api/monitor/usage/quota/limit
-//   接口获取每个 key 的限额数据(周期额度/日额度/月时长等),缓存在 quotaCache 里。
+//   接口获取每个 key 的限额数据(周期额度/周额度/月度时长等),缓存在 quotaCache 里。
 //   Dashboard 页面直接从缓存读,不阻塞页面加载。
 //
 // 注意:配额数据是 api.z.ai 侧的统计,仅供展示参考,不参与代理转发逻辑。
@@ -163,6 +163,11 @@ func (qc *quotaCache) startLoop(ks *keyStore) {
 // ---------- 格式化工具(给模板用) ----------
 
 // unitLabel 返回 unit 代码的中文描述。
+// z.ai 的配额维度:
+//
+//	unit=3: 周期内(5小时滚动窗口)
+//	unit=6: 周额度(max 套餐才有,滚动重置)
+//	unit=5: 月度时长(月底重置)
 func unitLabel(unit int) string {
 	switch unit {
 	case 3:
@@ -170,7 +175,7 @@ func unitLabel(unit int) string {
 	case 5:
 		return "月度时长"
 	case 6:
-		return "日额度"
+		return "周额度"
 	default:
 		return fmt.Sprintf("额度(%d)", unit)
 	}

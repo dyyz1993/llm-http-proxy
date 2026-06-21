@@ -1872,7 +1872,7 @@ func TestUnitLabel(t *testing.T) {
 	cases := map[int]string{
 		3: "周期额度",
 		5: "月度时长",
-		6: "日额度",
+		6: "周额度",
 		7: "额度(7)", // 未知 unit, fallback
 	}
 	for unit, want := range cases {
