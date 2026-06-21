@@ -109,9 +109,8 @@ jobs:
 
       - name: Verify
         run: |
-          echo "=== 公网验证 ${{ matrix.name }} ==="
-          curl -s -o /dev/null -w "HTTP %{http_code} 耗时 %{time_total}s\n" \
-            "http://${{ matrix.host }}:8080/__version"
+          echo "=== 内网验证 ${{ matrix.name }}(通过 SSH 本地 curl,不依赖公网端口) ==="
+          ssh target 'curl -s -o /dev/null -w "HTTP %{http_code} 耗时 %{time_total}s\n" http://127.0.0.1:8080/__version'
 
   # --- jkj 容器:进容器换二进制(不碰宿主机 docker) ---
   # 仅手动触发(jd 验证 OK 后再发 NAS),避免新版本同时上两台。
