@@ -1,6 +1,10 @@
 name: Deploy
 
-# 打 tag(release 完成后)自动同时部署到所有配置的服务器,也可手动触发。
+# 部署策略:分阶段发布。
+#   - jd:打 tag → Release 构建完成 → 本 workflow 自动部署(自动触发)
+#   - jkj (NAS):仅手动触发(jd 验证 OK 后,在 Actions 页 Run workflow 并指定 tag)
+#
+# 这样可以"先发 jd,没问题再发 NAS",避免新版本同时上两台。
 #
 # 新增服务器:在 strategy.matrix.include 下加一条,并在 GitHub secret 里
 # 配对应的 SSH 私钥(<NAME>_SSH_KEY)。IP/用户写在这里即可(不敏感)。
@@ -10,12 +14,25 @@ on:
     types: [completed]
     branches: ["v*"]
   workflow_dispatch:
+    inputs:
+      target:
+        description: "部署目标(留空=jd,填 jkj=只部署 NAS)"
+        type: choice
+        options:
+          - jd
+          - jkj
+        default: jd
+      tag:
+        description: "要部署的 tag(如 v2.1.3,留空=最新 release)"
+        required: false
+        type: string
 
 jobs:
   deploy:
     name: Deploy to ${{ matrix.name }}
     runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    # 自动触发(Release 完成)→ 部署 jd;手动触发且 target=jd → 也部署 jd
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.target == 'jd' || github.event_name == 'workflow_run' }}
     strategy:
       fail-fast: false   # 一台失败不影响其他台
       matrix:
@@ -53,13 +70,19 @@ jobs:
           echo "=== 测试连接 ${{ matrix.name }} ==="
           ssh target 'echo connected; hostname; uname -m'
 
-      - name: Get latest release tag
+      - name: Get tag (manual input or latest)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         id: tag
         run: |
-          TAG=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)
+          # 手动触发的 inputs.tag 优先;留空/自动触发则取最新 release
+          if [ -n "${{ inputs.tag }}" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)
+          fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "将部署 tag: $TAG"
 
       - name: Download binary
         env:
@@ -91,10 +114,11 @@ jobs:
             "http://${{ matrix.host }}:8080/__version"
 
   # --- jkj 容器:进容器换二进制(不碰宿主机 docker) ---
+  # 仅手动触发(jd 验证 OK 后再发 NAS),避免新版本同时上两台。
   deploy-jkj-box:
     name: Deploy to jkj box (in-container)
     runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.target == 'jkj' }}
     steps:
       - name: Configure SSH (to container)
         env:
@@ -113,13 +137,19 @@ jobs:
           echo "=== 连接 jkj 容器(deploy) ==="
           ssh jkj 'echo connected; whoami; uname -m; /opt/proxy/llm-http-proxy -version'
 
-      - name: Get latest release tag
+      - name: Get tag (manual input or latest)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         id: tag
         run: |
-          TAG=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)
+          # 手动触发的 inputs.tag 优先;留空则取最新 release
+          if [ -n "${{ inputs.tag }}" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)
+          fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "将部署 tag: $TAG"
 
       - name: Deploy binary (try in-container curl, fallback to scp+gzip)
         env:
