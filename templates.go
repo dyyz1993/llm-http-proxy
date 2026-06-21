@@ -42,7 +42,7 @@ button{padding:10px 20px;cursor:pointer}</style></head>
 <h2>Key 配置 ({{len .Aliases}})</h2>
 {{if not .Aliases}}<p>暂无配置。在下方添加。</p>{{end}}
 <table>
-<tr><th>Alias</th><th>调用地址</th><th>Header</th><th>Prefix</th><th>Key</th><th>Rate/min</th><th>Burst</th><th>操作</th></tr>
+<tr><th>Alias</th><th>调用地址</th><th>Header</th><th>Prefix</th><th>Key</th><th>Rate/min</th><th>Burst</th><th>有效期</th><th>操作</th></tr>
 {{range $alias, $cfg := .Aliases}}
 <tr>
 <td><b>{{$alias}}</b></td>
@@ -52,6 +52,7 @@ button{padding:10px 20px;cursor:pointer}</style></head>
 <td><code>{{$cfg.Key}}</code></td>
 <td>{{if $cfg.Rate}}{{$cfg.Rate}}{{else}}-{{end}}</td>
 <td>{{if $cfg.Burst}}{{$cfg.Burst}}{{else}}-{{end}}</td>
+<td>{{if $cfg.Expires}}{{$cfg.Expires}}{{else}}永久{{end}}</td>
 <td><form method="post" action="/__admin/keys/delete?alias={{$alias}}" style="display:inline">
 <button type="submit" onclick="return confirm('删除 {{$alias}}?')">删除</button></form></td>
 </tr>
@@ -79,6 +80,7 @@ function setPrefix(h) {
 </script>
 <tr><td>Rate/min</td><td><input name="rate" type="number" placeholder="0=不限流"></td></tr>
 <tr><td>Burst</td><td><input name="burst" type="number" placeholder="0=默认"></td></tr>
+<tr><td>有效期</td><td><input name="expires" type="date" placeholder="留空=永久有效"></td></tr>
 </table>
 <button type="submit">保存</button>
 </form>

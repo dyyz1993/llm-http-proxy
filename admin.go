@@ -28,7 +28,7 @@ import (
 
 // cookieName 是登录态 cookie 的名字。
 const cookieName = "lhp_admin"
-const cookieTTL = 24 * time.Hour
+const cookieTTL = 30 * 24 * time.Hour // 30 天,不用频繁登录
 
 // adminServer 是管理界面的核心,持有所有依赖。
 type adminServer struct {
@@ -249,6 +249,7 @@ func (a *adminServer) handleKeyNew(w http.ResponseWriter, r *http.Request) {
 	burst := 0
 	fmt.Sscanf(r.FormValue("rate"), "%d", &rate)
 	fmt.Sscanf(r.FormValue("burst"), "%d", &burst)
+	expires := strings.TrimSpace(r.FormValue("expires"))
 
 	if alias == "" || key == "" {
 		renderMsg(w, "错误", "alias 和 key 不能为空")
@@ -261,7 +262,7 @@ func (a *adminServer) handleKeyNew(w http.ResponseWriter, r *http.Request) {
 	if header == "Authorization" && prefix == "Bearer" {
 		prefix = "Bearer "
 	}
-	cfg := KeyConfig{Key: key, Header: header, Prefix: prefix, Rate: rate, Burst: burst}
+	cfg := KeyConfig{Key: key, Header: header, Prefix: prefix, Rate: rate, Burst: burst, Expires: expires}
 	if err := a.keys.setConfig(alias, cfg); err != nil {
 		renderMsg(w, "保存失败", err.Error())
 		return

@@ -16,13 +16,14 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// KeyConfig 是单个 alias 的注入规则 + 可选限流。
+// KeyConfig 是单个 alias 的注入规则 + 可选限流 + 可选有效期。
 type KeyConfig struct {
-	Key    string `yaml:"key"`    // 真实 API key(不对外暴露)
-	Header string `yaml:"header"` // 注入到哪个 header: Authorization / x-api-key / api-key
-	Prefix string `yaml:"prefix"` // 可选前缀(如 Authorization 需要 "Bearer ")
-	Rate   int    `yaml:"rate"`   // 限流:每分钟补充令牌数(0=不限流)
-	Burst  int    `yaml:"burst"`  // 限流:桶容量上限(突发上限)
+	Key     string `yaml:"key"`     // 真实 API key(不对外暴露)
+	Header  string `yaml:"header"`  // 注入到哪个 header: Authorization / x-api-key / api-key
+	Prefix  string `yaml:"prefix"`  // 可选前缀(如 Authorization 需要 "Bearer ")
+	Rate    int    `yaml:"rate"`    // 限流:每分钟补充令牌数(0=不限流)
+	Burst   int    `yaml:"burst"`   // 限流:桶容量上限(突发上限)
+	Expires string `yaml:"expires"` // 可选有效期:YYYY-MM-DD 格式,到期后失效(空=永久)
 }
 
 // rateLimiter 是单个别名的令牌桶状态。
@@ -138,12 +139,37 @@ func (ks *keyStore) startReloadLoop(interval time.Duration) {
 	}()
 }
 
-// lookup 查找某个 alias 的配置。不存在返回 ok=false。
+// lookup 查找某个 alias 的配置。不存在或已过期返回 ok=false。
 func (ks *keyStore) lookup(alias string) (KeyConfig, bool) {
 	ks.mu.RLock()
 	defer ks.mu.RUnlock()
 	cfg, ok := ks.configs[alias]
-	return cfg, ok
+	if !ok {
+		return cfg, false
+	}
+	// 检查有效期
+	if cfg.Expires != "" {
+		exp, err := time.Parse("2006-01-02", cfg.Expires)
+		if err == nil && time.Now().After(exp.Add(24*time.Hour)) {
+			return cfg, false // 已过期
+		}
+	}
+	return cfg, true
+}
+
+// isExpired 检查 alias 是否存在但已过期(用于区分"不存在"和"过期")。
+func (ks *keyStore) isExpired(alias string) bool {
+	ks.mu.RLock()
+	defer ks.mu.RUnlock()
+	cfg, ok := ks.configs[alias]
+	if !ok || cfg.Expires == "" {
+		return false
+	}
+	exp, err := time.Parse("2006-01-02", cfg.Expires)
+	if err != nil {
+		return false
+	}
+	return time.Now().After(exp.Add(24 * time.Hour))
 }
 
 // allow 检查 alias 是否被限流放行。返回 true=允许,false=超限。

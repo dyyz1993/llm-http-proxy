@@ -207,10 +207,15 @@ func handleKeyRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, stat
 		return
 	}
 
-	// 查 alias 配置
+	// 查 alias 配置(lookup 内含过期检查)
 	cfg, ok := ks.lookup(alias)
 	if !ok {
-		http.Error(w, "未知的 key 标识: "+alias+"\n", http.StatusNotFound)
+		// 区分"不存在"和"已过期"
+		if ks.isExpired(alias) {
+			http.Error(w, "此 key 标识已过期: "+alias+"\n", http.StatusGone)
+		} else {
+			http.Error(w, "未知的 key 标识: "+alias+"\n", http.StatusNotFound)
+		}
 		return
 	}
 
