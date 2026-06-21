@@ -62,8 +62,21 @@ button{padding:10px 20px;cursor:pointer}</style></head>
 <table>
 <tr><td>Alias</td><td><input name="alias" placeholder="如 glm" required></td></tr>
 <tr><td>Key</td><td><input name="key" style="width:400px" required></td></tr>
-<tr><td>Header</td><td><input name="header" placeholder="Authorization(默认)"></td></tr>
-<tr><td>Prefix</td><td><input name="prefix" placeholder="Bearer (留空则 Authorization 自动加 Bearer)"></td></tr>
+<tr><td>Header</td><td>
+<select name="header" onchange="setPrefix(this.value)">
+<option value="Authorization">Authorization (Bearer)</option>
+<option value="x-api-key">x-api-key</option>
+<option value="api-key">api-key</option>
+</select>
+</td></tr>
+<tr><td>Prefix</td><td><input name="prefix" id="prefix-input" placeholder="留空自动处理 (Authorization 自动加 Bearer )"></td></tr>
+<script>
+function setPrefix(h) {
+  var p = document.getElementById('prefix-input');
+  if (h == 'Authorization' && !p.value) p.value = 'Bearer ';
+  else if (h != 'Authorization' && p.value == 'Bearer ') p.value = '';
+}
+</script>
 <tr><td>Rate/min</td><td><input name="rate" type="number" placeholder="0=不限流"></td></tr>
 <tr><td>Burst</td><td><input name="burst" type="number" placeholder="0=默认"></td></tr>
 </table>
