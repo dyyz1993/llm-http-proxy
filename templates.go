@@ -48,7 +48,7 @@ button{padding:10px 20px;cursor:pointer}</style></head>
 {{range $alias, $cfg := .Aliases}}
 <tr>
 <td><b>{{$alias}}</b></td>
-<td><code style="font-size:12px">/k/{{$alias}}/</code></td>
+<td><code style="font-size:12px" id="url-{{$alias}}">/k/{{$alias}}/</code> <button type="button" onclick="copyURL('{{$alias}}')" style="padding:2px 8px;font-size:12px">复制</button></td>
 <td>{{$cfg.Header}}</td>
 <td>{{$cfg.Prefix}}</td>
 <td><code>{{$cfg.Key}}</code></td>
@@ -82,6 +82,16 @@ function setPrefix(h) {
   var p = document.getElementById('prefix-input');
   if (h == 'Authorization' && !p.value) p.value = 'Bearer ';
   else if (h != 'Authorization' && p.value == 'Bearer ') p.value = '';
+}
+// 复制调用地址到剪贴板(用当前页面的 origin + /k/{alias}/ 拼成完整 URL)
+function copyURL(alias) {
+  var el = document.getElementById('url-' + alias);
+  var full = location.origin + el.textContent;
+  navigator.clipboard.writeText(full).then(function() {
+    var b = event.target; var old = b.textContent;
+    b.textContent = '已复制!'; b.disabled = true;
+    setTimeout(function(){ b.textContent = old; b.disabled = false; }, 1500);
+  });
 }
 </script>
 <tr><td>Rate/min</td><td><input name="rate" type="number" value="{{if or .Editing .Copying}}{{.EditCfg.Rate}}{{end}}" placeholder="0=不限流"></td></tr>

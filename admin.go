@@ -276,7 +276,7 @@ func (a *adminServer) handleKeyNew(w http.ResponseWriter, r *http.Request) {
 	burst := 0
 	fmt.Sscanf(r.FormValue("rate"), "%d", &rate)
 	fmt.Sscanf(r.FormValue("burst"), "%d", &burst)
-	expires := strings.TrimSpace(r.FormValue("expires"))
+	expires := normalizeExpires(r.FormValue("expires"))
 
 	if alias == "" {
 		renderMsg(w, "错误", "alias 不能为空")

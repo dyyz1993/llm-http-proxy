@@ -38,9 +38,11 @@ var expiresLayouts = []string{
 // parseExpires 把 expires 字符串解析成北京时间的时间点。
 // 纯日期格式("2026-06-22") → 当天结束(23:59:59),即"这一天内都有效"。
 // 时分格式("2026-06-22 09:00") → 精确到那个时刻。
+// 注意:同时接受 datetime-local 控件提交的 ISO 格式("2026-06-22T09:00")。
 // 解析失败返回零值 + false。
 func parseExpires(s string) (time.Time, bool) {
-	s = strings.TrimSpace(s)
+	// datetime-local 控件提交的是 ISO 格式(用 T 分隔),统一换成空格再解析
+	s = strings.Replace(strings.TrimSpace(s), "T", " ", 1)
 	if s == "" {
 		return time.Time{}, false
 	}
@@ -55,6 +57,14 @@ func parseExpires(s string) (time.Time, bool) {
 		}
 	}
 	return time.Time{}, false
+}
+
+// normalizeExpires 把有效期规范化成统一的存储格式(空格分隔)。
+// datetime-local 提交 "2026-06-22T09:00" → 存为 "2026-06-22 09:00"。
+// 非法/空字符串原样返回(由调用方决定是否接受)。
+func normalizeExpires(s string) string {
+	s = strings.TrimSpace(s)
+	return strings.Replace(s, "T", " ", 1)
 }
 
 // rateLimiter 是单个别名的令牌桶状态。

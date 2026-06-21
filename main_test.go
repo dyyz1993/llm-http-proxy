@@ -1601,6 +1601,7 @@ func TestParseExpires(t *testing.T) {
 	}{
 		{"时分格式", "2026-06-22 09:00", true, "2026-06-22T09:00:00+08:00"},
 		{"时分秒格式", "2026-06-22 09:00:30", true, "2026-06-22T09:00:30+08:00"},
+		{"datetime-local的T分隔", "2026-06-22T09:00", true, "2026-06-22T09:00:00+08:00"},
 		{"纯日期(兼容老格式)", "2026-06-22", true, "2026-06-22T23:59:59+08:00"},
 		{"空=永久", "", false, ""},
 		{"乱码", "not-a-date", false, ""},
@@ -1639,6 +1640,81 @@ func TestParseExpires(t *testing.T) {
 	ks.setConfig("future", KeyConfig{Key: "sk", Expires: now.Add(1 * time.Hour).Format("2006-01-02 15:04")})
 	if _, ok := ks.lookup("future"); !ok {
 		t.Error("未来时刻的有效期应可用,但 lookup 返回过期")
+	}
+}
+
+// TestNormalizeExpires 验证 datetime-local 的 T 分隔符被规范成空格存储。
+func TestNormalizeExpires(t *testing.T) {
+	cases := map[string]string{
+		"2026-06-22T09:00":    "2026-06-22 09:00", // T → 空格
+		"2026-06-22 09:00":    "2026-06-22 09:00", // 已经是空格,不变
+		"  2026-06-22T09:00 ": "2026-06-22 09:00", // 去首尾空格 + T→空格
+		"":                    "",                 // 空
+		"2026-06-22":          "2026-06-22",       // 纯日期无 T,不变
+	}
+	for in, want := range cases {
+		if got := normalizeExpires(in); got != want {
+			t.Errorf("normalizeExpires(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestAdminKeyExpiresDatetimeLocal 验证 datetime-local 控件提交的 T 分隔格式能保存。
+// 这是 v2.1.4 的回归 bug:界面选了时间但 parseExpires 不认 T,被拒。
+func TestAdminKeyExpiresDatetimeLocal(t *testing.T) {
+	ks := newKeyStore()
+	proxy := startProxyWithAdmin(t, "pw", ks)
+	defer proxy.Close()
+
+	jar := newTestCookieJar()
+	client := &http.Client{Jar: jar, Transport: &http.Transport{DisableCompression: true}}
+	resp, _ := client.PostForm(proxy.URL+"/__admin/login", url.Values{"password": {"pw"}})
+	resp.Body.Close()
+
+	// datetime-local 提交的是 ISO 格式(带 T)
+	resp, err := client.PostForm(proxy.URL+"/__admin/keys/new",
+		url.Values{"alias": {"dt"}, "key": {"sk-x"}, "expires": {"2026-06-22T09:00"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	// 不应被拒(不是错误页),且保存的是规范化的空格格式
+	cfg, ok := ks.lookup("dt")
+	if !ok {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("datetime-local 格式有效期应保存成功,但被拒。响应: %s", string(body))
+	}
+	if cfg.Expires != "2026-06-22 09:00" {
+		t.Errorf("保存的 expires = %q, want 规范化的 '2026-06-22 09:00'", cfg.Expires)
+	}
+}
+
+// TestAdminKeysCopyURLButton 验证 keys 页有复制调用地址的按钮。
+func TestAdminKeysCopyURLButton(t *testing.T) {
+	ks := newKeyStore()
+	ks.setConfig("glm", KeyConfig{Key: "sk", Header: "Authorization", Prefix: "Bearer "})
+	proxy := startProxyWithAdmin(t, "pw", ks)
+	defer proxy.Close()
+
+	jar := newTestCookieJar()
+	client := &http.Client{Jar: jar, Transport: &http.Transport{DisableCompression: true}}
+	resp, _ := client.PostForm(proxy.URL+"/__admin/login", url.Values{"password": {"pw"}})
+	resp.Body.Close()
+
+	resp, err := client.Get(proxy.URL + "/__admin/keys")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	html := string(body)
+
+	// 应有复制地址的按钮 + copyURL JS 函数 + 每行调用地址带 id
+	for _, want := range []string{`id="url-glm"`, `copyURL(`, `复制`} {
+		if !strings.Contains(html, want) {
+			t.Errorf("keys 页缺少复制地址相关元素 %q", want)
+		}
 	}
 }
 
