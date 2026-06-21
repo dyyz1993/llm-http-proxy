@@ -1589,6 +1589,162 @@ func TestAdminKeyInvalidExpires(t *testing.T) {
 	}
 }
 
+// TestParseExpires 验证有效期解析:时分格式、纯日期兼容、北京时间、非法格式。
+func TestParseExpires(t *testing.T) {
+	now := time.Now().In(beijing)
+
+	cases := []struct {
+		name    string
+		input   string
+		wantOK  bool
+		wantExp string // 期望的过期时刻(RFC3339,北京时间)
+	}{
+		{"时分格式", "2026-06-22 09:00", true, "2026-06-22T09:00:00+08:00"},
+		{"时分秒格式", "2026-06-22 09:00:30", true, "2026-06-22T09:00:30+08:00"},
+		{"纯日期(兼容老格式)", "2026-06-22", true, "2026-06-22T23:59:59+08:00"},
+		{"空=永久", "", false, ""},
+		{"乱码", "not-a-date", false, ""},
+		{"只有时分没日期", "09:00", false, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			exp, ok := parseExpires(c.input)
+			if ok != c.wantOK {
+				t.Fatalf("parseExpires(%q) ok=%v, want %v", c.input, ok, c.wantOK)
+			}
+			if !ok {
+				return
+			}
+			got := exp.Format(time.RFC3339)
+			if got != c.wantExp {
+				t.Errorf("parseExpires(%q) = %v, want %v", c.input, got, c.wantExp)
+			}
+		})
+	}
+
+	// 时区检查:确保解析用的是北京时间(+08:00),不是 UTC
+	exp, _ := parseExpires("2026-06-22 09:00")
+	_, offset := exp.Zone()
+	if offset != 8*3600 {
+		t.Errorf("parseExpires 时区偏移=%d 秒, 期望 +28800(北京),这是 UTC 8 小时 bug", offset)
+	}
+
+	// 过期判定:设一个过去的时刻,lookup 应返回 ok=false
+	ks := newKeyStore()
+	ks.setConfig("past", KeyConfig{Key: "sk", Expires: now.Add(-1 * time.Hour).Format("2006-01-02 15:04")})
+	if _, ok := ks.lookup("past"); ok {
+		t.Error("过去时刻的有效期应已过期,但 lookup 返回可用")
+	}
+	// 设一个未来时刻,lookup 应返回 ok=true
+	ks.setConfig("future", KeyConfig{Key: "sk", Expires: now.Add(1 * time.Hour).Format("2006-01-02 15:04")})
+	if _, ok := ks.lookup("future"); !ok {
+		t.Error("未来时刻的有效期应可用,但 lookup 返回过期")
+	}
+}
+
+// TestAdminKeyCopyPrefill 验证 ?copy=alias 时表单回填配置但 alias 留空。
+func TestAdminKeyCopyPrefill(t *testing.T) {
+	ks := newKeyStore()
+	ks.setConfig("glm", KeyConfig{
+		Key: "sk-orig", Header: "x-api-key", Prefix: "",
+		Rate: 60, Burst: 10, Expires: "2026-06-22 09:00",
+	})
+	proxy := startProxyWithAdmin(t, "pw", ks)
+	defer proxy.Close()
+
+	jar := newTestCookieJar()
+	client := &http.Client{Jar: jar, Transport: &http.Transport{DisableCompression: true}}
+	resp, _ := client.PostForm(proxy.URL+"/__admin/login", url.Values{"password": {"pw"}})
+	resp.Body.Close()
+
+	// 带 ?copy=glm 访问 keys 页
+	resp, err := client.Get(proxy.URL + "/__admin/keys?copy=glm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	html := string(body)
+
+	// 复制模式:标题显示"复制自 glm",配置回填,但 alias 是输入框(不是只读)
+	for _, want := range []string{"复制自 glm", `value="sk-orig"`, `value="2026-06-22 09:00"`, `value="60"`, `value="10"`, `复制为新别名`} {
+		if !strings.Contains(html, want) {
+			t.Errorf("copy 表单缺少 %q", want)
+		}
+	}
+	// alias 应是可输入的(带 name="alias" 的 input),不是只读的 <b>glm</b>
+	if !strings.Contains(html, `name="alias"`) {
+		t.Error("复制模式 alias 应可输入(有 name=alias 的 input)")
+	}
+	if strings.Contains(html, "（不可修改）") {
+		t.Error("复制模式 alias 不应是只读的")
+	}
+}
+
+// TestAdminKeyCopyCreatesNewAlias 验证复制后创建新 alias,原 alias 不受影响。
+func TestAdminKeyCopyCreatesNewAlias(t *testing.T) {
+	ks := newKeyStore()
+	ks.setConfig("glm", KeyConfig{Key: "sk-orig", Header: "Authorization", Prefix: "Bearer "})
+
+	proxy := startProxyWithAdmin(t, "pw", ks)
+	defer proxy.Close()
+
+	jar := newTestCookieJar()
+	client := &http.Client{Jar: jar, Transport: &http.Transport{DisableCompression: true}}
+	resp, _ := client.PostForm(proxy.URL+"/__admin/login", url.Values{"password": {"pw"}})
+	resp.Body.Close()
+
+	// 提交新 alias=glm2,key 沿用(复制场景 key 必填,这里给同样的)
+	resp, err := client.PostForm(proxy.URL+"/__admin/keys/new",
+		url.Values{"alias": {"glm2"}, "key": {"sk-orig"}, "header": {"Authorization"}, "prefix": {"Bearer "}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	// 两个 alias 都应存在
+	if _, ok := ks.lookup("glm"); !ok {
+		t.Error("复制后原 alias glm 应仍存在")
+	}
+	cfg2, ok := ks.lookup("glm2")
+	if !ok {
+		t.Fatal("复制未创建新 alias glm2")
+	}
+	if cfg2.Key != "sk-orig" {
+		t.Errorf("新 alias key = %q, want sk-orig", cfg2.Key)
+	}
+}
+
+// TestAdminKeyExpiresTimeFormat 验证时分格式的有效期能保存且生效。
+func TestAdminKeyExpiresTimeFormat(t *testing.T) {
+	ks := newKeyStore()
+	proxy := startProxyWithAdmin(t, "pw", ks)
+	defer proxy.Close()
+
+	jar := newTestCookieJar()
+	client := &http.Client{Jar: jar, Transport: &http.Transport{DisableCompression: true}}
+	resp, _ := client.PostForm(proxy.URL+"/__admin/login", url.Values{"password": {"pw"}})
+	resp.Body.Close()
+
+	// 提交一个明天 9 点(北京时间)的有效期
+	tomorrow9 := time.Now().In(beijing).Add(26 * time.Hour).Format("2006-01-02 15:04")
+	resp, err := client.PostForm(proxy.URL+"/__admin/keys/new",
+		url.Values{"alias": {"timed"}, "key": {"sk-x"}, "expires": {tomorrow9}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	// 应保存成功(未来时刻 → lookup 可用)
+	cfg, ok := ks.lookup("timed")
+	if !ok {
+		t.Fatal("时分格式有效期保存后 alias 不存在")
+	}
+	if cfg.Expires != tomorrow9 {
+		t.Errorf("保存的 expires = %q, want %q", cfg.Expires, tomorrow9)
+	}
+}
+
 // TestLoginFormAutocomplete 验证登录表单带 autocomplete 属性(浏览器记密码)。
 func TestLoginFormAutocomplete(t *testing.T) {
 	proxy := startProxyWithAdmin(t, "pw", nil)

@@ -10,6 +10,7 @@ package main
 import (
 	"log"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,7 +24,37 @@ type KeyConfig struct {
 	Prefix  string `yaml:"prefix"`  // 可选前缀(如 Authorization 需要 "Bearer ")
 	Rate    int    `yaml:"rate"`    // 限流:每分钟补充令牌数(0=不限流)
 	Burst   int    `yaml:"burst"`   // 限流:桶容量上限(突发上限)
-	Expires string `yaml:"expires"` // 可选有效期:YYYY-MM-DD 格式,到期后失效(空=永久)
+	Expires string `yaml:"expires"` // 可选有效期:"YYYY-MM-DD"(到当天结束) 或 "YYYY-MM-DD HH:MM"(精确到分,北京时间)。空=永久
+}
+
+// expiresLayouts 是支持的有效期格式,按优先级尝试。
+// 全部按北京时间解析(用户填的就是北京时间)。
+var expiresLayouts = []string{
+	"2006-01-02 15:04",    // 时分(精确到分)
+	"2006-01-02 15:04:05", // 时分秒(也兼容)
+	"2006-01-02",          // 纯日期(到当天结束,兼容老配置)
+}
+
+// parseExpires 把 expires 字符串解析成北京时间的时间点。
+// 纯日期格式("2026-06-22") → 当天结束(23:59:59),即"这一天内都有效"。
+// 时分格式("2026-06-22 09:00") → 精确到那个时刻。
+// 解析失败返回零值 + false。
+func parseExpires(s string) (time.Time, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return time.Time{}, false
+	}
+	for _, layout := range expiresLayouts {
+		// 用 ParseInLocation 保证按北京时间解释(而不是 UTC)
+		if t, err := time.ParseInLocation(layout, s, beijing); err == nil {
+			// 纯日期格式:补到当天结束(23:59:59),保证当天内仍可用
+			if layout == "2006-01-02" {
+				return t.Add(23*time.Hour + 59*time.Minute + 59*time.Second), true
+			}
+			return t, true
+		}
+	}
+	return time.Time{}, false
 }
 
 // rateLimiter 是单个别名的令牌桶状态。
@@ -147,10 +178,9 @@ func (ks *keyStore) lookup(alias string) (KeyConfig, bool) {
 	if !ok {
 		return cfg, false
 	}
-	// 检查有效期
+	// 检查有效期(parseExpires 统一处理时分/纯日期 + 北京时区)
 	if cfg.Expires != "" {
-		exp, err := time.Parse("2006-01-02", cfg.Expires)
-		if err == nil && time.Now().After(exp.Add(24*time.Hour)) {
+		if exp, ok := parseExpires(cfg.Expires); ok && time.Now().After(exp) {
 			return cfg, false // 已过期
 		}
 	}
@@ -165,11 +195,11 @@ func (ks *keyStore) isExpired(alias string) bool {
 	if !ok || cfg.Expires == "" {
 		return false
 	}
-	exp, err := time.Parse("2006-01-02", cfg.Expires)
-	if err != nil {
+	exp, ok := parseExpires(cfg.Expires)
+	if !ok {
 		return false
 	}
-	return time.Now().After(exp.Add(24 * time.Hour))
+	return time.Now().After(exp)
 }
 
 // allow 检查 alias 是否被限流放行。返回 true=允许,false=超限。

@@ -57,25 +57,26 @@ button{padding:10px 20px;cursor:pointer}</style></head>
 <td>{{if $cfg.Expires}}{{$cfg.Expires}}{{else}}永久{{end}}</td>
 <td style="white-space:nowrap">
 <a href="/__admin/keys?edit={{$alias}}"><button type="button">编辑</button></a>
+<a href="/__admin/keys?copy={{$alias}}"><button type="button">复制</button></a>
 <form method="post" action="/__admin/keys/delete?alias={{$alias}}" style="display:inline">
 <button type="submit" onclick="return confirm('删除 {{$alias}}?')">删除</button></form>
 </td>
 </tr>
 {{end}}
 </table>
-<h3>{{if .Editing}}编辑 {{.EditAlias}}{{else}}新增{{end}}</h3>
+<h3>{{if .Editing}}编辑 {{.EditAlias}}{{else if .Copying}}复制自 {{.CopyFrom}}{{else}}新增{{end}}</h3>
 <form method="post" action="/__admin/keys/new">
 <table>
 <tr><td>Alias</td><td>{{if .Editing}}<b>{{.EditAlias}}</b>（不可修改）{{else}}<input name="alias" placeholder="如 glm" required>{{end}}</td></tr>
-<tr><td>Key</td><td><input name="key" style="width:400px" value="{{if .Editing}}{{.EditCfg.Key}}{{end}}" {{if not .Editing}}required{{end}} placeholder="{{if .Editing}}留空=不修改{{else}}必填{{end}}"></td></tr>
+<tr><td>Key</td><td><input name="key" style="width:400px" value="{{if or .Editing .Copying}}{{.EditCfg.Key}}{{end}}" {{if not .Editing}}required{{end}} placeholder="{{if .Editing}}留空=不修改{{else}}必填{{end}}"></td></tr>
 <tr><td>Header</td><td>
 <select name="header" onchange="setPrefix(this.value)">
-<option value="Authorization" {{if or (not .Editing) (eq .EditCfg.Header "Authorization")}}selected{{end}}>Authorization (Bearer)</option>
-<option value="x-api-key" {{if .Editing}}{{if eq .EditCfg.Header "x-api-key"}}selected{{end}}{{end}}>x-api-key</option>
-<option value="api-key" {{if .Editing}}{{if eq .EditCfg.Header "api-key"}}selected{{end}}{{end}}>api-key</option>
+<option value="Authorization" {{if or (and (not .Editing) (not .Copying)) (eq .EditCfg.Header "Authorization")}}selected{{end}}>Authorization (Bearer)</option>
+<option value="x-api-key" {{if or .Editing .Copying}}{{if eq .EditCfg.Header "x-api-key"}}selected{{end}}{{end}}>x-api-key</option>
+<option value="api-key" {{if or .Editing .Copying}}{{if eq .EditCfg.Header "api-key"}}selected{{end}}{{end}}>api-key</option>
 </select>
 </td></tr>
-<tr><td>Prefix</td><td><input name="prefix" id="prefix-input" value="{{if .Editing}}{{.EditCfg.Prefix}}{{else}}Bearer {{end}}" placeholder="留空则 Authorization 自动加 Bearer "></td></tr>
+<tr><td>Prefix</td><td><input name="prefix" id="prefix-input" value="{{if or .Editing .Copying}}{{.EditCfg.Prefix}}{{else}}Bearer {{end}}" placeholder="留空则 Authorization 自动加 Bearer "></td></tr>
 <script>
 function setPrefix(h) {
   var p = document.getElementById('prefix-input');
@@ -83,13 +84,13 @@ function setPrefix(h) {
   else if (h != 'Authorization' && p.value == 'Bearer ') p.value = '';
 }
 </script>
-<tr><td>Rate/min</td><td><input name="rate" type="number" value="{{if .Editing}}{{.EditCfg.Rate}}{{end}}" placeholder="0=不限流"></td></tr>
-<tr><td>Burst</td><td><input name="burst" type="number" value="{{if .Editing}}{{.EditCfg.Burst}}{{end}}" placeholder="0=默认"></td></tr>
-<tr><td>有效期</td><td><input name="expires" type="date" value="{{if .Editing}}{{.EditCfg.Expires}}{{end}}" placeholder="留空=永久有效"></td></tr>
+<tr><td>Rate/min</td><td><input name="rate" type="number" value="{{if or .Editing .Copying}}{{.EditCfg.Rate}}{{end}}" placeholder="0=不限流"></td></tr>
+<tr><td>Burst</td><td><input name="burst" type="number" value="{{if or .Editing .Copying}}{{.EditCfg.Burst}}{{end}}" placeholder="0=默认"></td></tr>
+<tr><td>有效期</td><td><input name="expires" type="datetime-local" value="{{if or .Editing .Copying}}{{.EditCfg.Expires}}{{end}}" placeholder="留空=永久有效。如 2026-06-22 09:00(北京时间)"></td></tr>
 </table>
 {{if .Editing}}<input type="hidden" name="alias" value="{{.EditAlias}}">{{end}}
-<button type="submit">{{if .Editing}}保存修改{{else}}保存{{end}}</button>
-{{if .Editing}}<a href="/__admin/keys"><button type="button">取消</button></a>{{end}}
+<button type="submit">{{if .Editing}}保存修改{{else if .Copying}}复制为新别名{{else}}保存{{end}}</button>
+{{if or .Editing .Copying}}<a href="/__admin/keys"><button type="button">取消</button></a>{{end}}
 </form>
 </body></html>`,
 

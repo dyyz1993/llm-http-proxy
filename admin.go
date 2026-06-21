@@ -218,15 +218,23 @@ func (a *adminServer) handleKeys(w http.ResponseWriter, r *http.Request) {
 		renderMsg(w, "Key 注入模式未启用", "启动时需加 -keys 参数才能管理 key 配置。")
 		return
 	}
-	// ?edit=alias 时,把该 alias 的现有配置回填到表单(只读 alias,改其他字段)
+	// ?edit=alias:回填配置,alias 只读(改其他字段)
+	// ?copy=alias:回填配置,但 alias 留空可改(基于此配置新建另一个 alias)
 	// 用相对路径(用户已知自己的代理地址,不用从请求推断)
 	editAlias := r.URL.Query().Get("edit")
+	copyAlias := r.URL.Query().Get("copy")
 	var editCfg KeyConfig
 	editing := false
+	copying := false
 	if editAlias != "" {
 		if cfg, ok := a.keys.allConfigs()[editAlias]; ok {
 			editCfg = cfg
 			editing = true
+		}
+	} else if copyAlias != "" {
+		if cfg, ok := a.keys.allConfigs()[copyAlias]; ok {
+			editCfg = cfg
+			copying = true
 		}
 	}
 	data := struct {
@@ -235,12 +243,16 @@ func (a *adminServer) handleKeys(w http.ResponseWriter, r *http.Request) {
 		EditAlias string
 		EditCfg   KeyConfig
 		Editing   bool
+		Copying   bool
+		CopyFrom  string
 	}{
 		Aliases:   a.keys.allConfigs(),
 		BasePath:  "/k/",
 		EditAlias: editAlias,
 		EditCfg:   editCfg,
 		Editing:   editing,
+		Copying:   copying,
+		CopyFrom:  copyAlias,
 	}
 	renderTemplate(w, "keys", data)
 }
@@ -287,10 +299,10 @@ func (a *adminServer) handleKeyNew(w http.ResponseWriter, r *http.Request) {
 	if header == "Authorization" && prefix == "Bearer" {
 		prefix = "Bearer "
 	}
-	// 校验有效期格式(空=永久)
+	// 校验有效期格式(空=永久)。支持 "YYYY-MM-DD" 和 "YYYY-MM-DD HH:MM[:SS]"
 	if expires != "" {
-		if _, err := time.Parse("2006-01-02", expires); err != nil {
-			renderMsg(w, "有效期格式错误", "请用 YYYY-MM-DD 格式,或留空表示永久。")
+		if _, ok := parseExpires(expires); !ok {
+			renderMsg(w, "有效期格式错误", `请用 "YYYY-MM-DD"(到当天结束)或 "YYYY-MM-DD HH:MM"(精确到分,北京时间)格式,或留空表示永久。`)
 			return
 		}
 	}
