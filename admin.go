@@ -218,14 +218,29 @@ func (a *adminServer) handleKeys(w http.ResponseWriter, r *http.Request) {
 		renderMsg(w, "Key 注入模式未启用", "启动时需加 -keys 参数才能管理 key 配置。")
 		return
 	}
-	// 传给模板,让每行显示可复制的调用地址
+	// ?edit=alias 时,把该 alias 的现有配置回填到表单(只读 alias,改其他字段)
 	// 用相对路径(用户已知自己的代理地址,不用从请求推断)
+	editAlias := r.URL.Query().Get("edit")
+	var editCfg KeyConfig
+	editing := false
+	if editAlias != "" {
+		if cfg, ok := a.keys.allConfigs()[editAlias]; ok {
+			editCfg = cfg
+			editing = true
+		}
+	}
 	data := struct {
-		Aliases  map[string]KeyConfig
-		BasePath string
+		Aliases   map[string]KeyConfig
+		BasePath  string
+		EditAlias string
+		EditCfg   KeyConfig
+		Editing   bool
 	}{
-		Aliases:  a.keys.allConfigs(),
-		BasePath: "/k/",
+		Aliases:   a.keys.allConfigs(),
+		BasePath:  "/k/",
+		EditAlias: editAlias,
+		EditCfg:   editCfg,
+		Editing:   editing,
 	}
 	renderTemplate(w, "keys", data)
 }
@@ -251,8 +266,18 @@ func (a *adminServer) handleKeyNew(w http.ResponseWriter, r *http.Request) {
 	fmt.Sscanf(r.FormValue("burst"), "%d", &burst)
 	expires := strings.TrimSpace(r.FormValue("expires"))
 
-	if alias == "" || key == "" {
-		renderMsg(w, "错误", "alias 和 key 不能为空")
+	if alias == "" {
+		renderMsg(w, "错误", "alias 不能为空")
+		return
+	}
+	// 编辑模式:alias 已存在且 key 留空 → 保留原 key
+	if key == "" {
+		if existing, ok := a.keys.allConfigs()[alias]; ok {
+			key = existing.Key
+		}
+	}
+	if key == "" {
+		renderMsg(w, "错误", "key 不能为空")
 		return
 	}
 	if header == "" {
@@ -261,6 +286,13 @@ func (a *adminServer) handleKeyNew(w http.ResponseWriter, r *http.Request) {
 	// 智能修正:Authorization + prefix="Bearer"(无尾空格) → 自动加空格
 	if header == "Authorization" && prefix == "Bearer" {
 		prefix = "Bearer "
+	}
+	// 校验有效期格式(空=永久)
+	if expires != "" {
+		if _, err := time.Parse("2006-01-02", expires); err != nil {
+			renderMsg(w, "有效期格式错误", "请用 YYYY-MM-DD 格式,或留空表示永久。")
+			return
+		}
 	}
 	cfg := KeyConfig{Key: key, Header: header, Prefix: prefix, Rate: rate, Burst: burst, Expires: expires}
 	if err := a.keys.setConfig(alias, cfg); err != nil {

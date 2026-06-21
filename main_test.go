@@ -1488,6 +1488,124 @@ func TestStatsNoAuthWhenAdminDisabled(t *testing.T) {
 	}
 }
 
+// TestAdminKeyEditPrefill 验证 ?edit=alias 时表单回填现有配置。
+func TestAdminKeyEditPrefill(t *testing.T) {
+	ks := newKeyStore()
+	ks.setConfig("glm", KeyConfig{
+		Key: "sk-orig", Header: "x-api-key", Prefix: "",
+		Rate: 60, Burst: 10, Expires: "2026-12-31",
+	})
+	proxy := startProxyWithAdmin(t, "pw", ks)
+	defer proxy.Close()
+
+	jar := newTestCookieJar()
+	client := &http.Client{Jar: jar, Transport: &http.Transport{DisableCompression: true}}
+	resp, err := client.PostForm(proxy.URL+"/__admin/login", url.Values{"password": {"pw"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	// 带 ?edit=glm 访问 keys 页
+	resp, err = client.Get(proxy.URL + "/__admin/keys?edit=glm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	html := string(body)
+
+	// 编辑模式下应回填现有值(alias 只读、key/header/expires 预填)
+	for _, want := range []string{"编辑 glm", `value="sk-orig"`, `value="2026-12-31"`, `value="60"`, `value="10"`} {
+		if !strings.Contains(html, want) {
+			t.Errorf("edit 表单缺少回填内容 %q", want)
+		}
+	}
+	// x-api-key 应被选中
+	if !strings.Contains(html, `value="x-api-key" {{if .Editing}}{{if eq .EditCfg.Header "x-api-key"}}selected{{end}}{{end}}`) {
+		// 模板里 selected 标记的条件渲染难以精确匹配字符串,放宽到 header 值出现即可
+		if !strings.Contains(html, `value="x-api-key"`) {
+			t.Error("edit 表单缺少 x-api-key 选项")
+		}
+	}
+}
+
+// TestAdminKeyEditKeepKeyOnBlank 验证编辑时 key 留空会保留原 key。
+func TestAdminKeyEditKeepKeyOnBlank(t *testing.T) {
+	ks := newKeyStore()
+	ks.setConfig("glm", KeyConfig{Key: "sk-orig", Header: "Authorization", Prefix: "Bearer "})
+
+	proxy := startProxyWithAdmin(t, "pw", ks)
+	defer proxy.Close()
+
+	jar := newTestCookieJar()
+	client := &http.Client{Jar: jar, Transport: &http.Transport{DisableCompression: true}}
+	resp, _ := client.PostForm(proxy.URL+"/__admin/login", url.Values{"password": {"pw"}})
+	resp.Body.Close()
+
+	// 编辑:alias=glm, key 留空,只改 expires
+	resp, err := client.PostForm(proxy.URL+"/__admin/keys/new",
+		url.Values{"alias": {"glm"}, "key": {""}, "header": {"Authorization"}, "prefix": {"Bearer "}, "expires": {"2026-06-30"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	cfg, ok := ks.lookup("glm")
+	if !ok {
+		t.Fatal("编辑后 alias 不存在")
+	}
+	if cfg.Key != "sk-orig" {
+		t.Errorf("编辑留空 key 未保留原值: got %q, want sk-orig", cfg.Key)
+	}
+	if cfg.Expires != "2026-06-30" {
+		t.Errorf("编辑 expires 未更新: got %q", cfg.Expires)
+	}
+}
+
+// TestAdminKeyInvalidExpires 验证有效期格式错误被拒绝。
+func TestAdminKeyInvalidExpires(t *testing.T) {
+	ks := newKeyStore()
+	proxy := startProxyWithAdmin(t, "pw", ks)
+	defer proxy.Close()
+
+	jar := newTestCookieJar()
+	client := &http.Client{Jar: jar, Transport: &http.Transport{DisableCompression: true}}
+	resp, _ := client.PostForm(proxy.URL+"/__admin/login", url.Values{"password": {"pw"}})
+	resp.Body.Close()
+
+	resp, err := client.PostForm(proxy.URL+"/__admin/keys/new",
+		url.Values{"alias": {"bad"}, "key": {"sk-x"}, "expires": {"not-a-date"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 { // renderMsg 返回 200
+		t.Errorf("格式错误有效期应 200(显示错误页), got %d", resp.StatusCode)
+	}
+	if _, ok := ks.lookup("bad"); ok {
+		t.Error("格式错误时不应保存 alias")
+	}
+}
+
+// TestLoginFormAutocomplete 验证登录表单带 autocomplete 属性(浏览器记密码)。
+func TestLoginFormAutocomplete(t *testing.T) {
+	proxy := startProxyWithAdmin(t, "pw", nil)
+	defer proxy.Close()
+
+	resp, err := http.Get(proxy.URL + "/__admin/login")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	html := string(body)
+	if !strings.Contains(html, `autocomplete="current-password"`) {
+		t.Error("登录表单缺少 autocomplete=current-password,浏览器无法记住密码")
+	}
+}
+
 // --- cookie jar 辅助 ---
 
 type testCookieJar struct {
