@@ -218,7 +218,15 @@ func (a *adminServer) handleKeys(w http.ResponseWriter, r *http.Request) {
 		renderMsg(w, "Key 注入模式未启用", "启动时需加 -keys 参数才能管理 key 配置。")
 		return
 	}
-	renderTemplate(w, "keys", a.keys.allConfigs())
+	// 传给模板,让每行显示可复制的调用地址
+	data := struct {
+		Aliases map[string]KeyConfig
+		BaseURL string // 代理自己的地址(能从请求推断)
+	}{
+		Aliases: a.keys.allConfigs(),
+		BaseURL: fmt.Sprintf("https://%s", r.Host),
+	}
+	renderTemplate(w, "keys", data)
 }
 
 func (a *adminServer) handleKeyNew(w http.ResponseWriter, r *http.Request) {

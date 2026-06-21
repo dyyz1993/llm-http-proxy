@@ -39,13 +39,14 @@ button{padding:10px 20px;cursor:pointer}</style></head>
 <html lang="zh-CN"><head><meta charset="utf-8"><title>Keys - llm-http-proxy</title>
 {{template "head"}}</head>
 <body>{{template "nav"}}
-<h2>Key 配置 ({{len .}})</h2>
-{{if not .}}<p>暂无配置。在下方添加。</p>{{end}}
+<h2>Key 配置 ({{len .Aliases}})</h2>
+{{if not .Aliases}}<p>暂无配置。在下方添加。</p>{{end}}
 <table>
-<tr><th>Alias</th><th>Header</th><th>Prefix</th><th>Key</th><th>Rate/min</th><th>Burst</th><th>操作</th></tr>
-{{range $alias, $cfg := .}}
+<tr><th>Alias</th><th>调用地址</th><th>Header</th><th>Prefix</th><th>Key</th><th>Rate/min</th><th>Burst</th><th>操作</th></tr>
+{{range $alias, $cfg := .Aliases}}
 <tr>
 <td><b>{{$alias}}</b></td>
+<td><code style="font-size:12px">{{$.BaseURL}}/k/{{$alias}}/</code></td>
 <td>{{$cfg.Header}}</td>
 <td>{{$cfg.Prefix}}</td>
 <td><code>{{$cfg.Key}}</code></td>
