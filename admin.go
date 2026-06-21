@@ -35,11 +35,12 @@ type adminServer struct {
 	password string // 登录密码
 	secret   []byte // HMAC 签名密钥(进程启动时随机生成)
 	stats    *statsCollector
-	keys     *keyStore // 可能为 nil(未启用 -keys 时)
+	keys     *keyStore   // 可能为 nil(未启用 -keys 时)
+	quota    *quotaCache // 可能为 nil(未启用 -keys 时)
 }
 
 // newAdminServer 创建管理界面。password 为空则不启用(返回 nil)。
-func newAdminServer(password string, stats *statsCollector, ks *keyStore) *adminServer {
+func newAdminServer(password string, stats *statsCollector, ks *keyStore, qc *quotaCache) *adminServer {
 	if password == "" {
 		return nil
 	}
@@ -50,6 +51,7 @@ func newAdminServer(password string, stats *statsCollector, ks *keyStore) *admin
 		secret:   secret,
 		stats:    stats,
 		keys:     ks,
+		quota:    qc,
 	}
 }
 
@@ -193,6 +195,7 @@ func (a *adminServer) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		TotalIPs  int
 		TotalReq  int64
 		KeysCount int
+		QuotaHTML template.HTML // 配额展示(预渲染 HTML,可能为空)
 	}{
 		Version:   version,
 		BuildTime: buildTime,
@@ -203,6 +206,12 @@ func (a *adminServer) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 	if a.keys != nil {
 		data.KeysCount = len(a.keys.allConfigs())
+	}
+	if a.quota != nil {
+		entries := a.quota.getAll()
+		if html := buildQuotaHTML(entries); html != "" {
+			data.QuotaHTML = template.HTML(html)
+		}
 	}
 	renderTemplate(w, "dashboard", data)
 }

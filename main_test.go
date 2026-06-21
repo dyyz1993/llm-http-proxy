@@ -149,7 +149,7 @@ func startProxyWithKeys(t *testing.T, ks *keyStore) *httptest.Server {
 func startProxyWithAdmin(t *testing.T, password string, ks *keyStore) *httptest.Server {
 	t.Helper()
 	stats := newStatsCollector()
-	admin := newAdminServer(password, stats, ks)
+	admin := newAdminServer(password, stats, ks, nil)
 	mux := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if admin != nil && (req.URL.Path == "/__admin" || strings.HasPrefix(req.URL.Path, "/__admin/")) {
 			admin.handler().ServeHTTP(w, req)
@@ -1837,6 +1837,86 @@ func TestLoginFormAutocomplete(t *testing.T) {
 		t.Error("登录表单缺少 autocomplete=current-password,浏览器无法记住密码")
 	}
 }
+
+// --- quota 相关测试 ---
+
+func TestProgressBar(t *testing.T) {
+	cases := []struct {
+		pct  int
+		want string // 期望的 unicode 图块开头几个字符
+	}{
+		{0, "░░░░░░░░░░░░░░░░░░░░"},   // 0%
+		{50, "██████████░░░░░░░░░░"},  // 50%
+		{100, "████████████████████"}, // 100%
+		{75, "███████████████░░░░░"},  // 75%
+		{25, "█████░░░░░░░░░░░░░░░"},  // 25%
+	}
+	for _, c := range cases {
+		got := progressBar(c.pct)
+		if got != c.want {
+			t.Errorf("progressBar(%d) = %q (len=%d), want %q", c.pct, got, len(got), c.want)
+		}
+		// 每个进度块字符 █/░ 占 3 字节(UTF-8),20个=60字节
+		if len(got) != 60 {
+			t.Errorf("progressBar(%d) 字节长度=%d, 期望 60", c.pct, len(got))
+		}
+	}
+	// 超出范围检查
+	over := progressBar(150)
+	if len(over) != 60 || over != "████████████████████" {
+		t.Errorf("150%% 应截断为 20 个█: %q (len=%d)", over, len(over))
+	}
+}
+
+func TestUnitLabel(t *testing.T) {
+	cases := map[int]string{
+		3: "周期额度",
+		5: "月度时长",
+		6: "日额度",
+		7: "额度(7)", // 未知 unit, fallback
+	}
+	for unit, want := range cases {
+		if got := unitLabel(unit); got != want {
+			t.Errorf("unitLabel(%d) = %q, want %q", unit, got, want)
+		}
+	}
+}
+
+func TestBuildQuotaHTML_Empty(t *testing.T) {
+	// 空条目应返回"暂无"提示
+	html := buildQuotaHTML(nil)
+	if !strings.Contains(html, "暂无配额数据") {
+		t.Error("空条目应显示'暂无配额数据'")
+	}
+	html = buildQuotaHTML([]cachedQuota{})
+	if !strings.Contains(html, "暂无配额数据") {
+		t.Error("空切片应显示'暂无配额数据'")
+	}
+}
+
+func TestBuildQuotaHTML_Render(t *testing.T) {
+	// 有真实数据时,应正常渲染不 panic,且包含别名和等级
+	entries := []cachedQuota{
+		{
+			Alias: "testkey",
+			Level: "pro",
+			Limits: []quotaLimit{
+				{Type: "TOKENS_LIMIT", Unit: 3, Percentage: 50, NextResetMs: 9999999999999},
+				{Type: "TIME_LIMIT", Unit: 5, Percentage: 12, Usage: intPtr(1000), CurrentVal: intPtr(120),
+					Details: []quotaUsageDetail{{ModelCode: "search-prime", Usage: 120}}},
+			},
+			FetchedAt: time.Now(),
+		},
+	}
+	html := buildQuotaHTML(entries)
+	for _, want := range []string{"testkey", "pro", "50%", "12%", "周期额度", "月度时长"} {
+		if !strings.Contains(html, want) {
+			t.Errorf("配额 HTML 缺少 %q", want)
+		}
+	}
+}
+
+func intPtr(v int) *int { return &v }
 
 // --- cookie jar 辅助 ---
 

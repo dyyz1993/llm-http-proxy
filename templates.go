@@ -35,6 +35,10 @@ button{padding:10px 20px;cursor:pointer}</style></head>
 <tr><td>总请求数</td><td>{{.TotalReq}}</td></tr>
 <tr><td>Key 配置数</td><td>{{.KeysCount}}</td></tr>
 </table>
+{{if .QuotaHTML}}
+<h2>Key 配额</h2>
+{{.QuotaHTML}}
+{{end}}
 </body></html>`,
 
 	"keys": `<!DOCTYPE html>

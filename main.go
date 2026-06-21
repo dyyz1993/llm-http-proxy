@@ -110,10 +110,17 @@ func main() {
 		ks.startReloadLoop(10 * time.Second)
 	}
 
+	// 配额缓存(只在 key 注入模式下启用,后台定时轮询 api.z.ai)
+	var quotaCacheInst *quotaCache
+	if ks != nil {
+		quotaCacheInst = newQuotaCache()
+		quotaCacheInst.startLoop(ks)
+	}
+
 	// 管理界面(密码非空才启用)
 	var admin *adminServer
 	if adminPassword != "" {
-		admin = newAdminServer(adminPassword, stats, ks)
+		admin = newAdminServer(adminPassword, stats, ks, quotaCacheInst)
 		log.Printf("管理界面已启用: http://localhost%s/__admin", *addr)
 	}
 
