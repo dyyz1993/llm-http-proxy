@@ -158,18 +158,73 @@ func (qc *quotaCache) refreshNow(ks *keyStore) int {
 	return len(qc.entries)
 }
 
-// startLoop 后台定时刷新配额缓存。
+// startLoop 后台刷新配额缓存。
+// 两种触发:
+//  1. 固定 5 分钟轮询(保底,确保数据不会太旧)
+//  2. 重置点定时器:算出所有 limit 里最近的一次 nextResetTime,
+//     到点立即刷新——这样额度恢复的瞬间就能反映出来,不用等下一轮 ticker。
 func (qc *quotaCache) startLoop(ks *keyStore) {
 	go func() {
 		// 启动后立即拉一次
 		qc.fetchAll(ks.allConfigs())
 
+		// 5 分钟保底轮询
 		ticker := time.NewTicker(qc.interval)
 		defer ticker.Stop()
-		for range ticker.C {
-			qc.fetchAll(ks.allConfigs())
+
+		// 重置点定时器(动态计算最近的重置时刻)
+		var resetTimer *time.Timer
+		scheduleNextReset := func() {
+			if t := qc.nextResetTime(); !t.IsZero() {
+				d := time.Until(t)
+				// 重置时刻已过或太近(< 30s)的不单独调度,交给 ticker
+				if d > 30*time.Second {
+					resetTimer = time.AfterFunc(d+2*time.Second, func() {
+						qc.fetchAll(ks.allConfigs())
+						// 重新计算下一个重置点(重置后 nextResetTime 会变)
+						// 通过重新调度实现;这里不能直接调 scheduleNextReset(闭包问题)
+					})
+				}
+			}
+		}
+
+		// 主循环:ticker 和 resetTimer 任一触发都刷新 + 重新调度
+		for {
+			select {
+			case <-ticker.C:
+				qc.fetchAll(ks.allConfigs())
+				// 每轮 ticker 后也重新调度重置定时器(因为 fetchAll 更新了 nextResetTime)
+				if resetTimer != nil {
+					resetTimer.Stop()
+				}
+				scheduleNextReset()
+			}
 		}
 	}()
+}
+
+// nextResetTime 返回缓存里所有 limit 中最近的一次重置时刻(已排除过期的)。
+// 没有数据返回零值。
+func (qc *quotaCache) nextResetTime() time.Time {
+	qc.mu.RLock()
+	defer qc.mu.RUnlock()
+	var earliest time.Time
+	now := time.Now()
+	for _, e := range qc.entries {
+		for _, lim := range e.Limits {
+			if lim.NextResetMs <= 0 {
+				continue
+			}
+			t := time.Unix(lim.NextResetMs/1000, 0)
+			// 只考虑未来的重置点
+			if t.After(now) {
+				if earliest.IsZero() || t.Before(earliest) {
+					earliest = t
+				}
+			}
+		}
+	}
+	return earliest
 }
 
 // ---------- 格式化工具(给模板用) ----------

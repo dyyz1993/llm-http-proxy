@@ -1890,6 +1890,47 @@ func TestAdminQuotaRefresh(t *testing.T) {
 
 // --- quota 相关测试 ---
 
+func TestNextResetTime(t *testing.T) {
+	qc := newQuotaCache()
+	now := time.Now()
+
+	// 空:返回零值
+	if rst := qc.nextResetTime(); !rst.IsZero() {
+		t.Errorf("空缓存应返回零值, got %v", rst)
+	}
+
+	// 两个条目,各自的 limit 重置时间不同,应取最早的
+	qc.mu.Lock()
+	qc.entries = []cachedQuota{
+		{
+			Alias: "a",
+			Limits: []quotaLimit{
+				{NextResetMs: now.Add(4 * time.Hour).UnixMilli()},  // 4h 后
+				{NextResetMs: now.Add(-1 * time.Hour).UnixMilli()}, // 1h 前(过期,应忽略)
+				{NextResetMs: now.Add(2 * time.Hour).UnixMilli()},  // 2h 后(最早的未来)
+			},
+		},
+		{
+			Alias: "b",
+			Limits: []quotaLimit{
+				{NextResetMs: now.Add(6 * time.Hour).UnixMilli()}, // 6h 后
+				{NextResetMs: 0}, // 无效,应忽略
+			},
+		},
+	}
+	qc.mu.Unlock()
+
+	got := qc.nextResetTime()
+	if got.IsZero() {
+		t.Fatal("应返回最早的未来重置时刻, got 零值")
+	}
+	want := now.Add(2 * time.Hour)
+	// 允许 1 秒误差
+	if got.Sub(want) > time.Second || want.Sub(got) > time.Second {
+		t.Errorf("nextResetTime = %v, want ~%v (2h后,最早的未来点)", got, want)
+	}
+}
+
 func TestProgressBar(t *testing.T) {
 	cases := []struct {
 		pct  int
