@@ -384,41 +384,81 @@ func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLa
 		isStream := isSSEResponse(resp.Header)
 
 		// 流式转发:支持 SSE,边收边 flush。
-		// 同时用 captureBuf 存一份(≤1MB),响应结束后异步解析 usage(不影响延迟)。
+		// 同时用 captureBuf 存一份,响应结束后异步解析 usage(不影响延迟)。
+		//
+		// 捕获策略:
+		//   - 非 SSE:存全部 body(≤4MB,usage 在 JSON 顶层,需要完整解析)
+		//   - SSE:用滑动窗口只保留最后 512KB + 第一个 chunk 的 model
+		//     (usage 总在最后一个 chunk,model 在第一个 chunk,
+		//      中间的增量内容不需要,这样即使 reasoning_content 有几十 MB 也不会截断 usage)
 		var captureBuf []byte
-		const maxCapture = 1 * 1024 * 1024 // 最多存 1MB,够提取 usage
+		const maxCaptureFull = 4 * 1024 * 1024 // 非 SSE:最多 4MB
+		const slidingWindow = 512 * 1024       // SSE:只保留最后 512KB
+		var sseFirstChunk []byte               // SSE 第一个 chunk(含 model)
 
 		if f, ok := rec.ResponseWriter.(http.Flusher); ok {
 			buf := make([]byte, 32*1024)
+			chunkCount := 0
 			for {
 				n, rerr := resp.Body.Read(buf)
 				if n > 0 {
 					rec.Write(buf[:n])
 					f.Flush()
-					// 同步存一份给后续 usage 解析(不阻塞转发)
-					if len(captureBuf) < maxCapture {
+					if isStream {
+						// SSE:第一个 chunk 存下来(含 model)
+						if chunkCount == 0 {
+							sseFirstChunk = append(sseFirstChunk, buf[:n]...)
+						}
+						// 滑动窗口:保留最后 512KB
 						captureBuf = append(captureBuf, buf[:n]...)
+						if len(captureBuf) > slidingWindow {
+							captureBuf = captureBuf[len(captureBuf)-slidingWindow:]
+						}
+					} else {
+						// 非 SSE:存全部(≤4MB)
+						if len(captureBuf) < maxCaptureFull {
+							captureBuf = append(captureBuf, buf[:n]...)
+						}
 					}
+					chunkCount++
 				}
 				if rerr != nil {
 					break
 				}
 			}
 		} else {
-			// 非 SSE:用 TeeReader 在 copy 的同时捕获
+			// 无 Flusher:用 TeeReader 在 copy 的同时捕获
 			buf := make([]byte, 32*1024)
+			chunkCount := 0
 			for {
 				n, rerr := resp.Body.Read(buf)
 				if n > 0 {
 					rec.Write(buf[:n])
-					if len(captureBuf) < maxCapture {
+					if isStream {
+						if chunkCount == 0 {
+							sseFirstChunk = append(sseFirstChunk, buf[:n]...)
+						}
 						captureBuf = append(captureBuf, buf[:n]...)
+						if len(captureBuf) > slidingWindow {
+							captureBuf = captureBuf[len(captureBuf)-slidingWindow:]
+						}
+					} else {
+						if len(captureBuf) < maxCaptureFull {
+							captureBuf = append(captureBuf, buf[:n]...)
+						}
 					}
+					chunkCount++
 				}
 				if rerr != nil {
 					break
 				}
 			}
+		}
+
+		// SSE:把第一个 chunk(含 model)拼到 captureBuf 前面,
+		// 这样 extractUsage 既能拿到 model 又能拿到尾部 usage
+		if isStream && len(sseFirstChunk) > 0 {
+			captureBuf = append(sseFirstChunk, captureBuf...)
 		}
 
 		// 解析 token 用量(此时响应已全部转发给客户端,不增加延迟)。
