@@ -207,13 +207,16 @@ type aliasUsageStats struct {
 	Count      int64 // 成功提取到 usage 的请求次数
 }
 
-// cacheHitRate 计算缓存命中率 = cached / prompt。
-// 即"输入 token 里有多少比例命中了缓存"。
+// cacheHitRate 计算缓存命中率 = cached / (prompt + cached)。
+// z.ai 的 prompt_tokens 是"未缓存的输入部分",cached_tokens 是"已缓存的输入部分",
+// 所以总输入 = prompt + cached,命中率 = cached / 总输入。
+// 这样命中率永远在 0..1 之间,不会超过 100%。
 func (s aliasUsageStats) cacheHitRate() float64 {
-	if s.Prompt == 0 {
+	total := s.Prompt + s.Cached
+	if total == 0 {
 		return 0
 	}
-	return float64(s.Cached) / float64(s.Prompt)
+	return float64(s.Cached) / float64(total)
 }
 
 // usageStats 持有所有 alias 的 token 用量统计。

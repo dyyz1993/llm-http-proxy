@@ -115,18 +115,35 @@ func TestExtractUsageNoUsage(t *testing.T) {
 	}
 }
 
-// TestCacheHitRate 验证缓存命中率计算。
+// TestCacheHitRate 验证缓存命中率计算 = cached / (prompt + cached)。
 func TestCacheHitRate(t *testing.T) {
+	// 正常情况:prompt=1000, cached=800 → 800/1800 ≈ 44.4%
 	s := aliasUsageStats{Prompt: 1000, Cached: 800, Completion: 200}
 	rate := s.cacheHitRate()
-	if rate < 0.79 || rate > 0.81 {
-		t.Errorf("命中率 = %.2f, want ~0.80", rate)
+	if rate < 0.44 || rate > 0.45 {
+		t.Errorf("命中率 = %.4f, want ~0.444", rate)
+	}
+
+	// 线上真实数据:prompt=37, cached=333248 → 99.99%(不会超过 100%)
+	extreme := aliasUsageStats{Prompt: 37, Cached: 333248}
+	extremeRate := extreme.cacheHitRate()
+	if extremeRate > 1.0 {
+		t.Errorf("命中率不应超过 100%%, got %.4f", extremeRate)
+	}
+	if extremeRate < 0.9998 {
+		t.Errorf("极高缓存率应为 ~99.99%%, got %.4f", extremeRate)
 	}
 
 	// prompt=0 时不除零
 	zero := aliasUsageStats{}
 	if zero.cacheHitRate() != 0 {
 		t.Error("prompt=0 时命中率应为 0")
+	}
+
+	// 全部命中:prompt=0, cached=100 → 100%
+	allCached := aliasUsageStats{Cached: 100}
+	if allCached.cacheHitRate() != 1.0 {
+		t.Errorf("全命中应为 100%%, got %.4f", allCached.cacheHitRate())
 	}
 }
 
@@ -156,10 +173,10 @@ func TestUsageStatsRecord(t *testing.T) {
 		t.Errorf("Count = %d, want 2", s.Count)
 	}
 
-	// 命中率 = 230/300 ≈ 0.767
+	// 命中率 = 230/(300+230) ≈ 0.434
 	rate := s.cacheHitRate()
-	if rate < 0.76 || rate > 0.77 {
-		t.Errorf("平均命中率 = %.3f, want ~0.767", rate)
+	if rate < 0.43 || rate > 0.44 {
+		t.Errorf("平均命中率 = %.3f, want ~0.434", rate)
 	}
 }
 
