@@ -147,7 +147,7 @@ func main() {
 	// 管理界面(密码非空才启用)
 	var admin *adminServer
 	if adminPassword != "" {
-		admin = newAdminServer(adminPassword, stats, ks, quotaCacheInst)
+		admin = newAdminServer(adminPassword, stats, ks, quotaCacheInst, usageTracker)
 		log.Printf("管理界面已启用: http://localhost%s/__admin", *addr)
 	}
 
@@ -268,12 +268,12 @@ func handleKeyRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, stat
 		return
 	}
 
-	// 构造注入 header:
-	// - 若 KeyConfig 显式配了 Header(向后兼容老配置),用它
-	// - 否则自动检测:路径含 /anthropic/ → x-api-key;否则 → Authorization: Bearer
-	headerName, headerVal := pickHeader(cfg, req.Header)
-	inject := http.Header{}
-	inject[headerName] = []string{headerVal}
+	// 构造注入 header(自动模式:客户端带了什么就替换什么)
+	inject := pickHeader(cfg, req.Header)
+	if len(inject) == 0 {
+		// 客户端没带 x-api-key 也没带 Authorization → 不注入,直接透传
+		// (上游会用客户端自己的 header,通常没 key 会被拒)
+	}
 
 	// 重写 RequestURI 让 newProxyHandler 解析出正确的 target。
 	// 直接改原 req(本函数之后不再用它),避免 Clone 不复制 Body 导致 POST body 丢失。
@@ -324,7 +324,7 @@ func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLa
 			handleWebSocket(rec, req, raw)
 			if stats != nil {
 				stats.record(ip, statKey, targetHost, rec.status)
-				logRequest(ip, statKey, req.Method, targetHost, rec.status, time.Since(start))
+				logRequest(ip, statKey, req.Method, targetHost, rec.status, time.Since(start), usageData{})
 			}
 			return
 		}
@@ -335,7 +335,7 @@ func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLa
 			http.Error(rec, "目标 URL 无法解析: "+err.Error(), http.StatusBadRequest)
 			if stats != nil {
 				stats.record(ip, statKey, targetHost, rec.status)
-				logRequest(ip, statKey, req.Method, targetHost, rec.status, time.Since(start))
+				logRequest(ip, statKey, req.Method, targetHost, rec.status, time.Since(start), usageData{})
 			}
 			return
 		}
@@ -354,7 +354,7 @@ func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLa
 			http.Error(rec, "转发失败: "+err.Error(), http.StatusBadGateway)
 			if stats != nil {
 				stats.record(ip, statKey, targetHost, rec.status)
-				logRequest(ip, statKey, req.Method, targetHost, rec.status, time.Since(start))
+				logRequest(ip, statKey, req.Method, targetHost, rec.status, time.Since(start), usageData{})
 			}
 			return
 		}
@@ -404,24 +404,22 @@ func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLa
 			}
 		}
 
-		// 记录统计(只含 IP/掩码key/host/状态码,不含 body)
-		if stats != nil {
-			stats.record(ip, statKey, targetHost, rec.status)
-			logRequest(ip, statKey, req.Method, targetHost, rec.status, time.Since(start))
+		// 解析 token 用量(此时响应已全部转发给客户端,不增加延迟)。
+		// 只在有捕获数据 + key 注入模式时解析。
+		var u usageData
+		if len(captureBuf) > 0 && strings.HasPrefix(statKey, "key:") {
+			u = extractUsage(captureBuf)
+			if u.HasData && usageTracker != nil {
+				alias := strings.TrimPrefix(statKey, "key:")
+				usageTracker.record(alias, u)
+			}
 		}
 
-		// 异步解析 token 用量(不影响响应已返回,goroutine 里慢慢算)
-		// 只有 key 注入模式(statKey 形如 "key:alias")才记录,纯透传模式不记。
-		if usageTracker != nil && len(captureBuf) > 0 && strings.HasPrefix(statKey, "key:") {
-			alias := strings.TrimPrefix(statKey, "key:")
-			captured := captureBuf // 复制切片引用,避免被回收
-			go func() {
-				u := extractUsage(captured)
-				if u.HasData {
-					usageTracker.record(alias, u)
-				}
-			}()
+		// 记录统计(含 token 用量)
+		if stats != nil {
+			stats.record(ip, statKey, targetHost, rec.status)
 		}
+		logRequest(ip, statKey, req.Method, targetHost, rec.status, time.Since(start), u)
 	})
 }
 
@@ -473,44 +471,36 @@ func extractDomain(target string) string {
 }
 
 // pickHeader 根据 KeyConfig + 客户端请求的 header 决定注入哪个 header、值是什么。
-// 优先级:
-//  1. KeyConfig 显式配了 Header(向后兼容老配置) → 用配的,prefix 按 cfg.Prefix 或 Bearer 默认
-//  2. 自动检测:看客户端发来的 header 判断它是什么客户端
-//     - 有 anthropic-version 或客户端带了 x-api-key → Anthropic 客户端 → x-api-key: {key}
-//     - 否则 → Authorization: Bearer {key}
-//  3. 默认 → Authorization: Bearer {key}
-//
-// 根据客户端带的 header 判断,比猜 URL 路径精准:Anthropic SDK/SDK(Cursor/Claude Code)
-// 会带 anthropic-version + x-api-key;OpenAI 风格客户端带 Authorization: Bearer。
-func pickHeader(cfg KeyConfig, clientHeaders http.Header) (name, val string) {
-	// 显式配置优先(向后兼容)
+// 规则(简洁直接):
+//  1. KeyConfig 显式配了 Header(向后兼容) → 用配的,prefix 按 cfg.Prefix 或 Bearer 默认
+//  2. 自动模式:客户端带了哪个 header 就替换哪个:
+//     - 带 x-api-key → 替换成 x-api-key: {key}(无前缀)
+//     - 带 Authorization → 替换成 Authorization: Bearer {key}
+//     - 都带了 → 两个都替换(同时注入)
+//     - 都没带 → 不注入(返回空),客户端用自己的(通常会被上游拒)
+func pickHeader(cfg KeyConfig, clientHeaders http.Header) http.Header {
+	// 显式配置优先(向后兼容老配置)
 	if cfg.Header != "" {
-		name = cfg.Header
-		val = cfg.Key
+		h := http.Header{}
+		val := cfg.Key
 		if cfg.Prefix != "" {
 			val = cfg.Prefix + cfg.Key
-		} else if name == "Authorization" {
+		} else if cfg.Header == "Authorization" {
 			val = "Bearer " + cfg.Key
 		}
-		return name, val
+		h.Set(cfg.Header, val)
+		return h
 	}
-	// 自动检测:看客户端发来的 header
-	if isAnthropicClient(clientHeaders) {
-		return "x-api-key", cfg.Key
-	}
-	return "Authorization", "Bearer " + cfg.Key
-}
 
-// isAnthropicClient 判断客户端是否是 Anthropic 风格(Claude SDK/Cursor/Rush 等)。
-// 判断依据:请求里带了 anthropic-version header,或带了 x-api-key header。
-func isAnthropicClient(h http.Header) bool {
-	if h.Get("Anthropic-Version") != "" {
-		return true
+	// 自动模式:客户端带了什么就替换什么
+	inject := http.Header{}
+	if clientHeaders.Get("X-Api-Key") != "" {
+		inject.Set("x-api-key", cfg.Key) // x-api-key 不需要 Bearer 前缀
 	}
-	if h.Get("X-Api-Key") != "" {
-		return true
+	if clientHeaders.Get("Authorization") != "" {
+		inject.Set("Authorization", "Bearer "+cfg.Key)
 	}
-	return false
+	return inject // 可能为空(都没带 → 不注入)
 }
 
 // stripProxyHeaders 剥离上游反向代理/网关可能注入的"指纹"头,

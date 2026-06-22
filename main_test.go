@@ -154,7 +154,7 @@ func startProxyWithAdmin(t *testing.T, password string, ks *keyStore) *httptest.
 	if ks != nil {
 		qc = newQuotaCache(":0") // 测试用任意端口,probe 不会真连
 	}
-	admin := newAdminServer(password, stats, ks, qc)
+	admin := newAdminServer(password, stats, ks, qc, newUsageStats())
 	mux := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if admin != nil && (req.URL.Path == "/__admin" || strings.HasPrefix(req.URL.Path, "/__admin/")) {
 			admin.handler().ServeHTTP(w, req)
@@ -1990,48 +1990,56 @@ func TestExtractDomain(t *testing.T) {
 
 func TestPickHeader(t *testing.T) {
 	// 1. 显式配置优先(向后兼容)
-	name, val := pickHeader(KeyConfig{Key: "sk-1", Header: "x-api-key"}, http.Header{})
-	if name != "x-api-key" || val != "sk-1" {
-		t.Errorf("显式 x-api-key: got name=%q val=%q", name, val)
+	h := pickHeader(KeyConfig{Key: "sk-1", Header: "x-api-key"}, http.Header{})
+	if h.Get("X-Api-Key") != "sk-1" {
+		t.Errorf("显式 x-api-key: got %q", h.Get("X-Api-Key"))
 	}
-	name, val = pickHeader(KeyConfig{Key: "sk-1", Header: "Authorization", Prefix: "Bearer "}, http.Header{})
-	if name != "Authorization" || val != "Bearer sk-1" {
-		t.Errorf("显式 Authorization+Prefix: got name=%q val=%q", name, val)
+	h = pickHeader(KeyConfig{Key: "sk-1", Header: "Authorization", Prefix: "Bearer "}, http.Header{})
+	if h.Get("Authorization") != "Bearer sk-1" {
+		t.Errorf("显式 Authorization+Prefix: got %q", h.Get("Authorization"))
 	}
 	// 显式 Authorization 不带 Prefix → 自动加 Bearer
-	name, val = pickHeader(KeyConfig{Key: "sk-1", Header: "Authorization"}, http.Header{})
-	if name != "Authorization" || val != "Bearer sk-1" {
-		t.Errorf("显式 Authorization 无Prefix: got name=%q val=%q", name, val)
+	h = pickHeader(KeyConfig{Key: "sk-1", Header: "Authorization"}, http.Header{})
+	if h.Get("Authorization") != "Bearer sk-1" {
+		t.Errorf("显式 Authorization 无Prefix: got %q", h.Get("Authorization"))
 	}
 
-	// 2. 自动检测:客户端带 anthropic-version → x-api-key
-	anthropicHeaders := http.Header{}
-	anthropicHeaders.Set("Anthropic-Version", "2023-06-01")
-	name, val = pickHeader(KeyConfig{Key: "sk-1"}, anthropicHeaders)
-	if name != "x-api-key" || val != "sk-1" {
-		t.Errorf("自动(anthropic-version): got name=%q val=%q", name, val)
-	}
-
-	// 3. 自动检测:客户端带 x-api-key(占位假key) → x-api-key
+	// 2. 自动模式:客户端带 x-api-key → 替换成 x-api-key
 	apiKeyHeaders := http.Header{}
 	apiKeyHeaders.Set("X-Api-Key", "placeholder")
-	name, val = pickHeader(KeyConfig{Key: "sk-1"}, apiKeyHeaders)
-	if name != "x-api-key" || val != "sk-1" {
-		t.Errorf("自动(x-api-key): got name=%q val=%q", name, val)
+	h = pickHeader(KeyConfig{Key: "sk-1"}, apiKeyHeaders)
+	if h.Get("X-Api-Key") != "sk-1" {
+		t.Errorf("自动(x-api-key): got %q", h.Get("X-Api-Key"))
+	}
+	// 自动模式不应注入 Authorization
+	if h.Get("Authorization") != "" {
+		t.Errorf("自动(x-api-key)不应注入 Authorization: got %q", h.Get("Authorization"))
 	}
 
-	// 4. 自动检测:普通客户端(只有 Authorization) → Authorization: Bearer
+	// 3. 自动模式:客户端带 Authorization → 替换成 Authorization: Bearer
 	normalHeaders := http.Header{}
 	normalHeaders.Set("Authorization", "Bearer placeholder")
-	name, val = pickHeader(KeyConfig{Key: "sk-1"}, normalHeaders)
-	if name != "Authorization" || val != "Bearer sk-1" {
-		t.Errorf("自动默认: got name=%q val=%q", name, val)
+	h = pickHeader(KeyConfig{Key: "sk-1"}, normalHeaders)
+	if h.Get("Authorization") != "Bearer sk-1" {
+		t.Errorf("自动(Authorization): got %q", h.Get("Authorization"))
 	}
 
-	// 5. 自动检测:无任何特征 header → 默认 Authorization: Bearer
-	name, val = pickHeader(KeyConfig{Key: "sk-1"}, http.Header{})
-	if name != "Authorization" || val != "Bearer sk-1" {
-		t.Errorf("自动(空header): got name=%q val=%q", name, val)
+	// 4. 自动模式:两个都带 → 两个都替换
+	bothHeaders := http.Header{}
+	bothHeaders.Set("X-Api-Key", "placeholder")
+	bothHeaders.Set("Authorization", "Bearer placeholder")
+	h = pickHeader(KeyConfig{Key: "sk-1"}, bothHeaders)
+	if h.Get("X-Api-Key") != "sk-1" {
+		t.Errorf("自动(both) x-api-key: got %q", h.Get("X-Api-Key"))
+	}
+	if h.Get("Authorization") != "Bearer sk-1" {
+		t.Errorf("自动(both) Authorization: got %q", h.Get("Authorization"))
+	}
+
+	// 5. 自动模式:都没带 → 不注入(返回空)
+	h = pickHeader(KeyConfig{Key: "sk-1"}, http.Header{})
+	if len(h) != 0 {
+		t.Errorf("都没带应不注入, got %d headers", len(h))
 	}
 }
 
@@ -2069,7 +2077,7 @@ func TestKeyRouteDomainWhitelist(t *testing.T) {
 	}
 }
 
-// TestKeyRouteAutoHeader 验证自动模式:根据客户端 header 判断注入哪个。
+// TestKeyRouteAutoHeader 验证自动模式:客户端带了什么 header 就替换什么。
 // 用 echo backend 捕获注入的 header。
 func TestKeyRouteAutoHeader(t *testing.T) {
 	ks := newKeyStore()
@@ -2084,9 +2092,9 @@ func TestKeyRouteAutoHeader(t *testing.T) {
 	proxy := startProxyWithKeys(t, ks)
 	defer proxy.Close()
 
-	// 1. Anthropic 客户端(带 anthropic-version) → 应注入 x-api-key
+	// 1. 客户端带 x-api-key → 替换成真实 key
 	req1, _ := http.NewRequest("GET", proxy.URL+"/k/glm/"+backend.URL+"/v1/messages", nil)
-	req1.Header.Set("Anthropic-Version", "2023-06-01")
+	req1.Header.Set("X-Api-Key", "placeholder")
 	resp, err := http.DefaultClient.Do(req1)
 	if err != nil {
 		t.Fatal(err)
@@ -2094,10 +2102,10 @@ func TestKeyRouteAutoHeader(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if !strings.Contains(string(body), `"X-Api-Key":"sk-secret"`) {
-		t.Errorf("Anthropic 客户端应注入 x-api-key:sk-secret, body: %s", string(body)[:min(200, len(string(body)))])
+		t.Errorf("客户端带 x-api-key 应注入真实 key, body: %s", string(body)[:min(200, len(string(body)))])
 	}
 
-	// 2. 普通客户端(带 Authorization) → 应注入 Authorization: Bearer
+	// 2. 客户端带 Authorization → 替换成 Bearer 真实 key
 	req2, _ := http.NewRequest("GET", proxy.URL+"/k/glm/"+backend.URL+"/v1/chat/completions", nil)
 	req2.Header.Set("Authorization", "Bearer placeholder")
 	resp, err = http.DefaultClient.Do(req2)
@@ -2107,18 +2115,18 @@ func TestKeyRouteAutoHeader(t *testing.T) {
 	body, _ = io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if !strings.Contains(string(body), `"Authorization":"Bearer sk-secret"`) {
-		t.Errorf("普通客户端应注入 Authorization:Bearer sk-secret, body: %s", string(body)[:min(200, len(string(body)))])
+		t.Errorf("客户端带 Authorization 应注入 Bearer 真实 key, body: %s", string(body)[:min(200, len(string(body)))])
 	}
 
-	// 3. 无特征 header 的客户端 → 默认 Authorization: Bearer
+	// 3. 客户端什么都不带 → 不注入(透传,header 里没有 key)
 	resp, err = http.Get(proxy.URL + "/k/glm/" + backend.URL + "/any/path")
 	if err != nil {
 		t.Fatal(err)
 	}
 	body, _ = io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if !strings.Contains(string(body), `"Authorization":"Bearer sk-secret"`) {
-		t.Errorf("无特征客户端应默认 Authorization:Bearer sk-secret, body: %s", string(body)[:min(200, len(string(body)))])
+	if strings.Contains(string(body), "sk-secret") {
+		t.Errorf("客户端没带 header 不应注入 key, body: %s", string(body)[:min(200, len(string(body)))])
 	}
 }
 

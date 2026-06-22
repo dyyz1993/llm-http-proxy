@@ -595,6 +595,10 @@ type logEntry struct {
 	Host     string `json:"host"`
 	Status   int    `json:"status"`
 	Duration string `json:"dur"`
+	// token 用量(从响应 usage 提取,异步记录;0 表示没提取到)
+	Prompt     int64 `json:"prompt"`     // 输入 token
+	Cached     int64 `json:"cached"`     // 缓存命中 token
+	Completion int64 `json:"completion"` // 输出 token
 }
 
 // logRing 是内存环形缓冲,存最近 N 条请求日志(给 admin UI 看)。
@@ -635,20 +639,27 @@ func (r *logRing) recent(n int) []logEntry {
 	return out
 }
 
-// logRequest 打一行结构化日志,只含 IP/掩码key/host/状态码,不含 body。
+// logRequest 打一行结构化日志,只含 IP/掩码key/host/状态码/token用量,不含 body。
 // 同时写入内存环形缓冲(给 admin UI 看)。
-func logRequest(ip, maskedKey, method, targetHost string, status int, dur time.Duration) {
+// u 是从响应里异步提取的 token 用量(可能 HasData=false)。
+func logRequest(ip, maskedKey, method, targetHost string, status int, dur time.Duration, u usageData) {
 	line := fmt.Sprintf("req ip=%s key=%s method=%s host=%s status=%d dur=%s",
 		ip, maskedKey, method, targetHost, status, dur)
+	if u.HasData {
+		line += fmt.Sprintf(" prompt=%d cached=%d completion=%d", u.Prompt, u.Cached, u.Completion)
+	}
 	log.Print(line)
 	globalLogRing.add(logEntry{
-		Time:     time.Now().In(beijing).Format("2006-01-02 15:04:05"),
-		IP:       ip,
-		Key:      maskedKey,
-		Method:   method,
-		Host:     targetHost,
-		Status:   status,
-		Duration: dur.Round(time.Millisecond).String(),
+		Time:       time.Now().In(beijing).Format("2006-01-02 15:04:05"),
+		IP:         ip,
+		Key:        maskedKey,
+		Method:     method,
+		Host:       targetHost,
+		Status:     status,
+		Duration:   dur.Round(time.Millisecond).String(),
+		Prompt:     u.Prompt,
+		Cached:     u.Cached,
+		Completion: u.Completion,
 	})
 }
 

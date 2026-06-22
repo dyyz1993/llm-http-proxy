@@ -37,10 +37,11 @@ type adminServer struct {
 	stats    *statsCollector
 	keys     *keyStore   // 可能为 nil(未启用 -keys 时)
 	quota    *quotaCache // 可能为 nil(未启用 -keys 时)
+	usage    *usageStats // 可能为 nil(全局,直接用全局变量也行)
 }
 
 // newAdminServer 创建管理界面。password 为空则不启用(返回 nil)。
-func newAdminServer(password string, stats *statsCollector, ks *keyStore, qc *quotaCache) *adminServer {
+func newAdminServer(password string, stats *statsCollector, ks *keyStore, qc *quotaCache, us *usageStats) *adminServer {
 	if password == "" {
 		return nil
 	}
@@ -52,6 +53,7 @@ func newAdminServer(password string, stats *statsCollector, ks *keyStore, qc *qu
 		stats:    stats,
 		keys:     ks,
 		quota:    qc,
+		usage:    us,
 	}
 }
 
@@ -197,6 +199,7 @@ func (a *adminServer) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		TotalReq  int64
 		KeysCount int
 		QuotaHTML template.HTML // 配额展示(预渲染 HTML,可能为空)
+		UsageHTML template.HTML // token 用量统计(预渲染 HTML,可能为空)
 	}{
 		Version:   version,
 		BuildTime: buildTime,
@@ -212,6 +215,11 @@ func (a *adminServer) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		entries := a.quota.getAll()
 		if html := buildQuotaHTML(entries); html != "" {
 			data.QuotaHTML = template.HTML(html)
+		}
+	}
+	if a.usage != nil {
+		if html := buildUsageHTML(a.usage.snapshot()); html != "" {
+			data.UsageHTML = template.HTML(html)
 		}
 	}
 	renderTemplate(w, "dashboard", data)
@@ -375,6 +383,13 @@ func (a *adminServer) handleLogs(w http.ResponseWriter, r *http.Request) {
 func renderTemplate(w http.ResponseWriter, name string, data interface{}) {
 	tmpl := template.New(name).Funcs(template.FuncMap{
 		"mul100": func(v float64) float64 { return v * 100 },
+		"divf": func(a, b int64) float64 {
+			if b == 0 {
+				return 0
+			}
+			return float64(a) / float64(b)
+		},
+		"mul": func(a, b float64) float64 { return a * b },
 	})
 	// 先解析公共片段(head/nav),再解析页面模板
 	if _, err := tmpl.Parse(baseTemplates); err != nil {

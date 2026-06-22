@@ -12,6 +12,8 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -252,4 +254,55 @@ func (us *usageStats) snapshot() map[string]aliasUsageStats {
 		out[k] = *v
 	}
 	return out
+}
+
+// ---------- Dashboard 展示 ----------
+
+// buildUsageHTML 构建按 alias 聚合的 token 用量展示 HTML。
+// 展示:每个 alias 的累计输入/缓存/输出 token + 平均缓存命中率。
+func buildUsageHTML(snap map[string]aliasUsageStats) string {
+	if len(snap) == 0 {
+		return ""
+	}
+
+	// 按 alias 排序
+	aliases := make([]string, 0, len(snap))
+	for a := range snap {
+		aliases = append(aliases, a)
+	}
+	sort.Strings(aliases)
+
+	var b strings.Builder
+	b.WriteString(`<table style="font-size:13px;margin-top:8px">`)
+	b.WriteString(`<tr><th>Alias</th><th>请求数</th><th>输入 token</th><th>缓存命中</th><th>输出 token</th><th>平均缓存命中率</th></tr>`)
+
+	var totalPrompt, totalCached, totalCompletion int64
+	var totalCount int64
+	for _, alias := range aliases {
+		s := snap[alias]
+		rate := s.cacheHitRate()
+		// 命中率进度条
+		barLen := 20
+		filled := int(rate * float64(barLen))
+		bar := strings.Repeat("█", filled) + strings.Repeat("░", barLen-filled)
+		fmt.Fprintf(&b, `<tr><td><b>%s</b></td><td>%d</td><td>%d</td><td>%d</td><td>%d</td>`,
+			alias, s.Count, s.Prompt, s.Cached, s.Completion)
+		fmt.Fprintf(&b, `<td><span style="font-family:monospace">%s</span> %.1f%%</td></tr>`,
+			bar, rate*100)
+		totalPrompt += s.Prompt
+		totalCached += s.Cached
+		totalCompletion += s.Completion
+		totalCount += s.Count
+	}
+
+	// 合计行
+	var totalRate float64
+	if totalPrompt > 0 {
+		totalRate = float64(totalCached) / float64(totalPrompt)
+	}
+	fmt.Fprintf(&b, `<tr style="font-weight:bold;background:#eee"><td>合计</td><td>%d</td><td>%d</td><td>%d</td><td>%d</td>`,
+		totalCount, totalPrompt, totalCached, totalCompletion)
+	fmt.Fprintf(&b, `<td>%.1f%%</td></tr>`, totalRate*100)
+	b.WriteString(`</table>`)
+	return b.String()
 }
