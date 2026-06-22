@@ -161,7 +161,7 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "将部署 tag: $TAG"
 
-      - name: Deploy binary (try in-container curl, fallback to scp+gzip)
+      - name: Deploy binary (try in-container curl with retry, fallback to scp+gzip)
         env:
           TAG: ${{ steps.tag.outputs.tag }}
           REPO: ${{ github.repository }}
@@ -173,11 +173,18 @@ jobs:
           esac
           URL="https://github.com/${REPO}/releases/download/${TAG}/llm-http-proxy-linux-${ARCH}.tar.gz"
 
-          # 策略 1: 容器内有 curl 时,容器内直接下载(最快,不经 runner)
+          # 策略 1: 容器内有 curl 时,容器内直接下载(带 retry + 断点续传)
+          # NAS 到 GitHub 网络不稳定,用 -C - 断点续传 + --retry 多次重试
           if ssh jkj 'command -v curl >/dev/null 2>&1'; then
-            echo "=== 容器内 curl 下载 ${TAG} (${ARCH}) ==="
-            ssh jkj "set -e
-              curl -fsSL --max-time 120 -o /tmp/proxy.tar.gz '${URL}'
+            echo "=== 容器内 curl 下载 ${TAG} (${ARCH}, 带 retry + 断点续传) ==="
+            if ssh jkj "set -e
+              rm -f /tmp/proxy.tar.gz
+              # --retry 5: 最多重试 5 次
+              # --retry-delay 5: 每次重试间隔 5 秒
+              # --retry-all-errors: 任何错误都重试(含超时)
+              # -C -: 断点续传(配合 --retry,断线后从上次位置继续)
+              # --max-time 600: 单次最长 10 分钟(3.7MB 在慢网络也够)
+              curl -fL --retry 5 --retry-delay 5 --retry-all-errors -C - --max-time 600 -o /tmp/proxy.tar.gz '${URL}'
               cd /tmp && tar -xzf proxy.tar.gz && rm proxy.tar.gz
               mv llm-http-proxy-linux-${ARCH} /opt/proxy/llm-http-proxy
               chmod 755 /opt/proxy/llm-http-proxy
@@ -185,11 +192,31 @@ jobs:
               echo '新版本:' \$(/opt/proxy/llm-http-proxy -version)
               supervisorctl restart llm-http-proxy
               sleep 1
-              supervisorctl status llm-http-proxy"
+              supervisorctl status llm-http-proxy"; then
+              echo "=== 策略 1(容器内 curl)成功 ==="
+            else
+              echo "⚠️ 策略 1 失败,fallback 到策略 2(runner 下载 + scp)"
+              rm -f /tmp/proxy.tar.gz llm-http-proxy-linux-${ARCH}
+              # 策略 2: runner 下载(GitHub 网内,快)+ scp 到容器
+              curl -fsSL --retry 3 --max-time 120 -o /tmp/proxy.tar.gz "${URL}"
+              tar -xzf /tmp/proxy.tar.gz
+              gzip -c llm-http-proxy-linux-${ARCH} > /tmp/proxy.gz
+              echo "传输大小: $(ls -lh /tmp/proxy.gz | awk '{print $5}')(gzip 压缩后)"
+              scp /tmp/proxy.gz jkj:/tmp/proxy.gz
+              ssh jkj 'set -e
+                gunzip -f /tmp/proxy.gz
+                mv /tmp/proxy /opt/proxy/llm-http-proxy
+                chmod 755 /opt/proxy/llm-http-proxy
+                chown deploy:deploy /opt/proxy/llm-http-proxy
+                echo "新版本: $(/opt/proxy/llm-http-proxy -version)"
+                supervisorctl restart llm-http-proxy
+                sleep 1
+                supervisorctl status llm-http-proxy'
+            fi
           else
-            # 策略 2: 容器无 curl,fallback 到 runner 下载 + scp+gzip(压缩减半传输)
-            echo "=== 容器无 curl,fallback scp+gzip 下载 ${TAG} (${ARCH}) ==="
-            curl -fsSL -o /tmp/proxy.tar.gz "${URL}"
+            # 容器无 curl:直接用策略 2(runner 下载 + scp+gzip)
+            echo "=== 容器无 curl,scp+gzip 下载 ${TAG} (${ARCH}) ==="
+            curl -fsSL --retry 3 --max-time 120 -o /tmp/proxy.tar.gz "${URL}"
             tar -xzf /tmp/proxy.tar.gz
             gzip -c llm-http-proxy-linux-${ARCH} > /tmp/proxy.gz
             echo "传输大小: $(ls -lh /tmp/proxy.gz | awk '{print $5}')(gzip 压缩后)"
