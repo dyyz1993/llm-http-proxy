@@ -70,6 +70,10 @@ var (
 	// 防止有人把请求指向自己的网站,利用代理注入的真实 key 造成泄露。
 	// 为空时表示不限制(仅限内网/受信环境)。
 	allowDomains map[string]bool
+
+	// usageTracker 按 alias 聚合 token 用量统计(prompt/cached/completion)。
+	// 在 proxy handler 里异步解析响应里的 usage 字段后记录,不影响转发延迟。
+	usageTracker *usageStats
 )
 
 func main() {
@@ -109,6 +113,7 @@ func main() {
 	}
 
 	stats := newStatsCollector()
+	usageTracker = newUsageStats()
 
 	// 持久化:启动时读回历史统计,后台每 30s 落盘一次。
 	if *persist != "" {
@@ -361,7 +366,11 @@ func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLa
 		}
 		rec.WriteHeader(resp.StatusCode)
 
-		// 流式转发:支持 SSE,边收边 flush
+		// 流式转发:支持 SSE,边收边 flush。
+		// 同时用 captureBuf 存一份(≤1MB),响应结束后异步解析 usage(不影响延迟)。
+		var captureBuf []byte
+		const maxCapture = 1 * 1024 * 1024 // 最多存 1MB,够提取 usage
+
 		if f, ok := rec.ResponseWriter.(http.Flusher); ok {
 			buf := make([]byte, 32*1024)
 			for {
@@ -369,19 +378,49 @@ func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLa
 				if n > 0 {
 					rec.Write(buf[:n])
 					f.Flush()
+					// 同步存一份给后续 usage 解析(不阻塞转发)
+					if len(captureBuf) < maxCapture {
+						captureBuf = append(captureBuf, buf[:n]...)
+					}
 				}
 				if rerr != nil {
 					break
 				}
 			}
 		} else {
-			io.Copy(rec, resp.Body)
+			// 非 SSE:用 TeeReader 在 copy 的同时捕获
+			buf := make([]byte, 32*1024)
+			for {
+				n, rerr := resp.Body.Read(buf)
+				if n > 0 {
+					rec.Write(buf[:n])
+					if len(captureBuf) < maxCapture {
+						captureBuf = append(captureBuf, buf[:n]...)
+					}
+				}
+				if rerr != nil {
+					break
+				}
+			}
 		}
 
 		// 记录统计(只含 IP/掩码key/host/状态码,不含 body)
 		if stats != nil {
 			stats.record(ip, statKey, targetHost, rec.status)
 			logRequest(ip, statKey, req.Method, targetHost, rec.status, time.Since(start))
+		}
+
+		// 异步解析 token 用量(不影响响应已返回,goroutine 里慢慢算)
+		// 只有 key 注入模式(statKey 形如 "key:alias")才记录,纯透传模式不记。
+		if usageTracker != nil && len(captureBuf) > 0 && strings.HasPrefix(statKey, "key:") {
+			alias := strings.TrimPrefix(statKey, "key:")
+			captured := captureBuf // 复制切片引用,避免被回收
+			go func() {
+				u := extractUsage(captured)
+				if u.HasData {
+					usageTracker.record(alias, u)
+				}
+			}()
 		}
 	})
 }
