@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -264,5 +266,120 @@ func TestExtractUsageTruncation(t *testing.T) {
 	}
 	if u.Prompt != 50 {
 		t.Errorf("Prompt = %d, want 50", u.Prompt)
+	}
+}
+
+// ---------- 持久化测试 ----------
+
+// TestUsagePersistRoundTrip 验证 save → 新实例 load → 数据完全一致。
+// 覆盖 token 用量 + 费用 + 缓存命中 + 多 alias。
+func TestUsagePersistRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "usage.json")
+
+	// 写入若干 alias 的统计(token + 费用 + 缓存)
+	us := newUsageStats()
+	us.record("glm", usageData{HasData: true, Model: "glm-4.7", Prompt: 1500, Cached: 500, Completion: 200, CostCalculated: true, InputCost: 0.003, OutputCost: 0.004, TotalCost: 0.007})
+	us.record("glm", usageData{HasData: true, Model: "glm-5.1", Prompt: 3000, Completion: 100, CostCalculated: true, InputCost: 0.02, OutputCost: 0.01, TotalCost: 0.03})
+	us.record("claude", usageData{HasData: true, Model: "claude-3", Prompt: 800, Cached: 100, Completion: 50, CostCalculated: false})
+
+	// 保存
+	if err := us.save(path); err != nil {
+		t.Fatalf("save 失败: %v", err)
+	}
+
+	// 用新实例读回
+	us2 := newUsageStats()
+	if err := us2.load(path); err != nil {
+		t.Fatalf("load 失败: %v", err)
+	}
+
+	// 比较快照
+	orig := us.snapshot()
+	loaded := us2.snapshot()
+	if len(orig) != len(loaded) {
+		t.Fatalf("alias 数量不一致: orig=%d loaded=%d", len(orig), len(loaded))
+	}
+	for alias, want := range orig {
+		got, ok := loaded[alias]
+		if !ok {
+			t.Errorf("load 后缺少 alias %q", alias)
+			continue
+		}
+		if got.Prompt != want.Prompt {
+			t.Errorf("[%s] Prompt: got %d, want %d", alias, got.Prompt, want.Prompt)
+		}
+		if got.Cached != want.Cached {
+			t.Errorf("[%s] Cached: got %d, want %d", alias, got.Cached, want.Cached)
+		}
+		if got.Completion != want.Completion {
+			t.Errorf("[%s] Completion: got %d, want %d", alias, got.Completion, want.Completion)
+		}
+		if got.Count != want.Count {
+			t.Errorf("[%s] Count: got %d, want %d", alias, got.Count, want.Count)
+		}
+		if got.InputCost != want.InputCost {
+			t.Errorf("[%s] InputCost: got %f, want %f", alias, got.InputCost, want.InputCost)
+		}
+		if got.OutputCost != want.OutputCost {
+			t.Errorf("[%s] OutputCost: got %f, want %f", alias, got.OutputCost, want.OutputCost)
+		}
+		if got.TotalCost != want.TotalCost {
+			t.Errorf("[%s] TotalCost: got %f, want %f", alias, got.TotalCost, want.TotalCost)
+		}
+	}
+}
+
+// TestUsagePersistLoadMissingFile 验证文件不存在时 load 不报错。
+// 首次启动时没有文件是正常情况。
+func TestUsagePersistLoadMissingFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "nonexistent.json")
+
+	us := newUsageStats()
+	if err := us.load(path); err != nil {
+		t.Errorf("文件不存在时 load 应返回 nil,但得到: %v", err)
+	}
+	if len(us.snapshot()) != 0 {
+		t.Error("load 不存在的文件后应该没有数据")
+	}
+}
+
+// TestUsagePersistOverwrite 验证多次 save 会覆盖旧文件(不是追加)。
+// 防止统计回退后旧数据残留。
+func TestUsagePersistOverwrite(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "usage.json")
+
+	// 第一次写
+	us1 := newUsageStats()
+	us1.record("glm", usageData{HasData: true, Prompt: 100, Completion: 10, TotalCost: 0.001})
+	if err := us1.save(path); err != nil {
+		t.Fatal(err)
+	}
+	info1, _ := os.Stat(path)
+	if info1.Size() == 0 {
+		t.Fatal("第一次 save 文件大小不应为 0")
+	}
+
+	// 第二次写(新实例,只记一条不同的数据)
+	us2 := newUsageStats()
+	us2.record("glm", usageData{HasData: true, Prompt: 50, Completion: 5, TotalCost: 0.0005})
+	if err := us2.save(path); err != nil {
+		t.Fatal(err)
+	}
+
+	// 读回验证:应该是第二次的数据(50/5),不是第一次(100/10)
+	us3 := newUsageStats()
+	us3.load(path)
+	got := us3.snapshot()["glm"]
+	if got.Prompt != 50 {
+		t.Errorf("覆盖后 Prompt = %d, want 50", got.Prompt)
+	}
+	if got.Completion != 5 {
+		t.Errorf("覆盖后 Completion = %d, want 5", got.Completion)
+	}
+	if got.TotalCost != 0.0005 {
+		t.Errorf("覆盖后 TotalCost = %f, want 0.0005", got.TotalCost)
 	}
 }

@@ -13,18 +13,26 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log"
+	"os"
 	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
-// usageData 是从单次响应里提取出的 token 用量。
+// usageData 是从单次响应里提取出的 token 用量与费用。
 type usageData struct {
-	HasData    bool  // 是否成功提取到 usage
-	Prompt     int64 // 输入 token(OpenAI:prompt_tokens / Anthropic:input_tokens)
-	Cached     int64 // 缓存命中 token(OpenAI:cached_tokens / Anthropic:cache_read_input_tokens)
-	Completion int64 // 输出 token(OpenAI:completion_tokens / Anthropic:output_tokens)
+	HasData        bool    // 是否成功提取到 usage
+	Model          string  // 模型名称(从响应提取,如 "glm-5.1-flash")
+	Prompt         int64   // 输入 token(OpenAI:prompt_tokens / Anthropic:input_tokens)
+	Cached         int64   // 缓存命中 token(OpenAI:cached_tokens / Anthropic:cache_read_input_tokens)
+	Completion     int64   // 输出 token(OpenAI:completion_tokens / Anthropic:output_tokens)
+	CostCalculated bool    // 是否成功计算了费用(模型在定价表中)
+	InputCost      float64 // 输入费用（元,由调用方计算填入）
+	OutputCost     float64 // 输出费用（元）
+	TotalCost      float64 // 总费用（元）
 }
 
 // openAIUsage 对应 OpenAI 格式的 usage 字段。
@@ -78,11 +86,13 @@ func tryJSON(body []byte) usageData {
 
 	// 尝试 OpenAI 格式
 	var oi struct {
+		Model string      `json:"model"`
 		Usage openAIUsage `json:"usage"`
 	}
 	if json.Unmarshal(body, &oi) == nil && oi.Usage.PromptTokens > 0 {
 		return usageData{
 			HasData:    true,
+			Model:      oi.Model,
 			Prompt:     oi.Usage.PromptTokens,
 			Cached:     oi.Usage.PromptTokensDetails.CachedTokens,
 			Completion: oi.Usage.CompletionTokens,
@@ -95,11 +105,13 @@ func tryJSON(body []byte) usageData {
 	// OpenAI 的 prompt_tokens 已经是总输入(含缓存)。
 	// 为了统一命中率计算(cached/prompt),Anthropic 的 Prompt 要加上 cache_read。
 	var ai struct {
+		Model string         `json:"model"`
 		Usage anthropicUsage `json:"usage"`
 	}
 	if json.Unmarshal(body, &ai) == nil && (ai.Usage.InputTokens > 0 || ai.Usage.CacheReadInputTokens > 0) {
 		return usageData{
 			HasData:    true,
+			Model:      ai.Model,
 			Prompt:     ai.Usage.InputTokens + ai.Usage.CacheReadInputTokens, // 总输入
 			Cached:     ai.Usage.CacheReadInputTokens,
 			Completion: ai.Usage.OutputTokens,
@@ -169,7 +181,9 @@ func tryJSONFlexible(body []byte) usageData {
 	// 尝试 2:Anthropic message_start 格式 {"message":{"usage":{...}}}
 	// 注意:input_tokens 只是新增部分,总输入 = input + cache_read
 	var anthropicStart struct {
+		Type    string `json:"type"`
 		Message struct {
+			Model string         `json:"model"`
 			Usage anthropicUsage `json:"usage"`
 		} `json:"message"`
 	}
@@ -178,6 +192,7 @@ func tryJSONFlexible(body []byte) usageData {
 		if au.InputTokens > 0 || au.CacheReadInputTokens > 0 {
 			return usageData{
 				HasData:    true,
+				Model:      anthropicStart.Message.Model,
 				Prompt:     au.InputTokens + au.CacheReadInputTokens,
 				Cached:     au.CacheReadInputTokens,
 				Completion: au.OutputTokens,
@@ -207,12 +222,15 @@ func bytesContains(b []byte, sub string) bool {
 
 // ---------- 按 alias 聚合统计 ----------
 
-// aliasUsageStats 是单个 alias 的累计 token 统计。
+// aliasUsageStats 是单个 alias 的累计 token 统计与费用统计。
 type aliasUsageStats struct {
-	Prompt     int64 // 累计输入 token
-	Cached     int64 // 累计缓存命中 token
-	Completion int64 // 累计输出 token
-	Count      int64 // 成功提取到 usage 的请求次数
+	Prompt     int64   // 累计输入 token
+	Cached     int64   // 累计缓存命中 token
+	Completion int64   // 累计输出 token
+	Count      int64   // 成功提取到 usage 的请求次数
+	InputCost  float64 // 累计输入费用（元）
+	OutputCost float64 // 累计输出费用（元）
+	TotalCost  float64 // 累计总费用（元）
 }
 
 // cacheHitRate 计算缓存命中率 = cached / (prompt + cached)。
@@ -237,7 +255,7 @@ func newUsageStats() *usageStats {
 	return &usageStats{data: make(map[string]*aliasUsageStats)}
 }
 
-// record 异步记录一次请求的 token 用量到指定 alias。
+// record 异步记录一次请求的 token 用量与费用到指定 alias。
 // 安全地在 goroutine 里调用。
 func (us *usageStats) record(alias string, u usageData) {
 	if !u.HasData || alias == "" {
@@ -254,6 +272,10 @@ func (us *usageStats) record(alias string, u usageData) {
 	atomic.AddInt64(&s.Cached, u.Cached)
 	atomic.AddInt64(&s.Completion, u.Completion)
 	atomic.AddInt64(&s.Count, 1)
+	// 费用使用 float64 原子加减(近似安全,不做精确累加)
+	s.InputCost += u.InputCost
+	s.OutputCost += u.OutputCost
+	s.TotalCost += u.TotalCost
 }
 
 // snapshot 返回所有 alias 统计的快照(给 Dashboard 展示用)。
@@ -285,9 +307,10 @@ func buildUsageHTML(snap map[string]aliasUsageStats) string {
 
 	var b strings.Builder
 	b.WriteString(`<table style="font-size:13px;margin-top:8px">`)
-	b.WriteString(`<tr><th>Alias</th><th>请求数</th><th>输入</th><th>缓存命中</th><th>输出</th><th>命中率</th></tr>`)
+	b.WriteString(`<tr><th>Alias</th><th>请求数</th><th>输入</th><th>缓存命中</th><th>输出</th><th>命中率</th><th>输入费用</th><th>输出费用</th><th>总费用</th></tr>`)
 
 	var totalPrompt, totalCached, totalCompletion int64
+	var totalInputCost, totalOutputCost, totalCost float64
 	var totalCount int64
 	for _, alias := range aliases {
 		s := snap[alias]
@@ -303,11 +326,16 @@ func buildUsageHTML(snap map[string]aliasUsageStats) string {
 		bar := strings.Repeat("█", filled) + strings.Repeat("░", barLen-filled)
 		fmt.Fprintf(&b, `<tr><td><b>%s</b></td><td>%d</td><td>%s</td><td>%s</td><td>%s</td>`,
 			alias, s.Count, fmtTokens(s.Prompt), fmtTokens(s.Cached), fmtTokens(s.Completion))
-		fmt.Fprintf(&b, `<td><span style="font-family:monospace;font-size:11px">%s</span> %.1f%%</td></tr>`,
+		fmt.Fprintf(&b, `<td><span style="font-family:monospace;font-size:11px">%s</span> %.1f%%</td>`,
 			bar, displayRate*100)
+		fmt.Fprintf(&b, `<td>%.4f</td><td>%.4f</td><td><b>%.4f</b></td></tr>`,
+			s.InputCost, s.OutputCost, s.TotalCost)
 		totalPrompt += s.Prompt
 		totalCached += s.Cached
 		totalCompletion += s.Completion
+		totalInputCost += s.InputCost
+		totalOutputCost += s.OutputCost
+		totalCost += s.TotalCost
 		totalCount += s.Count
 	}
 
@@ -321,7 +349,8 @@ func buildUsageHTML(snap map[string]aliasUsageStats) string {
 	}
 	fmt.Fprintf(&b, `<tr style="font-weight:bold;background:#eee"><td>合计</td><td>%d</td><td>%s</td><td>%s</td><td>%s</td>`,
 		totalCount, fmtTokens(totalPrompt), fmtTokens(totalCached), fmtTokens(totalCompletion))
-	fmt.Fprintf(&b, `<td>%.1f%%</td></tr>`, totalRate*100)
+	fmt.Fprintf(&b, `<td>%.1f%%</td>`, totalRate*100)
+	fmt.Fprintf(&b, `<td>%.4f</td><td>%.4f</td><td>%.4f</td></tr>`, totalInputCost, totalOutputCost, totalCost)
 	b.WriteString(`</table>`)
 	return b.String()
 }
@@ -336,4 +365,69 @@ func fmtTokens(n int64) string {
 		return fmt.Sprintf("%.1fK", float64(n)/1000)
 	}
 	return fmt.Sprintf("%d", n)
+}
+
+// ---------- 持久化 --------------------------------------------------------
+//
+// 把 token 用量 + 费用统计存到 JSON 文件,重启时读回。
+// 与 stats.go 的持久化采用相同的原子写策略(先写 tmp 再 rename)。
+
+// usagePersistSnapshot 是 usage 落盘的文件结构。
+// 版本号便于将来升级格式。字段命名与 aliasUsageStats 的 JSON tag 对齐。
+type usagePersistSnapshot struct {
+	Version int                        `json:"version"`
+	Data    map[string]aliasUsageStats `json:"data"`
+}
+
+// load 从 path 读取 usage 统计快照,恢复到 usageStats。文件不存在视为空,不报错。
+func (us *usageStats) load(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // 首次启动,没文件很正常
+		}
+		return err
+	}
+	var snap usagePersistSnapshot
+	if err := json.Unmarshal(data, &snap); err != nil {
+		return err
+	}
+	us.mu.Lock()
+	defer us.mu.Unlock()
+	// aliasUsageStats 是值类型,直接赋值即可
+	for alias, s := range snap.Data {
+		// 复制一份再存入 map(避免外部引用)
+		cp := s
+		us.data[alias] = &cp
+	}
+	return nil
+}
+
+// save 把当前 usage 统计原子写入 path。
+func (us *usageStats) save(path string) error {
+	snap := us.snapshot() // 已深拷贝,不持锁
+	out := usagePersistSnapshot{Version: 1, Data: snap}
+	data, err := json.Marshal(out)
+	if err != nil {
+		return err
+	}
+	// 原子写:先写临时文件,再 rename
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// startPersistLoop 启动后台 goroutine,每 interval 落盘一次。
+func (us *usageStats) startPersistLoop(path string, interval time.Duration) {
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for range ticker.C {
+			if err := us.save(path); err != nil {
+				log.Printf("usage 统计落盘失败: %v", err)
+			}
+		}
+	}()
 }

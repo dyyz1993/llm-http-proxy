@@ -29,6 +29,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"llm-http-proxy/internal/cost"
 )
 
 // hostFromURL 从目标 URL 字符串里取 host:port。
@@ -116,6 +118,7 @@ func main() {
 	usageTracker = newUsageStats()
 
 	// 持久化:启动时读回历史统计,后台每 30s 落盘一次。
+	// stats 和 usage 各用独立文件(避免读写互相影响),路径为 {persist} 和 {persist}.usage。
 	if *persist != "" {
 		if err := stats.load(*persist); err != nil {
 			log.Printf("读取持久化统计失败(将从头开始): %v", err)
@@ -123,6 +126,14 @@ func main() {
 			log.Printf("已从 %s 读回历史统计", *persist)
 		}
 		stats.startPersistLoop(*persist, 30*time.Second)
+
+		usagePath := *persist + ".usage"
+		if err := usageTracker.load(usagePath); err != nil {
+			log.Printf("读取 usage 统计失败(将从头开始): %v", err)
+		} else {
+			log.Printf("已从 %s 读回历史 usage 统计", usagePath)
+		}
+		usageTracker.startPersistLoop(usagePath, 30*time.Second)
 	}
 
 	// key 注入模式:加载 keys.yaml + 启动热加载
@@ -410,6 +421,16 @@ func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLa
 		if len(captureBuf) > 0 && strings.HasPrefix(statKey, "key:") {
 			u = extractUsage(captureBuf)
 			if u.HasData && usageTracker != nil {
+				// 尝试用 glm-cost 计算费用
+				c, err := cost.Calculate(u.Model, int(u.Prompt), int(u.Completion), u.Cached > 0)
+				if err == nil {
+					u.CostCalculated = true
+					u.InputCost = c.InputCost
+					u.OutputCost = c.OutputCost
+					u.TotalCost = c.TotalCost
+				}
+				// 即使费用计算失败(模型不在定价表),也照常记录 token 用量
+
 				alias := strings.TrimPrefix(statKey, "key:")
 				usageTracker.record(alias, u)
 			}

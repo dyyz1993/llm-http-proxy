@@ -599,6 +599,11 @@ type logEntry struct {
 	Prompt     int64 `json:"prompt"`     // 输入 token
 	Cached     int64 `json:"cached"`     // 缓存命中 token
 	Completion int64 `json:"completion"` // 输出 token
+	// 费用(由 glm-cost 计算)
+	CostCalculated bool    `json:"cost_calculated"` // 是否成功计算了费用
+	InputCost      float64 `json:"input_cost"`      // 输入费用（元）
+	OutputCost     float64 `json:"output_cost"`     // 输出费用（元）
+	TotalCost      float64 `json:"total_cost"`      // 总费用（元）
 }
 
 // logRing 是内存环形缓冲,存最近 N 条请求日志(给 admin UI 看)。
@@ -639,7 +644,7 @@ func (r *logRing) recent(n int) []logEntry {
 	return out
 }
 
-// logRequest 打一行结构化日志,只含 IP/掩码key/host/状态码/token用量,不含 body。
+// logRequest 打一行结构化日志,只含 IP/掩码key/host/状态码/token用量/费用,不含 body。
 // 同时写入内存环形缓冲(给 admin UI 看)。
 // u 是从响应里异步提取的 token 用量(可能 HasData=false)。
 func logRequest(ip, maskedKey, method, targetHost string, status int, dur time.Duration, u usageData) {
@@ -647,19 +652,26 @@ func logRequest(ip, maskedKey, method, targetHost string, status int, dur time.D
 		ip, maskedKey, method, targetHost, status, dur)
 	if u.HasData {
 		line += fmt.Sprintf(" prompt=%d cached=%d completion=%d", u.Prompt, u.Cached, u.Completion)
+		if u.TotalCost > 0 {
+			line += fmt.Sprintf(" cost=%.6f", u.TotalCost)
+		}
 	}
 	log.Print(line)
 	globalLogRing.add(logEntry{
-		Time:       time.Now().In(beijing).Format("2006-01-02 15:04:05"),
-		IP:         ip,
-		Key:        maskedKey,
-		Method:     method,
-		Host:       targetHost,
-		Status:     status,
-		Duration:   dur.Round(time.Millisecond).String(),
-		Prompt:     u.Prompt,
-		Cached:     u.Cached,
-		Completion: u.Completion,
+		Time:           time.Now().In(beijing).Format("2006-01-02 15:04:05"),
+		IP:             ip,
+		Key:            maskedKey,
+		Method:         method,
+		Host:           targetHost,
+		Status:         status,
+		Duration:       dur.Round(time.Millisecond).String(),
+		Prompt:         u.Prompt,
+		Cached:         u.Cached,
+		Completion:     u.Completion,
+		CostCalculated: u.CostCalculated,
+		InputCost:      u.InputCost,
+		OutputCost:     u.OutputCost,
+		TotalCost:      u.TotalCost,
 	})
 }
 

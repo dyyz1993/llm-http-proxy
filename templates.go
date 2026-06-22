@@ -155,25 +155,28 @@ function copyURL(alias) {
 </body></html>`,
 
 	"logs": `<!DOCTYPE html>
-<html lang="zh-CN"><head><meta charset="utf-8"><title>Logs - llm-http-proxy</title>
-{{template "head"}}</head>
-<body>{{template "nav"}}
-<h2>最近日志 ({{len .}} 条)</h2>
-{{if not .}}<p>暂无日志。</p>{{else}}
-<table style="font-size:13px">
-<tr><th>时间</th><th>IP</th><th>Key</th><th>Method</th><th>Host</th><th>Status</th><th>耗时</th><th>输入</th><th>缓存</th><th>输出</th><th>命中率</th></tr>
-{{range .}}
-<tr>
-<td>{{.Time}}</td><td>{{.IP}}</td><td>{{.Key}}</td><td>{{.Method}}</td>
-<td>{{.Host}}</td><td>{{.Status}}</td><td>{{.Duration}}</td>
-<td>{{if .Prompt}}{{.Prompt}}{{else}}-{{end}}</td>
-<td>{{if .Cached}}{{.Cached}}{{else}}-{{end}}</td>
-<td>{{if .Completion}}{{.Completion}}{{else}}-{{end}}</td>
-<td>{{if and .Prompt .Cached}}{{printf "%.0f%%" (mul (divf .Cached .Prompt) 100)}}{{else}}-{{end}}</td>
-</tr>
-{{end}}
-</table>{{end}}
-</body></html>`,
+	<html lang="zh-CN"><head><meta charset="utf-8"><title>Logs - llm-http-proxy</title>
+	{{template "head"}}</head>
+	<body>{{template "nav"}}
+	<h2>最近日志 ({{len .}} 条)</h2>
+	{{if not .}}<p>暂无日志。</p>{{else}}
+	<table style="font-size:13px">
+	<tr><th>时间</th><th>IP</th><th>Key</th><th>Method</th><th>Host</th><th>Status</th><th>耗时</th><th>输入</th><th>缓存</th><th>输出</th><th>命中率</th><th>输入费用</th><th>输出费用</th><th>总费用</th></tr>
+	{{range .}}
+	<tr>
+	<td>{{.Time}}</td><td>{{.IP}}</td><td>{{.Key}}</td><td>{{.Method}}</td>
+	<td>{{.Host}}</td><td>{{.Status}}</td><td>{{.Duration}}</td>
+	<td>{{if .Prompt}}{{.Prompt}}{{else}}-{{end}}</td>
+	<td>{{if .Cached}}{{.Cached}}{{else}}-{{end}}</td>
+	<td>{{if .Completion}}{{.Completion}}{{else}}-{{end}}</td>
+	<td>{{if and .Prompt .Cached}}{{printf "%.0f%%" (mul (divf .Cached .Prompt) 100)}}{{else}}-{{end}}</td>
+	<td>{{if .CostCalculated}}{{printf "%.6f" .InputCost}}{{else}}-{{end}}</td>
+	<td>{{if .CostCalculated}}{{printf "%.6f" .OutputCost}}{{else}}-{{end}}</td>
+	<td>{{if .CostCalculated}}{{printf "%.6f" .TotalCost}}{{else}}-{{end}}</td>
+	</tr>
+	{{end}}
+	</table>{{end}}
+	</body></html>`,
 
 	"msg": `<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8"><title>{{.Title}}</title>
