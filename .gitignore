@@ -24,3 +24,6 @@ Thumbs.db
 
 # Go 工作区
 vendor/
+
+# 协作约定(本地用,不提交)
+agents.md
