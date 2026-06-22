@@ -152,7 +152,7 @@ func startProxyWithAdmin(t *testing.T, password string, ks *keyStore) *httptest.
 	// 跟 main.go 一致:ks != nil 时才建配额缓存
 	var qc *quotaCache
 	if ks != nil {
-		qc = newQuotaCache()
+		qc = newQuotaCache(":0") // 测试用任意端口,probe 不会真连
 	}
 	admin := newAdminServer(password, stats, ks, qc)
 	mux := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
@@ -1891,7 +1891,7 @@ func TestAdminQuotaRefresh(t *testing.T) {
 // --- quota 相关测试 ---
 
 func TestNextResetTime(t *testing.T) {
-	qc := newQuotaCache()
+	qc := newQuotaCache(":0")
 	now := time.Now()
 
 	// 空:返回零值
@@ -1929,6 +1929,40 @@ func TestNextResetTime(t *testing.T) {
 	if got.Sub(want) > time.Second || want.Sub(got) > time.Second {
 		t.Errorf("nextResetTime = %v, want ~%v (2h后,最早的未来点)", got, want)
 	}
+}
+
+// TestProbeDedupByKey 验证同 key 多 alias 只 probe 一次(去重)。
+// 不真连网络(用不存在的端口),只验证去重逻辑不 panic 且能跑完。
+func TestProbeDedupByKey(t *testing.T) {
+	if testing.Short() {
+		t.Skip("跳过需要网络的 probe 测试")
+	}
+	ks := newKeyStore()
+	sameKey := "0123456789012345678901234567890123456789" // 40 字符,通过长度检查
+	// 三个 alias 用同一个 key,probe 应只调一次(配额+模型各一次)
+	ks.setConfig("alias1", KeyConfig{Key: sameKey, Header: "Authorization", Prefix: "Bearer "})
+	ks.setConfig("alias2", KeyConfig{Key: sameKey, Header: "Authorization", Prefix: "Bearer "})
+	ks.setConfig("alias3", KeyConfig{Key: sameKey, Header: "Authorization", Prefix: "Bearer "})
+	// 第四个用不同 key
+	ks.setConfig("alias4", KeyConfig{Key: "9876543210987654321098765432109876543210", Header: "Authorization", Prefix: "Bearer "})
+
+	qc := newQuotaCache(":65530") // 不存在的端口,probe 会失败但不 panic
+
+	// 应能正常执行完(每个唯一 key 各 2 次 probe,失败也不影响)
+	assertNotPanic(t, func() {
+		qc.probeAndRefresh(ks)
+	})
+}
+
+// assertNotPanic 断言 fn 不 panic。
+func assertNotPanic(t *testing.T, fn func()) {
+	t.Helper()
+	defer func() {
+		if r := recover(); r != nil {
+			t.Errorf("不应 panic 但 panic 了: %v", r)
+		}
+	}()
+	fn()
 }
 
 func TestProgressBar(t *testing.T) {

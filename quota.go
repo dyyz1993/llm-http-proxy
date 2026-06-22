@@ -64,13 +64,14 @@ type cachedQuota struct {
 
 // quotaCache 持有所 key 的配额缓存,后台定时刷新。
 type quotaCache struct {
-	mu       sync.RWMutex
-	entries  []cachedQuota // 按 alias 排序
-	interval time.Duration
+	mu        sync.RWMutex
+	entries   []cachedQuota // 按 alias 排序
+	interval  time.Duration
+	localAddr string // 本地代理地址(如 ":8080"),probe 走自己的代理
 }
 
-func newQuotaCache() *quotaCache {
-	return &quotaCache{interval: 5 * time.Minute}
+func newQuotaCache(localAddr string) *quotaCache {
+	return &quotaCache{interval: 5 * time.Minute, localAddr: localAddr}
 }
 
 // fetchAll 遍历 keys.yaml 里所有 key,逐个调 api.z.ai 拉配额。
@@ -100,6 +101,65 @@ func (qc *quotaCache) fetchAll(configs map[string]KeyConfig) {
 	qc.mu.Unlock()
 
 	log.Printf("配额缓存刷新完成: %d 个 key", len(results))
+}
+
+// probeAndRefresh 在额度重置点触发后端结算,然后刷新配额。
+// 两种 probe 都走自己的代理(/k/{alias}/),密钥服务端注入,代码里不碰 key。
+// 按 key 去重:多个 alias 用同一个 key 时,只 probe 第一个,避免重复请求。
+func (qc *quotaCache) probeAndRefresh(ks *keyStore) {
+	configs := ks.allConfigs()
+
+	// 按 key 去重:同一 key 只保留第一个遇到的 alias
+	seen := make(map[string]bool) // rawKey → 已 probe
+	for alias, cfg := range configs {
+		rawKey := cfg.Key
+		// 跳过无效 key
+		if strings.HasPrefix(rawKey, "sk-") || len(rawKey) < 20 {
+			continue
+		}
+		if seen[rawKey] {
+			continue // 同一个 key 已经 probe 过,跳过
+		}
+		seen[rawKey] = true
+
+		// 1. 调配额接口(0 token):走代理,触发后端结算
+		qc.probeViaProxy(alias, "https://api.z.ai/api/monitor/usage/quota/limit")
+		// 2. 调最小模型请求(~1 token):走代理,确保 key 可用 + 触发结算
+		qc.probeModelViaProxy(alias, "glm-4-flash")
+	}
+
+	// probe 完再拉一次配额(此时后端已结算,数字准确)
+	qc.fetchAll(configs)
+}
+
+// probeViaProxy 通过自己的代理 /k/{alias}/{target} 发 GET 请求。
+// 密钥由代理注入,这里不碰 key。用于调配额接口(0 消耗)。
+func (qc *quotaCache) probeViaProxy(alias, targetURL string) {
+	url := fmt.Sprintf("http://127.0.0.1%s/k/%s/%s", qc.localAddr, alias, targetURL)
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		log.Printf("probe(配额)失败 [%s]: %v", alias, err)
+		return
+	}
+	resp.Body.Close()
+	log.Printf("probe(配额)已触发 [%s]: HTTP %d", alias, resp.StatusCode)
+}
+
+// probeModelViaProxy 通过代理发一个最小模型请求(走 /k/{alias}/)。
+// 密钥服务端注入。消耗 ~1 token,确保 key 可用且触发后端结算。
+func (qc *quotaCache) probeModelViaProxy(alias, model string) {
+	url := fmt.Sprintf("http://127.0.0.1%s/k/%s/https://api.z.ai/api/paas/v4/chat/completions",
+		qc.localAddr, alias)
+	body := strings.NewReader(`{"model":"` + model + `","messages":[{"role":"user","content":"1"}],"max_tokens":1}`)
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Post(url, "application/json", body)
+	if err != nil {
+		log.Printf("probe(模型)失败 [%s]: %v", alias, err)
+		return
+	}
+	resp.Body.Close()
+	log.Printf("probe(模型)已触发 [%s] %s: HTTP %d (~1 token)", alias, model, resp.StatusCode)
 }
 
 // fetchOne 拉取单个别名的配额。
@@ -179,10 +239,9 @@ func (qc *quotaCache) startLoop(ks *keyStore) {
 				d := time.Until(t)
 				// 重置时刻已过或太近(< 30s)的不单独调度,交给 ticker
 				if d > 30*time.Second {
-					resetTimer = time.AfterFunc(d+2*time.Second, func() {
-						qc.fetchAll(ks.allConfigs())
-						// 重新计算下一个重置点(重置后 nextResetTime 会变)
-						// 通过重新调度实现;这里不能直接调 scheduleNextReset(闭包问题)
+					// 重置点 +5s:给上游留时间结算,然后 probe 触发 + 刷新配额
+					resetTimer = time.AfterFunc(d+5*time.Second, func() {
+						qc.probeAndRefresh(ks)
 					})
 				}
 			}

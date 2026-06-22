@@ -113,7 +113,7 @@ func main() {
 	// 配额缓存(只在 key 注入模式下启用,后台定时轮询 api.z.ai)
 	var quotaCacheInst *quotaCache
 	if ks != nil {
-		quotaCacheInst = newQuotaCache()
+		quotaCacheInst = newQuotaCache(*addr)
 		quotaCacheInst.startLoop(ks)
 	}
 
