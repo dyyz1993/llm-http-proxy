@@ -271,6 +271,62 @@ func TestExtractUsageTruncation(t *testing.T) {
 
 // ---------- 持久化测试 ----------
 
+// TestExtractSSEModelSeparateChunk 验证 SSE 流里 model 和 usage 分散在不同 chunk 时,
+// model 字段能被正确合并(不丢失)。
+// 这是 v2.4.1 修复的 bug:SSE 的 model 在第一个 chunk,usage 在最后一个 chunk,
+// 合并时漏了 Model 字段导致费用算不出。
+func TestExtractSSEModelSeparateChunk(t *testing.T) {
+	// 模拟真实 GLM SSE 响应:
+	// - 第一个 chunk 含 model(但无 usage)
+	// - 中间 chunk 是增量内容(无 model 无 usage)
+	// - 最后一个 chunk 含 usage(但可能无 model)
+	body := []byte(`data: {"id":"123","model":"GLM-4.7","choices":[{"delta":{"content":""}}]}
+
+data: {"id":"123","choices":[{"delta":{"content":"你好"}}]}
+
+data: {"id":"123","choices":[],"usage":{"prompt_tokens":6,"completion_tokens":223,"total_tokens":229}}
+
+data: [DONE]
+
+`)
+	u := extractUsage(body)
+	if !u.HasData {
+		t.Fatal("应提取到 usage")
+	}
+	if u.Model == "" {
+		t.Fatal("Model 应该被提取到(model 在第一个 chunk,usage 在最后一个),但得到空字符串 — 这是 v2.4.0 的 bug")
+	}
+	if u.Model != "GLM-4.7" && !strings.EqualFold(u.Model, "glm-4.7") {
+		t.Errorf("Model = %q, want GLM-4.7", u.Model)
+	}
+	if u.Prompt != 6 {
+		t.Errorf("Prompt = %d, want 6", u.Prompt)
+	}
+	if u.Completion != 223 {
+		t.Errorf("Completion = %d, want 223", u.Completion)
+	}
+}
+
+// TestExtractUsageModelCaseInsensitive 验证大小写不影响费用计算。
+// 官方返回 "GLM-4.7",用户可能配 "glm-4.7",都应正确匹配。
+func TestExtractUsageModelCaseInsensitive(t *testing.T) {
+	tests := []string{"GLM-4.7", "glm-4.7", "Glm-4.7", "GLM-4.7-Flash"}
+	for _, model := range tests {
+		t.Run(model, func(t *testing.T) {
+			body := []byte(`{"model":"` + model + `","usage":{"prompt_tokens":100,"completion_tokens":50}}`)
+			u := extractUsage(body)
+			if !u.HasData {
+				t.Fatal("应提取到 usage")
+			}
+			if u.Model != model {
+				t.Errorf("Model = %q, want %q", u.Model, model)
+			}
+		})
+	}
+}
+
+// ---------- 持久化测试 ----------
+
 // TestUsagePersistRoundTrip 验证 save → 新实例 load → 数据完全一致。
 // 覆盖 token 用量 + 费用 + 缓存命中 + 多 alias。
 func TestUsagePersistRoundTrip(t *testing.T) {

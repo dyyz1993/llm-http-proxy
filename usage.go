@@ -121,11 +121,13 @@ func tryJSON(body []byte) usageData {
 	return usageData{}
 }
 
-// trySSE 从 SSE 流里提取 usage。
+// trySSE 从 SSE 流里提取 usage + model。
 // SSE 格式:多行 "data: {...}\n\n"。
-// 策略:遍历所有 data: 行,对每个含 "usage" 的 chunk 尝试解析,
-// 把找到的字段累积合并(因为 Anthropic 的 input/cache 在 message_start,
-// output 在 message_delta;OpenAI 则全在最后一个 chunk)。
+// 策略:遍历所有 data: 行,
+//   - model 字段:从任意含 "model" 的 chunk 提取(通常在第一个 chunk)
+//   - usage 字段:对每个含 "usage" 的 chunk 解析,累积合并
+//     (Anthropic 的 input/cache 在 message_start,output 在 message_delta;
+//     OpenAI 全在最后一个 chunk)
 func trySSE(body []byte) usageData {
 	s := string(body)
 	var result usageData
@@ -147,7 +149,20 @@ func trySSE(body []byte) usageData {
 		if line == "[DONE]" || line == "" {
 			continue
 		}
-		// 尝试解析(支持嵌套的 Anthropic message_start 格式)
+
+		// 1. 先单独提取 model 字段(不依赖 usage,因为 model 和 usage
+		//    可能在不同 chunk —— GLM/OpenAI 的 SSE,model 在第一个 chunk,
+		//    usage 在最后一个)
+		if result.Model == "" && bytesContains([]byte(line), `"model"`) {
+			var mc struct {
+				Model string `json:"model"`
+			}
+			if json.Unmarshal([]byte(line), &mc) == nil && mc.Model != "" {
+				result.Model = mc.Model
+			}
+		}
+
+		// 2. 再尝试提取 usage(支持嵌套的 Anthropic message_start 格式)
 		if u := tryJSONFlexible([]byte(line)); u.HasData {
 			result.HasData = true
 			// 后找到的非零值覆盖前面的(合并)
@@ -159,6 +174,10 @@ func trySSE(body []byte) usageData {
 			}
 			if u.Completion > 0 {
 				result.Completion = u.Completion
+			}
+			// usage chunk 里也可能带 model(兜底)
+			if u.Model != "" && result.Model == "" {
+				result.Model = u.Model
 			}
 		}
 	}
