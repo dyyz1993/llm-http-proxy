@@ -1676,9 +1676,10 @@ func TestAdminKeyExpiresDatetimeLocal(t *testing.T) {
 	resp, _ := client.PostForm(proxy.URL+"/__admin/login", url.Values{"password": {"pw"}})
 	resp.Body.Close()
 
-	// datetime-local 提交的是 ISO 格式(带 T)
+	// datetime-local 提交的是 ISO 格式(带 T),用未来的时间避免过期
+	futureExpires := time.Now().In(beijing).Add(48 * time.Hour).Format("2006-01-02T15:04")
 	resp, err := client.PostForm(proxy.URL+"/__admin/keys/new",
-		url.Values{"alias": {"dt"}, "key": {"sk-x"}, "expires": {"2026-06-22T09:00"}})
+		url.Values{"alias": {"dt"}, "key": {"sk-x"}, "expires": {futureExpires}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1690,8 +1691,10 @@ func TestAdminKeyExpiresDatetimeLocal(t *testing.T) {
 		body, _ := io.ReadAll(resp.Body)
 		t.Fatalf("datetime-local 格式有效期应保存成功,但被拒。响应: %s", string(body))
 	}
-	if cfg.Expires != "2026-06-22 09:00" {
-		t.Errorf("保存的 expires = %q, want 规范化的 '2026-06-22 09:00'", cfg.Expires)
+	// 保存的应是规范化的空格格式(T → 空格)
+	wantExpires := strings.Replace(futureExpires, "T", " ", 1)
+	if cfg.Expires != wantExpires {
+		t.Errorf("保存的 expires = %q, want 规范化的 %q", cfg.Expires, wantExpires)
 	}
 }
 
@@ -1963,6 +1966,160 @@ func assertNotPanic(t *testing.T, fn func()) {
 		}
 	}()
 	fn()
+}
+
+// --- 域名白名单 + header 自动检测测试 ---
+
+func TestExtractDomain(t *testing.T) {
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{"https://api.z.ai/path", "api.z.ai"},
+		{"https://open.bigmodel.cn:8443/api/x", "open.bigmodel.cn"},
+		{"http://localhost:8080/", "localhost"},
+		{"https://API.Z.AI/", "api.z.ai"}, // 小写化
+		{"api.z.ai/no-protocol", "api.z.ai"},
+	}
+	for _, c := range cases {
+		if got := extractDomain(c.input); got != c.want {
+			t.Errorf("extractDomain(%q) = %q, want %q", c.input, got, c.want)
+		}
+	}
+}
+
+func TestPickHeader(t *testing.T) {
+	// 1. 显式配置优先(向后兼容)
+	name, val := pickHeader(KeyConfig{Key: "sk-1", Header: "x-api-key"}, http.Header{})
+	if name != "x-api-key" || val != "sk-1" {
+		t.Errorf("显式 x-api-key: got name=%q val=%q", name, val)
+	}
+	name, val = pickHeader(KeyConfig{Key: "sk-1", Header: "Authorization", Prefix: "Bearer "}, http.Header{})
+	if name != "Authorization" || val != "Bearer sk-1" {
+		t.Errorf("显式 Authorization+Prefix: got name=%q val=%q", name, val)
+	}
+	// 显式 Authorization 不带 Prefix → 自动加 Bearer
+	name, val = pickHeader(KeyConfig{Key: "sk-1", Header: "Authorization"}, http.Header{})
+	if name != "Authorization" || val != "Bearer sk-1" {
+		t.Errorf("显式 Authorization 无Prefix: got name=%q val=%q", name, val)
+	}
+
+	// 2. 自动检测:客户端带 anthropic-version → x-api-key
+	anthropicHeaders := http.Header{}
+	anthropicHeaders.Set("Anthropic-Version", "2023-06-01")
+	name, val = pickHeader(KeyConfig{Key: "sk-1"}, anthropicHeaders)
+	if name != "x-api-key" || val != "sk-1" {
+		t.Errorf("自动(anthropic-version): got name=%q val=%q", name, val)
+	}
+
+	// 3. 自动检测:客户端带 x-api-key(占位假key) → x-api-key
+	apiKeyHeaders := http.Header{}
+	apiKeyHeaders.Set("X-Api-Key", "placeholder")
+	name, val = pickHeader(KeyConfig{Key: "sk-1"}, apiKeyHeaders)
+	if name != "x-api-key" || val != "sk-1" {
+		t.Errorf("自动(x-api-key): got name=%q val=%q", name, val)
+	}
+
+	// 4. 自动检测:普通客户端(只有 Authorization) → Authorization: Bearer
+	normalHeaders := http.Header{}
+	normalHeaders.Set("Authorization", "Bearer placeholder")
+	name, val = pickHeader(KeyConfig{Key: "sk-1"}, normalHeaders)
+	if name != "Authorization" || val != "Bearer sk-1" {
+		t.Errorf("自动默认: got name=%q val=%q", name, val)
+	}
+
+	// 5. 自动检测:无任何特征 header → 默认 Authorization: Bearer
+	name, val = pickHeader(KeyConfig{Key: "sk-1"}, http.Header{})
+	if name != "Authorization" || val != "Bearer sk-1" {
+		t.Errorf("自动(空header): got name=%q val=%q", name, val)
+	}
+}
+
+// TestKeyRouteDomainWhitelist 验证域名白名单:不在白名单的域名被拒绝(403)。
+func TestKeyRouteDomainWhitelist(t *testing.T) {
+	ks := newKeyStore()
+	ks.setConfig("glm", KeyConfig{Key: "sk-secret", Header: "", Prefix: ""}) // 自动模式
+
+	// 设白名单:只允许 api.z.ai
+	oldAllow := allowDomains
+	allowDomains = map[string]bool{"api.z.ai": true}
+	defer func() { allowDomains = oldAllow }()
+
+	proxy := startProxyWithKeys(t, ks)
+	defer proxy.Close()
+
+	// 不在白名单的域名 → 403,不注入 key
+	resp, err := http.Get(proxy.URL + "/k/glm/https://evil.hacker.com/log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("非白名单域名应 403, got %d", resp.StatusCode)
+	}
+
+	// 在白名单的域名 → 放行(会尝试转发,目标不存在但不应是 403)
+	resp2, err := http.Get(proxy.URL + "/k/glm/https://api.z.ai/api/test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp2.Body.Close()
+	if resp2.StatusCode == http.StatusForbidden {
+		t.Error("白名单域名不应被 403 拒绝")
+	}
+}
+
+// TestKeyRouteAutoHeader 验证自动模式:根据客户端 header 判断注入哪个。
+// 用 echo backend 捕获注入的 header。
+func TestKeyRouteAutoHeader(t *testing.T) {
+	ks := newKeyStore()
+	ks.setConfig("glm", KeyConfig{Key: "sk-secret", Header: "", Prefix: ""}) // 自动检测
+
+	// 不设白名单(空=不限制)
+	oldAllow := allowDomains
+	allowDomains = nil
+	defer func() { allowDomains = oldAllow }()
+
+	backend := echoBackend() // 回显收到的 header
+	proxy := startProxyWithKeys(t, ks)
+	defer proxy.Close()
+
+	// 1. Anthropic 客户端(带 anthropic-version) → 应注入 x-api-key
+	req1, _ := http.NewRequest("GET", proxy.URL+"/k/glm/"+backend.URL+"/v1/messages", nil)
+	req1.Header.Set("Anthropic-Version", "2023-06-01")
+	resp, err := http.DefaultClient.Do(req1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !strings.Contains(string(body), `"X-Api-Key":"sk-secret"`) {
+		t.Errorf("Anthropic 客户端应注入 x-api-key:sk-secret, body: %s", string(body)[:min(200, len(string(body)))])
+	}
+
+	// 2. 普通客户端(带 Authorization) → 应注入 Authorization: Bearer
+	req2, _ := http.NewRequest("GET", proxy.URL+"/k/glm/"+backend.URL+"/v1/chat/completions", nil)
+	req2.Header.Set("Authorization", "Bearer placeholder")
+	resp, err = http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !strings.Contains(string(body), `"Authorization":"Bearer sk-secret"`) {
+		t.Errorf("普通客户端应注入 Authorization:Bearer sk-secret, body: %s", string(body)[:min(200, len(string(body)))])
+	}
+
+	// 3. 无特征 header 的客户端 → 默认 Authorization: Bearer
+	resp, err = http.Get(proxy.URL + "/k/glm/" + backend.URL + "/any/path")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !strings.Contains(string(body), `"Authorization":"Bearer sk-secret"`) {
+		t.Errorf("无特征客户端应默认 Authorization:Bearer sk-secret, body: %s", string(body)[:min(200, len(string(body)))])
+	}
 }
 
 func TestProgressBar(t *testing.T) {

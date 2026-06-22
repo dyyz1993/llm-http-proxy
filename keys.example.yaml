@@ -6,36 +6,35 @@
 # 用法:
 #   1. 复制此文件为 keys.yaml,填入真实 key
 #   2. 启动代理加 -keys /path/to/keys.yaml
-#   3. 访问 https://代理地址/k/glm/https://open.bigmodel.cn/...
+#   3. 启动时建议加 -allow-domains 限制可代理的域名(安全!)
+#      例: -allow-domains api.z.ai,open.bigmodel.cn
+#   4. 访问 https://代理地址/k/glm/https://api.z.ai/api/...
 #
 # 改完配置后无需重启,代理每 10 秒自动重读(检测到文件变化才重载)。
+#
+# === Header 自动检测(推荐) ===
+# 不写 header 字段时,代理根据目标路径自动选择:
+#   - 路径含 /anthropic/ (如 /api/anthropic/v1/messages) → x-api-key
+#   - 其他 → Authorization: Bearer
+# 一个 alias 一个 key,同时兼容 OpenAI 和 Anthropic 两种接口。
 
-# === GLM (智谱) ===
-# OpenAI 兼容接口,用 Authorization: Bearer
 glm:
   key: "你的GLM真实key"
-  header: Authorization
-  prefix: "Bearer "
+  # header 不写 = 自动检测(推荐)
+  # 路径含 /anthropic/ → x-api-key,否则 → Authorization: Bearer
   rate: 60    # 每分钟最多 60 次(可选,不写则不限流)
   burst: 10   # 突发上限 10(可选)
 
-# === Claude (Anthropic) ===
-# Claude 官方用 x-api-key
+# === 显式指定 header(向后兼容老配置) ===
+# 如果你想固定用某个 header,也可以显式写:
 claude:
-  key: "sk-ant-你的Claude真实key"
+  key: "你的Claude真实key"
   header: x-api-key
+  prefix: ""        # x-api-key 不需要前缀
   rate: 30
   burst: 5
 
-# === Azure OpenAI ===
-# Azure 用 api-key header
-azure:
-  key: "你的Azure真实key"
-  header: api-key
-
 # === 不限流的内部用途 ===
-# 不写 rate/burst 即不限流
 internal:
   key: "sk-内部key"
-  header: Authorization
-  prefix: "Bearer "
+  # 不写 rate/burst 即不限流

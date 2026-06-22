@@ -314,10 +314,8 @@ func (a *adminServer) handleKeyNew(w http.ResponseWriter, r *http.Request) {
 		renderMsg(w, "错误", "key 不能为空")
 		return
 	}
-	if header == "" {
-		header = "Authorization"
-	}
-	// 智能修正:Authorization + prefix="Bearer"(无尾空格) → 自动加空格
+	// header 为空 = 自动检测模式(推荐),不强制默认。
+	// 只有显式选了 Authorization 才做 Bearer 智能修正。
 	if header == "Authorization" && prefix == "Bearer" {
 		prefix = "Bearer "
 	}

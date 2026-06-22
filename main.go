@@ -65,15 +65,37 @@ var (
 	version   = "dev"
 	buildTime = "unknown"
 	startTime = time.Now() // 进程启动时即记录
+
+	// allowDomains 是全局域名白名单(key 注入模式下只允许代理到这些域名)。
+	// 防止有人把请求指向自己的网站,利用代理注入的真实 key 造成泄露。
+	// 为空时表示不限制(仅限内网/受信环境)。
+	allowDomains map[string]bool
 )
 
 func main() {
 	addr := flag.String("addr", ":8080", "监听地址")
-	persist := flag.String("persist", "", "统计持久化文件路径(为空则不持久化,重启清空)")
+	persist := flag.String("persist", "", "统计持久化文件路径(为空则不持久化,重启清零)")
 	keys := flag.String("keys", "", "key 注入配置文件路径(keys.yaml,为空则不启用 /k/ 模式)")
 	adminPw := flag.String("admin-password", "", "管理界面密码(为空则不启用 /__admin)。也可用 ADMIN_PASSWORD 环境变量")
+	allowDom := flag.String("allow-domains", "", "key 注入模式的域名白名单(逗号分隔,如 api.z.ai,open.bigmodel.cn)。空=不限制")
 	ver := flag.Bool("version", false, "打印版本号并退出")
 	flag.Parse()
+
+	// 解析域名白名单:-flag 优先,其次 ALLOW_DOMAINS 环境变量
+	allowSrc := *allowDom
+	if allowSrc == "" {
+		allowSrc = os.Getenv("ALLOW_DOMAINS")
+	}
+	if allowSrc != "" {
+		allowDomains = make(map[string]bool)
+		for _, d := range strings.Split(allowSrc, ",") {
+			d = strings.TrimSpace(strings.ToLower(d))
+			if d != "" {
+				allowDomains[d] = true
+			}
+		}
+		log.Printf("域名白名单已启用: %d 个域名", len(allowDomains))
+	}
 
 	if *ver {
 		fmt.Printf("llm-http-proxy %s (built %s)\n", version, buildTime)
@@ -233,18 +255,18 @@ func handleKeyRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, stat
 		return
 	}
 
-	// 构造注入 header:真实 key 覆盖配置指定的 header
-	headerName := cfg.Header
-	if headerName == "" {
-		headerName = "Authorization" // 默认
+	// 域名白名单检查:提取目标域名,不在白名单内则拒绝(防 key 泄露)
+	targetDomain := extractDomain(target)
+	if len(allowDomains) > 0 && !allowDomains[targetDomain] {
+		log.Printf("拒绝代理: 目标域名 %q 不在白名单 (alias=%s)", targetDomain, alias)
+		http.Error(w, "目标域名不在白名单: "+targetDomain+"\n", http.StatusForbidden)
+		return
 	}
-	headerVal := cfg.Key
-	if cfg.Prefix != "" {
-		headerVal = cfg.Prefix + cfg.Key
-	} else if headerName == "Authorization" {
-		// Authorization 默认加 "Bearer " 前缀(除非显式配置 prefix)
-		headerVal = "Bearer " + cfg.Key
-	}
+
+	// 构造注入 header:
+	// - 若 KeyConfig 显式配了 Header(向后兼容老配置),用它
+	// - 否则自动检测:路径含 /anthropic/ → x-api-key;否则 → Authorization: Bearer
+	headerName, headerVal := pickHeader(cfg, req.Header)
 	inject := http.Header{}
 	inject[headerName] = []string{headerVal}
 
@@ -390,6 +412,66 @@ func (r *statusRecorder) Flush() {
 	if f, ok := r.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
+}
+
+// extractDomain 从目标 URL "https://api.z.ai/path" 提取域名(小写,去端口)。
+// 用于域名白名单检查。
+func extractDomain(target string) string {
+	// target 形如 "https://api.z.ai:8443/path"
+	rest := target
+	if i := strings.Index(rest, "://"); i >= 0 {
+		rest = rest[i+3:]
+	}
+	// 去掉 path,只留 host:port
+	if i := strings.IndexByte(rest, '/'); i >= 0 {
+		rest = rest[:i]
+	}
+	// 去掉端口
+	if i := strings.IndexByte(rest, ':'); i >= 0 {
+		rest = rest[:i]
+	}
+	return strings.ToLower(rest)
+}
+
+// pickHeader 根据 KeyConfig + 客户端请求的 header 决定注入哪个 header、值是什么。
+// 优先级:
+//  1. KeyConfig 显式配了 Header(向后兼容老配置) → 用配的,prefix 按 cfg.Prefix 或 Bearer 默认
+//  2. 自动检测:看客户端发来的 header 判断它是什么客户端
+//     - 有 anthropic-version 或客户端带了 x-api-key → Anthropic 客户端 → x-api-key: {key}
+//     - 否则 → Authorization: Bearer {key}
+//  3. 默认 → Authorization: Bearer {key}
+//
+// 根据客户端带的 header 判断,比猜 URL 路径精准:Anthropic SDK/SDK(Cursor/Claude Code)
+// 会带 anthropic-version + x-api-key;OpenAI 风格客户端带 Authorization: Bearer。
+func pickHeader(cfg KeyConfig, clientHeaders http.Header) (name, val string) {
+	// 显式配置优先(向后兼容)
+	if cfg.Header != "" {
+		name = cfg.Header
+		val = cfg.Key
+		if cfg.Prefix != "" {
+			val = cfg.Prefix + cfg.Key
+		} else if name == "Authorization" {
+			val = "Bearer " + cfg.Key
+		}
+		return name, val
+	}
+	// 自动检测:看客户端发来的 header
+	if isAnthropicClient(clientHeaders) {
+		return "x-api-key", cfg.Key
+	}
+	return "Authorization", "Bearer " + cfg.Key
+}
+
+// isAnthropicClient 判断客户端是否是 Anthropic 风格(Claude SDK/Cursor/Rush 等)。
+// 判断依据:请求里带了 anthropic-version header,或带了 x-api-key header。
+func isAnthropicClient(h http.Header) bool {
+	if h.Get("Anthropic-Version") != "" {
+		return true
+	}
+	if h.Get("X-Api-Key") != "" {
+		return true
+	}
+	return false
 }
 
 // stripProxyHeaders 剥离上游反向代理/网关可能注入的"指纹"头,

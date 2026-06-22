@@ -74,7 +74,7 @@ button{padding:10px 20px;cursor:pointer}
 <tr>
 <td><b>{{$alias}}</b></td>
 <td><code style="font-size:12px" id="url-{{$alias}}">/k/{{$alias}}/</code> <button type="button" onclick="copyURL('{{$alias}}')" style="padding:2px 8px;font-size:12px">复制</button></td>
-<td>{{$cfg.Header}}</td>
+<td>{{if $cfg.Header}}{{$cfg.Header}}{{else}}<span style="color:#888">自动</span>{{end}}</td>
 <td>{{$cfg.Prefix}}</td>
 <td><code>{{$cfg.Key}}</code></td>
 <td>{{if $cfg.Rate}}{{$cfg.Rate}}{{else}}-{{end}}</td>
@@ -96,12 +96,14 @@ button{padding:10px 20px;cursor:pointer}
 <tr><td>Key</td><td><input name="key" style="width:400px" value="{{if or .Editing .Copying}}{{.EditCfg.Key}}{{end}}" {{if not .Editing}}required{{end}} placeholder="{{if .Editing}}留空=不修改{{else}}必填{{end}}"></td></tr>
 <tr><td>Header</td><td>
 <select name="header" onchange="setPrefix(this.value)">
-<option value="Authorization" {{if or (and (not .Editing) (not .Copying)) (eq .EditCfg.Header "Authorization")}}selected{{end}}>Authorization (Bearer)</option>
-<option value="x-api-key" {{if or .Editing .Copying}}{{if eq .EditCfg.Header "x-api-key"}}selected{{end}}{{end}}>x-api-key</option>
-<option value="api-key" {{if or .Editing .Copying}}{{if eq .EditCfg.Header "api-key"}}selected{{end}}{{end}}>api-key</option>
+<option value="" {{if or (and (not .Editing) (not .Copying)) (eq .EditCfg.Header "")}}selected{{end}}>自动检测 (推荐)</option>
+<option value="Authorization" {{if eq .EditCfg.Header "Authorization"}}selected{{end}}>Authorization (Bearer)</option>
+<option value="x-api-key" {{if eq .EditCfg.Header "x-api-key"}}selected{{end}}>x-api-key</option>
+<option value="api-key" {{if eq .EditCfg.Header "api-key"}}selected{{end}}>api-key</option>
 </select>
+<span style="font-size:12px;color:#888;margin-left:8px">自动检测: /anthropic/ 路径用 x-api-key,其他用 Authorization: Bearer</span>
 </td></tr>
-<tr><td>Prefix</td><td><input name="prefix" id="prefix-input" value="{{if or .Editing .Copying}}{{.EditCfg.Prefix}}{{else}}Bearer {{end}}" placeholder="留空则 Authorization 自动加 Bearer "></td></tr>
+<tr><td>Prefix</td><td><input name="prefix" id="prefix-input" value="{{if or .Editing .Copying}}{{.EditCfg.Prefix}}{{else}}Bearer {{end}}" placeholder="留空则自动"></td></tr>
 <script>
 function setPrefix(h) {
   var p = document.getElementById('prefix-input');
