@@ -184,7 +184,34 @@ func TestBuildUsageHTMLHighCache(t *testing.T) {
 	if !strings.Contains(html, "合计") {
 		t.Error("应包含合计行")
 	}
+	// 命中率应截断到 100%,不应出现 900670% 这种
+	if strings.Contains(html, "900670") {
+		t.Error("命中率应截断到 100%,不应显示超大百分比")
+	}
 }
+
+// TestFmtTokens 验证 token 数量换算。
+func TestFmtTokens(t *testing.T) {
+	cases := []struct {
+		input int64
+		want  string
+	}{
+		{0, "0"},
+		{42, "42"},
+		{999, "999"},
+		{1000, "1.0K"},
+		{1500, "1.5K"},
+		{333248, "333.2K"},
+		{1000000, "1.0M"},
+		{2500000, "2.5M"},
+	}
+	for _, c := range cases {
+		if got := fmtTokens(c.input); got != c.want {
+			t.Errorf("fmtTokens(%d) = %q, want %q", c.input, got, c.want)
+		}
+	}
+}
+
 func TestUsageStatsIgnoreEmpty(t *testing.T) {
 	us := newUsageStats()
 	// HasData=false 不应记录

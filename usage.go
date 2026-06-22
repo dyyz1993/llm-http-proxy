@@ -274,28 +274,26 @@ func buildUsageHTML(snap map[string]aliasUsageStats) string {
 
 	var b strings.Builder
 	b.WriteString(`<table style="font-size:13px;margin-top:8px">`)
-	b.WriteString(`<tr><th>Alias</th><th>请求数</th><th>输入 token</th><th>缓存命中</th><th>输出 token</th><th>平均缓存命中率</th></tr>`)
+	b.WriteString(`<tr><th>Alias</th><th>请求数</th><th>输入</th><th>缓存命中</th><th>输出</th><th>命中率</th></tr>`)
 
 	var totalPrompt, totalCached, totalCompletion int64
 	var totalCount int64
 	for _, alias := range aliases {
 		s := snap[alias]
 		rate := s.cacheHitRate()
-		// 命中率进度条
+		// 命中率截断到 0..1(cached 可能 >> prompt,因为上游 cached 是累积口径)
+		displayRate := rate
+		if displayRate > 1 {
+			displayRate = 1
+		}
+		// 进度条
 		barLen := 20
-		filled := int(rate * float64(barLen))
-		// 边界保护:cached 可能 > prompt(上游统计口径不同),rate 可能 >1
-		if filled > barLen {
-			filled = barLen
-		}
-		if filled < 0 {
-			filled = 0
-		}
+		filled := int(displayRate * float64(barLen))
 		bar := strings.Repeat("█", filled) + strings.Repeat("░", barLen-filled)
-		fmt.Fprintf(&b, `<tr><td><b>%s</b></td><td>%d</td><td>%d</td><td>%d</td><td>%d</td>`,
-			alias, s.Count, s.Prompt, s.Cached, s.Completion)
-		fmt.Fprintf(&b, `<td><span style="font-family:monospace">%s</span> %.1f%%</td></tr>`,
-			bar, rate*100)
+		fmt.Fprintf(&b, `<tr><td><b>%s</b></td><td>%d</td><td>%s</td><td>%s</td><td>%s</td>`,
+			alias, s.Count, fmtTokens(s.Prompt), fmtTokens(s.Cached), fmtTokens(s.Completion))
+		fmt.Fprintf(&b, `<td><span style="font-family:monospace;font-size:11px">%s</span> %.1f%%</td></tr>`,
+			bar, displayRate*100)
 		totalPrompt += s.Prompt
 		totalCached += s.Cached
 		totalCompletion += s.Completion
@@ -307,9 +305,24 @@ func buildUsageHTML(snap map[string]aliasUsageStats) string {
 	if totalPrompt > 0 {
 		totalRate = float64(totalCached) / float64(totalPrompt)
 	}
-	fmt.Fprintf(&b, `<tr style="font-weight:bold;background:#eee"><td>合计</td><td>%d</td><td>%d</td><td>%d</td><td>%d</td>`,
-		totalCount, totalPrompt, totalCached, totalCompletion)
+	if totalRate > 1 {
+		totalRate = 1
+	}
+	fmt.Fprintf(&b, `<tr style="font-weight:bold;background:#eee"><td>合计</td><td>%d</td><td>%s</td><td>%s</td><td>%s</td>`,
+		totalCount, fmtTokens(totalPrompt), fmtTokens(totalCached), fmtTokens(totalCompletion))
 	fmt.Fprintf(&b, `<td>%.1f%%</td></tr>`, totalRate*100)
 	b.WriteString(`</table>`)
 	return b.String()
+}
+
+// fmtTokens 把 token 数量格式化成易读的形式。
+// <1000 → 原样; >=1000 → 1.2K; >=1000000 → 1.2M。
+func fmtTokens(n int64) string {
+	if n >= 1000000 {
+		return fmt.Sprintf("%.1fM", float64(n)/1000000)
+	}
+	if n >= 1000 {
+		return fmt.Sprintf("%.1fK", float64(n)/1000)
+	}
+	return fmt.Sprintf("%d", n)
 }
