@@ -284,6 +284,13 @@ func buildUsageHTML(snap map[string]aliasUsageStats) string {
 		// 命中率进度条
 		barLen := 20
 		filled := int(rate * float64(barLen))
+		// 边界保护:cached 可能 > prompt(上游统计口径不同),rate 可能 >1
+		if filled > barLen {
+			filled = barLen
+		}
+		if filled < 0 {
+			filled = 0
+		}
 		bar := strings.Repeat("█", filled) + strings.Repeat("░", barLen-filled)
 		fmt.Fprintf(&b, `<tr><td><b>%s</b></td><td>%d</td><td>%d</td><td>%d</td><td>%d</td>`,
 			alias, s.Count, s.Prompt, s.Cached, s.Completion)

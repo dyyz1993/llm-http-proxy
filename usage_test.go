@@ -163,7 +163,28 @@ func TestUsageStatsRecord(t *testing.T) {
 	}
 }
 
-// TestUsageStatsIgnoreEmpty 验证没数据的请求不记录。
+// TestBuildUsageHTMLHighCache 验证 cached > prompt 时进度条不 panic。
+// 回归 bug: z.ai 返回的 cached_tokens 可能远大于 prompt_tokens,
+// 导致 cacheHitRate > 1.0,进度条 filled > barLen,strings.Repeat 收到负数 panic。
+func TestBuildUsageHTMLHighCache(t *testing.T) {
+	// cached 是 prompt 的 232 倍(真实线上数据)
+	snap := map[string]aliasUsageStats{
+		"max-0": {Prompt: 1432, Cached: 331904, Completion: 88, Count: 5},
+		"glm":   {Prompt: 1000, Cached: 800, Completion: 50, Count: 3},
+	}
+	// 不应 panic
+	assertNotPanic(t, func() {
+		_ = buildUsageHTML(snap)
+	})
+
+	html := buildUsageHTML(snap)
+	if !strings.Contains(html, "max-0") {
+		t.Error("应包含 max-0 alias")
+	}
+	if !strings.Contains(html, "合计") {
+		t.Error("应包含合计行")
+	}
+}
 func TestUsageStatsIgnoreEmpty(t *testing.T) {
 	us := newUsageStats()
 	// HasData=false 不应记录
