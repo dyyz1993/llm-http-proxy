@@ -335,7 +335,7 @@ func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLa
 			handleWebSocket(rec, req, raw)
 			if stats != nil {
 				stats.record(ip, statKey, targetHost, rec.status)
-				logRequest(ip, statKey, req.Method, targetHost, rec.status, time.Since(start), usageData{})
+				logRequest(ip, statKey, req.Method, targetHost, rec.status, time.Since(start), false, usageData{})
 			}
 			return
 		}
@@ -346,7 +346,7 @@ func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLa
 			http.Error(rec, "目标 URL 无法解析: "+err.Error(), http.StatusBadRequest)
 			if stats != nil {
 				stats.record(ip, statKey, targetHost, rec.status)
-				logRequest(ip, statKey, req.Method, targetHost, rec.status, time.Since(start), usageData{})
+				logRequest(ip, statKey, req.Method, targetHost, rec.status, time.Since(start), false, usageData{})
 			}
 			return
 		}
@@ -365,7 +365,7 @@ func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLa
 			http.Error(rec, "转发失败: "+err.Error(), http.StatusBadGateway)
 			if stats != nil {
 				stats.record(ip, statKey, targetHost, rec.status)
-				logRequest(ip, statKey, req.Method, targetHost, rec.status, time.Since(start), usageData{})
+				logRequest(ip, statKey, req.Method, targetHost, rec.status, time.Since(start), false, usageData{})
 			}
 			return
 		}
@@ -376,6 +376,9 @@ func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLa
 			dst[k] = vs // 响应头也原样透传
 		}
 		rec.WriteHeader(resp.StatusCode)
+
+		// 检测是否为 SSE 流式响应(Content-Type: text/event-stream)
+		isStream := isSSEResponse(resp.Header)
 
 		// 流式转发:支持 SSE,边收边 flush。
 		// 同时用 captureBuf 存一份(≤1MB),响应结束后异步解析 usage(不影响延迟)。
@@ -440,7 +443,7 @@ func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLa
 		if stats != nil {
 			stats.record(ip, statKey, targetHost, rec.status)
 		}
-		logRequest(ip, statKey, req.Method, targetHost, rec.status, time.Since(start), u)
+		logRequest(ip, statKey, req.Method, targetHost, rec.status, time.Since(start), isStream, u)
 	})
 }
 
@@ -559,6 +562,13 @@ func hostFromRaw(rawURL string) string {
 func isWebSocketUpgrade(req *http.Request) bool {
 	return strings.EqualFold(req.Header.Get("Upgrade"), "websocket") &&
 		strings.Contains(strings.ToLower(req.Header.Get("Connection")), "upgrade")
+}
+
+// isSSEResponse 检查响应头是否为 SSE 流式响应。
+// SSE 响应的 Content-Type 为 text/event-stream。
+func isSSEResponse(h http.Header) bool {
+	ct := h.Get("Content-Type")
+	return strings.Contains(strings.ToLower(ct), "text/event-stream")
 }
 
 // handleWebSocket 把 WebSocket 连接作为原始 TCP 双向隧道转发。

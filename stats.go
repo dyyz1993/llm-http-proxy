@@ -595,6 +595,7 @@ type logEntry struct {
 	Host     string `json:"host"`
 	Status   int    `json:"status"`
 	Duration string `json:"dur"`
+	Stream   bool   `json:"stream"` // 是否为 SSE 流式响应
 	// token 用量(从响应 usage 提取,异步记录;0 表示没提取到)
 	Prompt     int64 `json:"prompt"`     // 输入 token
 	Cached     int64 `json:"cached"`     // 缓存命中 token
@@ -647,9 +648,13 @@ func (r *logRing) recent(n int) []logEntry {
 // logRequest 打一行结构化日志,只含 IP/掩码key/host/状态码/token用量/费用,不含 body。
 // 同时写入内存环形缓冲(给 admin UI 看)。
 // u 是从响应里异步提取的 token 用量(可能 HasData=false)。
-func logRequest(ip, maskedKey, method, targetHost string, status int, dur time.Duration, u usageData) {
+// isStream 标记是否为 SSE 流式响应。
+func logRequest(ip, maskedKey, method, targetHost string, status int, dur time.Duration, isStream bool, u usageData) {
 	line := fmt.Sprintf("req ip=%s key=%s method=%s host=%s status=%d dur=%s",
 		ip, maskedKey, method, targetHost, status, dur)
+	if isStream {
+		line += " stream=1"
+	}
 	if u.HasData {
 		line += fmt.Sprintf(" prompt=%d cached=%d completion=%d", u.Prompt, u.Cached, u.Completion)
 		if u.TotalCost > 0 {
@@ -665,6 +670,7 @@ func logRequest(ip, maskedKey, method, targetHost string, status int, dur time.D
 		Host:           targetHost,
 		Status:         status,
 		Duration:       dur.Round(time.Millisecond).String(),
+		Stream:         isStream,
 		Prompt:         u.Prompt,
 		Cached:         u.Cached,
 		Completion:     u.Completion,
