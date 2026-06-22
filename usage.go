@@ -250,6 +250,7 @@ type aliasUsageStats struct {
 	InputCost  float64 // 累计输入费用（元）
 	OutputCost float64 // 累计输出费用（元）
 	TotalCost  float64 // 累计总费用（元）
+	Errors     int64   // 错误请求数(4xx/5xx)
 }
 
 // cacheHitRate 计算缓存命中率 = cached / (prompt + cached)。
@@ -297,6 +298,21 @@ func (us *usageStats) record(alias string, u usageData) {
 	s.TotalCost += u.TotalCost
 }
 
+// recordError 异步记录一次错误请求(4xx/5xx)到指定 alias。
+func (us *usageStats) recordError(alias string) {
+	if alias == "" || alias == "-" {
+		return
+	}
+	us.mu.Lock()
+	defer us.mu.Unlock()
+	s := us.data[alias]
+	if s == nil {
+		s = &aliasUsageStats{}
+		us.data[alias] = s
+	}
+	atomic.AddInt64(&s.Errors, 1)
+}
+
 // snapshot 返回所有 alias 统计的快照(给 Dashboard 展示用)。
 func (us *usageStats) snapshot() map[string]aliasUsageStats {
 	us.mu.RLock()
@@ -326,25 +342,27 @@ func buildUsageHTML(snap map[string]aliasUsageStats) string {
 
 	var b strings.Builder
 	b.WriteString(`<table style="font-size:13px;margin-top:8px">`)
-	b.WriteString(`<tr><th>Alias</th><th>请求数</th><th>输入</th><th>缓存命中</th><th>输出</th><th>命中率</th><th>输入费用</th><th>输出费用</th><th>总费用</th></tr>`)
+	b.WriteString(`<tr><th>Alias</th><th>请求数</th><th>错误</th><th>输入</th><th>缓存命中</th><th>输出</th><th>命中率</th><th>输入费用</th><th>输出费用</th><th>总费用</th></tr>`)
 
-	var totalPrompt, totalCached, totalCompletion int64
+	var totalPrompt, totalCached, totalCompletion, totalErrors int64
 	var totalInputCost, totalOutputCost, totalCost float64
 	var totalCount int64
 	for _, alias := range aliases {
 		s := snap[alias]
 		rate := s.cacheHitRate()
-		// 命中率截断到 0..1(cached 可能 >> prompt,因为上游 cached 是累积口径)
 		displayRate := rate
 		if displayRate > 1 {
 			displayRate = 1
 		}
-		// 进度条
 		barLen := 20
 		filled := int(displayRate * float64(barLen))
 		bar := strings.Repeat("█", filled) + strings.Repeat("░", barLen-filled)
-		fmt.Fprintf(&b, `<tr><td><b>%s</b></td><td>%d</td><td>%s</td><td>%s</td><td>%s</td>`,
-			alias, s.Count, fmtTokens(s.Prompt), fmtTokens(s.Cached), fmtTokens(s.Completion))
+		errDisplay := "-"
+		if s.Errors > 0 {
+			errDisplay = fmt.Sprintf(`<span style="color:red">%d</span>`, s.Errors)
+		}
+		fmt.Fprintf(&b, `<tr><td><b>%s</b></td><td>%d</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td>`,
+			alias, s.Count, errDisplay, fmtTokens(s.Prompt), fmtTokens(s.Cached), fmtTokens(s.Completion))
 		fmt.Fprintf(&b, `<td><span style="font-family:monospace;font-size:11px">%s</span> %.1f%%</td>`,
 			bar, displayRate*100)
 		fmt.Fprintf(&b, `<td>%.4f</td><td>%.4f</td><td><b>%.4f</b></td></tr>`,
@@ -356,6 +374,7 @@ func buildUsageHTML(snap map[string]aliasUsageStats) string {
 		totalOutputCost += s.OutputCost
 		totalCost += s.TotalCost
 		totalCount += s.Count
+		totalErrors += s.Errors
 	}
 
 	// 合计行
@@ -366,8 +385,12 @@ func buildUsageHTML(snap map[string]aliasUsageStats) string {
 	if totalRate > 1 {
 		totalRate = 1
 	}
-	fmt.Fprintf(&b, `<tr style="font-weight:bold;background:#eee"><td>合计</td><td>%d</td><td>%s</td><td>%s</td><td>%s</td>`,
-		totalCount, fmtTokens(totalPrompt), fmtTokens(totalCached), fmtTokens(totalCompletion))
+	totalErrDisplay := "-"
+	if totalErrors > 0 {
+		totalErrDisplay = fmt.Sprintf(`<span style="color:red">%d</span>`, totalErrors)
+	}
+	fmt.Fprintf(&b, `<tr style="font-weight:bold;background:#eee"><td>合计</td><td>%d</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td>`,
+		totalCount, totalErrDisplay, fmtTokens(totalPrompt), fmtTokens(totalCached), fmtTokens(totalCompletion))
 	fmt.Fprintf(&b, `<td>%.1f%%</td>`, totalRate*100)
 	fmt.Fprintf(&b, `<td>%.4f</td><td>%.4f</td><td>%.4f</td></tr>`, totalInputCost, totalOutputCost, totalCost)
 	b.WriteString(`</table>`)

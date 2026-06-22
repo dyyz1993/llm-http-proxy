@@ -335,7 +335,7 @@ func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLa
 			handleWebSocket(rec, req, raw)
 			if stats != nil {
 				stats.record(ip, statKey, targetHost, rec.status)
-				logRequest(ip, statKey, req.Method, targetHost, rec.status, time.Since(start), false, usageData{})
+				logRequest(ip, statKey, req.Method, targetHost, rec.status, time.Since(start), 0, false, usageData{})
 			}
 			return
 		}
@@ -346,7 +346,7 @@ func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLa
 			http.Error(rec, "目标 URL 无法解析: "+err.Error(), http.StatusBadRequest)
 			if stats != nil {
 				stats.record(ip, statKey, targetHost, rec.status)
-				logRequest(ip, statKey, req.Method, targetHost, rec.status, time.Since(start), false, usageData{})
+				logRequest(ip, statKey, req.Method, targetHost, rec.status, time.Since(start), 0, false, usageData{})
 			}
 			return
 		}
@@ -365,7 +365,7 @@ func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLa
 			http.Error(rec, "转发失败: "+err.Error(), http.StatusBadGateway)
 			if stats != nil {
 				stats.record(ip, statKey, targetHost, rec.status)
-				logRequest(ip, statKey, req.Method, targetHost, rec.status, time.Since(start), false, usageData{})
+				logRequest(ip, statKey, req.Method, targetHost, rec.status, time.Since(start), 0, false, usageData{})
 			}
 			return
 		}
@@ -376,6 +376,9 @@ func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLa
 			dst[k] = vs // 响应头也原样透传
 		}
 		rec.WriteHeader(resp.StatusCode)
+
+		// TTFB = 从请求开始到拿到响应头(首字节)
+		ttfb := time.Since(start)
 
 		// 检测是否为 SSE 流式响应(Content-Type: text/event-stream)
 		isStream := isSSEResponse(resp.Header)
@@ -451,7 +454,15 @@ func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLa
 		if stats != nil {
 			stats.record(ip, statKey, targetHost, rec.status)
 		}
-		logRequest(ip, statKey, req.Method, targetHost, rec.status, time.Since(start), isStream, u)
+		// 错误请求(4xx/5xx)记录到 usage 统计
+		if usageTracker != nil && rec.status >= 400 {
+			alias := statKey
+			if strings.HasPrefix(statKey, "key:") {
+				alias = strings.TrimPrefix(statKey, "key:")
+			}
+			usageTracker.recordError(alias)
+		}
+		logRequest(ip, statKey, req.Method, targetHost, rec.status, time.Since(start), ttfb, isStream, u)
 	})
 }
 

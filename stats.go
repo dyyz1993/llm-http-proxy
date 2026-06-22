@@ -595,6 +595,7 @@ type logEntry struct {
 	Host     string `json:"host"`
 	Status   int    `json:"status"`
 	Duration string `json:"dur"`
+	TTFB     string `json:"ttfb"`   // 首字节响应时间(到第一个字节返回)
 	Stream   bool   `json:"stream"` // 是否为 SSE 流式响应
 	// token 用量(从响应 usage 提取,异步记录;0 表示没提取到)
 	Prompt     int64 `json:"prompt"`     // 输入 token
@@ -649,9 +650,13 @@ func (r *logRing) recent(n int) []logEntry {
 // 同时写入内存环形缓冲(给 admin UI 看)。
 // u 是从响应里异步提取的 token 用量(可能 HasData=false)。
 // isStream 标记是否为 SSE 流式响应。
-func logRequest(ip, maskedKey, method, targetHost string, status int, dur time.Duration, isStream bool, u usageData) {
+// ttfb 是首字节响应时间(从请求开始到第一个字节返回)。
+func logRequest(ip, maskedKey, method, targetHost string, status int, dur, ttfb time.Duration, isStream bool, u usageData) {
 	line := fmt.Sprintf("req ip=%s key=%s method=%s host=%s status=%d dur=%s",
 		ip, maskedKey, method, targetHost, status, dur)
+	if ttfb > 0 {
+		line += fmt.Sprintf(" ttfb=%s", ttfb.Round(time.Millisecond))
+	}
 	if isStream {
 		line += " stream=1"
 	}
@@ -670,6 +675,7 @@ func logRequest(ip, maskedKey, method, targetHost string, status int, dur time.D
 		Host:           targetHost,
 		Status:         status,
 		Duration:       dur.Round(time.Millisecond).String(),
+		TTFB:           ttfb.Round(time.Millisecond).String(),
 		Stream:         isStream,
 		Prompt:         u.Prompt,
 		Cached:         u.Cached,
