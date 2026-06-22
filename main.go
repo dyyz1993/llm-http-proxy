@@ -419,9 +419,10 @@ func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLa
 		}
 
 		// 解析 token 用量(此时响应已全部转发给客户端,不增加延迟)。
-		// 只在有捕获数据 + key 注入模式时解析。
+		// 别名模式(key:xxx)和透传模式(客户端自带 key)都提取。
+		// 透传模式下用掩码 key(如 sk-abcd****5678)作为统计分组。
 		var u usageData
-		if len(captureBuf) > 0 && strings.HasPrefix(statKey, "key:") {
+		if len(captureBuf) > 0 {
 			u = extractUsage(captureBuf)
 			if u.HasData && usageTracker != nil {
 				// 尝试用 glm-cost 计算费用
@@ -434,8 +435,15 @@ func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLa
 				}
 				// 即使费用计算失败(模型不在定价表),也照常记录 token 用量
 
-				alias := strings.TrimPrefix(statKey, "key:")
-				usageTracker.record(alias, u)
+				// 统计分组:别名模式用别名,透传模式用掩码 key
+				alias := statKey
+				if strings.HasPrefix(statKey, "key:") {
+					alias = strings.TrimPrefix(statKey, "key:")
+				}
+				// statKey 为 "-" (无 key 的请求)不纳入 usage 统计
+				if alias != "-" {
+					usageTracker.record(alias, u)
+				}
 			}
 		}
 
