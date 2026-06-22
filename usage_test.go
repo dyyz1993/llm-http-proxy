@@ -48,8 +48,9 @@ func TestExtractUsageAnthropic(t *testing.T) {
 	if !u.HasData {
 		t.Fatal("应提取到 usage")
 	}
-	if u.Prompt != 6 {
-		t.Errorf("Prompt = %d, want 6", u.Prompt)
+	// Anthropic: input_tokens 是新增部分,总输入 = input + cache_read = 6 + 2 = 8
+	if u.Prompt != 8 {
+		t.Errorf("Prompt = %d, want 8 (input+cache_read)", u.Prompt)
 	}
 	if u.Cached != 2 {
 		t.Errorf("Cached = %d, want 2", u.Cached)
@@ -90,12 +91,15 @@ func TestExtractUsageAnthropicSSE(t *testing.T) {
 	if !u.HasData {
 		t.Fatal("Anthropic SSE 应提取到 usage")
 	}
-	// 应取到最后一个含 usage 的 chunk(message_start 有 input+cache)
-	if u.Prompt != 300 {
-		t.Errorf("Prompt = %d, want 300", u.Prompt)
+	// Anthropic: 总输入 = input_tokens(300) + cache_read(250) = 550
+	if u.Prompt != 550 {
+		t.Errorf("Prompt = %d, want 550 (input+cache_read)", u.Prompt)
 	}
 	if u.Cached != 250 {
 		t.Errorf("Cached = %d, want 250", u.Cached)
+	}
+	if u.Completion != 10 {
+		t.Errorf("Completion = %d, want 10", u.Completion)
 	}
 }
 

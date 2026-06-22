@@ -90,13 +90,17 @@ func tryJSON(body []byte) usageData {
 	}
 
 	// 尝试 Anthropic 格式
+	// 注意语义差异:Anthropic 的 input_tokens 只是"新增输入"(不含缓存),
+	// 总输入 = input_tokens + cache_read_input_tokens。
+	// OpenAI 的 prompt_tokens 已经是总输入(含缓存)。
+	// 为了统一命中率计算(cached/prompt),Anthropic 的 Prompt 要加上 cache_read。
 	var ai struct {
 		Usage anthropicUsage `json:"usage"`
 	}
-	if json.Unmarshal(body, &ai) == nil && ai.Usage.InputTokens > 0 {
+	if json.Unmarshal(body, &ai) == nil && (ai.Usage.InputTokens > 0 || ai.Usage.CacheReadInputTokens > 0) {
 		return usageData{
 			HasData:    true,
-			Prompt:     ai.Usage.InputTokens,
+			Prompt:     ai.Usage.InputTokens + ai.Usage.CacheReadInputTokens, // 总输入
 			Cached:     ai.Usage.CacheReadInputTokens,
 			Completion: ai.Usage.OutputTokens,
 		}
@@ -163,17 +167,21 @@ func tryJSONFlexible(body []byte) usageData {
 	}
 
 	// 尝试 2:Anthropic message_start 格式 {"message":{"usage":{...}}}
+	// 注意:input_tokens 只是新增部分,总输入 = input + cache_read
 	var anthropicStart struct {
 		Message struct {
 			Usage anthropicUsage `json:"usage"`
 		} `json:"message"`
 	}
-	if json.Unmarshal(body, &anthropicStart) == nil && anthropicStart.Message.Usage.InputTokens > 0 {
-		return usageData{
-			HasData:    true,
-			Prompt:     anthropicStart.Message.Usage.InputTokens,
-			Cached:     anthropicStart.Message.Usage.CacheReadInputTokens,
-			Completion: anthropicStart.Message.Usage.OutputTokens,
+	if json.Unmarshal(body, &anthropicStart) == nil {
+		au := anthropicStart.Message.Usage
+		if au.InputTokens > 0 || au.CacheReadInputTokens > 0 {
+			return usageData{
+				HasData:    true,
+				Prompt:     au.InputTokens + au.CacheReadInputTokens,
+				Cached:     au.CacheReadInputTokens,
+				Completion: au.OutputTokens,
+			}
 		}
 	}
 
