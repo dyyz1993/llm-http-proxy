@@ -16,8 +16,10 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -181,6 +183,10 @@ func main() {
 			}
 			statsHandler(stats, authFn).ServeHTTP(w, req)
 			return
+		case req.URL.Path == "/" || req.URL.Path == "":
+			// 根路径返回使用指南(TXT)
+			serveHelp(w, "")
+			return
 		case ks != nil && strings.HasPrefix(req.URL.Path, "/k/"):
 			// key 注入模式:/k/{alias}/https://目标
 			handleKeyRoute(w, req, ks, stats)
@@ -224,6 +230,102 @@ func versionHandler(w http.ResponseWriter, req *http.Request) {
 	json.NewEncoder(w).Encode(info)
 }
 
+// helpText 返回纯文本使用教程(分章节)。根路径 / 裸 alias 路径访问时展示。
+// 接收 alias 参数:为空时是通用教程,非空时在示例里用该 alias。
+func helpText(alias string) string {
+	aliasExample := "glm"
+	if alias != "" {
+		aliasExample = alias
+	}
+	return fmt.Sprintf(`# llm-http-proxy 使用指南
+
+100%% 透传的反向代理,支持 GLM / OpenAI / Claude 等 LLM API。
+HTTP / SSE / WebSocket 全透传,不追加任何 header,不修改响应体。
+两个用法:【别名模式】服务端注入 key(推荐),【透传模式】客户端自带 key。
+
+---
+
+## 一、快速开始(别名模式 / 推荐)
+
+别名模式: /k/{别名}/目标完整URL
+真实 API key 只存在服务端,客户端用别名调用,key 不外泄。
+
+【推荐】走 api.z.ai(国际域名,响应更稳,权限/计费更友好):
+
+  # OpenAI 兼容格式
+  curl https://p.19930810.xyz:8443/k/%[1]s/https://api.z.ai/api/paas/v4/chat/completions \
+    -H "Authorization: Bearer 任意值" \
+    -H "Content-Type: application/json" \
+    -d '{"model":"glm-4-flash","messages":[{"role":"user","content":"你好"}]}'
+
+  # Anthropic 兼容格式(Claude SDK / 库可直接用,glm-4.6 也能调)
+  curl https://p.19930810.xyz:8443/k/%[1]s/https://api.z.ai/api/anthropic/v1/messages \
+    -H "x-api-key: 任意值" \
+    -H "anthropic-version: 2023-06-01" \
+    -H "Content-Type: application/json" \
+    -d '{"model":"glm-4.6","messages":[{"role":"user","content":"你好"}],"max_tokens":50}'
+
+也可走官方域名 open.bigmodel.cn(同后端,路径相同):
+
+  curl https://p.19930810.xyz:8443/k/%[1]s/https://open.bigmodel.cn/api/paas/v4/chat/completions \
+    -H "Authorization: Bearer 任意值" \
+    -H "Content-Type: application/json" \
+    -d '{"model":"glm-4-flash","messages":[{"role":"user","content":"你好"}]}'
+
+---
+
+## 二、透传模式(客户端自带 key)
+
+把完整目标 URL 直接拼在路径里,key 由客户端提供:
+
+  curl https://p.19930810.xyz:8443/https://api.z.ai/api/paas/v4/chat/completions \
+    -H "Authorization: Bearer 你的真实KEY" \
+    -H "Content-Type: application/json" \
+    -d '{"model":"glm-4-flash","messages":[{"role":"user","content":"你好"}]}'
+
+---
+
+## 三、原理说明
+
+1. 本服务是纯透传反向代理。收到请求后:
+   - 别名模式:从服务端配置查到别名对应的真实 key,覆盖进请求头,再转发;
+   - 透传模式:原样转发,不改 header。
+2. Header 自动检测:客户端带 x-api-key 就替换 x-api-key,
+   带 Authorization 就替换 Authorization,两个都带就都替换。
+3. 支持的三种上游路径(同一套 GLM 后端,优先用 api.z.ai):
+   - api.z.ai/api/paas/v4/...        (OpenAI 格式,推荐)
+   - api.z.ai/api/anthropic/v1/...   (Anthropic 格式,推荐)
+   - open.bigmodel.cn/api/paas/v4/... (OpenAI 格式,官方域名)
+   - open.bigmodel.cn/api/anthropic/v1/... (Anthropic 格式,官方域名)
+4. SSE 流式 / WebSocket 全程透传,边收边转发,不缓冲不修改。
+5. key 不会出现在日志、统计、URL 里;统计只用别名/掩码 key。
+
+---
+
+## 四、状态码说明
+
+  200          正常
+  499          客户端主动断连(自己超时取消了请求,非上游问题)
+  502          上游转发失败(真正的网络/上游错误)
+  429          请求过于频繁(别名限流)
+  410          别名已过期
+
+---
+
+## 五、源码 / 反馈
+
+GitHub: https://github.com/dyyz1993/llm-http-proxy
+`, aliasExample)
+}
+
+// serveHelp 返回 TXT 教程(text/plain),状态码 200。
+// alias 参数用于在示例里替换别名,为空则用默认 "glm"。
+func serveHelp(w http.ResponseWriter, alias string) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	io.WriteString(w, helpText(alias))
+}
+
 // handleKeyRoute 处理 key 注入模式: /k/{alias}/https://目标
 // 从 keyStore 查 alias 配置,限流检查,注入真实 key 到 header,然后走转发。
 // 用户不需要带 key(带了也会被配置的 key 覆盖)。
@@ -235,20 +337,23 @@ func handleKeyRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, stat
 	// 解析 k/{alias}/{target}
 	// 先去掉 "k/" 前缀
 	rest := strings.TrimPrefix(raw, "k/")
-	if rest == raw {
-		http.Error(w, "路径格式应为 /k/{alias}/https://目标\n", http.StatusBadRequest)
+	if rest == raw || rest == "" {
+		// 裸 /k/ → 返回通用教程
+		serveHelp(w, "")
 		return
 	}
 	// 取第一个 / 之前的部分作为 alias
 	slash := strings.IndexByte(rest, '/')
 	if slash < 0 {
-		http.Error(w, "缺少目标 URL,格式应为 /k/{alias}/https://目标\n", http.StatusBadRequest)
+		// 裸 /k/{alias}(无目标)→ 返回带该 alias 的教程
+		serveHelp(w, rest)
 		return
 	}
 	alias := rest[:slash]
 	target := rest[slash+1:]
-	if !strings.Contains(target, "://") {
-		http.Error(w, "目标 URL 需以 http:// 或 https:// 开头\n", http.StatusBadRequest)
+	if target == "" || !strings.Contains(target, "://") {
+		// 裸 /k/{alias}/ (无目标) 或目标格式不对 → 返回带该 alias 的教程
+		serveHelp(w, alias)
 		return
 	}
 
@@ -362,7 +467,16 @@ func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLa
 
 		resp, err := client.Do(outReq)
 		if err != nil {
-			http.Error(rec, "转发失败: "+err.Error(), http.StatusBadGateway)
+			// 区分"客户端断连"和"真正的上游错误"。
+			// 客户端主动断连(超时/取消)→ req.Context() 被取消 → 499 Client Closed Request(nginx 约定)。
+			// 其他真正的转发失败(DNS/连接拒绝等)→ 502 Bad Gateway。
+			// 这样统计里 499 = 客户端走了,502 = 上游真有问题,一眼区分。
+			status := http.StatusBadGateway
+			if errors.Is(err, context.Canceled) {
+				status = 499 // Client Closed Request(非标准,nginx 惯例)
+				rec.status = status
+			}
+			http.Error(rec, "转发失败: "+err.Error(), status)
 			if stats != nil {
 				stats.record(ip, statKey, targetHost, rec.status)
 				logRequest(ip, statKey, req.Method, targetHost, rec.status, time.Since(start), 0, false, usageData{})
