@@ -581,6 +581,15 @@ func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLa
 		var u usageData
 		if len(captureBuf) > 0 {
 			u = extractUsage(captureBuf)
+			// DEBUG: SSE 场景下 model 提取诊断
+			if isStream && u.HasData && u.Model == "" {
+				head := captureBuf
+				if len(head) > 150 {
+					head = head[:150]
+				}
+				log.Printf("SSE model 提取失败: bufLen=%d sseFirstChunkLen=%d prompt=%d head=%q",
+					len(captureBuf), len(sseFirstChunk), u.Prompt, string(head))
+			}
 			if u.HasData && usageTracker != nil {
 				// 尝试用 cost 计算费用（混合计费：未命中按标准价 + 命中按优惠价）
 				c, err := cost.Calculate(u.Model, int(u.Prompt), int(u.Completion), int(u.Cached))
