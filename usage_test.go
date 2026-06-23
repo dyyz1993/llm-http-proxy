@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -320,6 +321,81 @@ func TestExtractUsageModelCaseInsensitive(t *testing.T) {
 			}
 			if u.Model != model {
 				t.Errorf("Model = %q, want %q", u.Model, model)
+			}
+		})
+	}
+}
+
+// TestSimulateProxySlidingWindow 模拟代理的滑动窗口逻辑 + SSE 提取。
+// 这是线上 v2.4.5 "流式费用算不出" 问题的本地复现测试。
+// 完整模拟:第一个 chunk 含 model → 大量 reasoning chunk → 最后 chunk 含 usage。
+// 滑动窗口只保留 512KB + 第一个 chunk,拼接后 extractUsage 必须能提取出 model + usage。
+func TestSimulateProxySlidingWindow(t *testing.T) {
+	tests := []struct {
+		name            string
+		reasoningChunks int // 中间 reasoning chunk 数量
+		chunkSize       int // 每个 reasoning chunk 大小
+		wantModel       string
+		wantPrompt      int64
+		wantCompletion  int64
+	}{
+		{"小响应(10个chunk)", 10, 500, "glm-4.7", 6, 100},
+		{"中等响应(100个chunk,~50KB)", 100, 500, "glm-4.7", 6, 100},
+		{"大响应(1000个chunk,~500KB)", 1000, 500, "glm-4.7", 6, 100},
+		{"超大响应(5000个chunk,~2.5MB)", 5000, 500, "glm-4.7", 6, 100},
+		{"超大响应(1MB chunk × 10)", 10, 1024 * 1024, "glm-4.7", 6, 100},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var body strings.Builder
+			// 第一个 chunk:含 model
+			body.WriteString("data: " + fmt.Sprintf(`{"id":"1","model":"%s","choices":[{"delta":{"content":""}}]}`, tt.wantModel) + "\n\n")
+			// 中间 chunks:reasoning
+			reasoning := strings.Repeat("x", tt.chunkSize)
+			for i := 0; i < tt.reasoningChunks; i++ {
+				body.WriteString("data: " + fmt.Sprintf(`{"id":"1","choices":[{"delta":{"reasoning_content":"%s"}}]}`, reasoning) + "\n\n")
+			}
+			// 最后 chunk:含 usage
+			body.WriteString("data: " + fmt.Sprintf(`{"id":"1","choices":[],"usage":{"prompt_tokens":%d,"completion_tokens":%d}}`, tt.wantPrompt, tt.wantCompletion) + "\n\n")
+			body.WriteString("data: [DONE]\n\n")
+
+			// 模拟代理滑动窗口
+			slidingWindow := 512 * 1024
+			var captureBuf []byte
+			var sseFirstChunk []byte
+			rawBody := body.String()
+			chunks := strings.SplitAfter(rawBody, "\n\n")
+			chunkCount := 0
+			for _, chunk := range chunks {
+				if chunk == "" {
+					continue
+				}
+				if chunkCount == 0 {
+					sseFirstChunk = append(sseFirstChunk, []byte(chunk)...)
+				}
+				captureBuf = append(captureBuf, []byte(chunk)...)
+				if len(captureBuf) > slidingWindow {
+					captureBuf = captureBuf[len(captureBuf)-slidingWindow:]
+				}
+				chunkCount++
+			}
+			if len(sseFirstChunk) > 0 {
+				captureBuf = append(sseFirstChunk, captureBuf...)
+			}
+
+			u := extractUsage(captureBuf)
+			if !u.HasData {
+				t.Fatalf("HasData=false (bodyLen=%d)", len(captureBuf))
+			}
+			if !strings.EqualFold(u.Model, tt.wantModel) {
+				t.Errorf("Model=%q want %q", u.Model, tt.wantModel)
+			}
+			if u.Prompt != tt.wantPrompt {
+				t.Errorf("Prompt=%d want %d", u.Prompt, tt.wantPrompt)
+			}
+			if u.Completion != tt.wantCompletion {
+				t.Errorf("Completion=%d want %d", u.Completion, tt.wantCompletion)
 			}
 		})
 	}
