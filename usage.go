@@ -59,8 +59,10 @@ type anthropicUsage struct {
 //
 // 自动识别 OpenAI / Anthropic 格式。
 func extractUsage(body []byte) usageData {
-	// 截断保护:body 太大(>2MB)只看末尾 512KB(usage 在最后)
-	if len(body) > 2*1024*1024 {
+	// 截断保护:非 SSE 的 body 太大(>2MB)只看末尾 512KB(usage 在最后)。
+	// 注意:SSE 内容不在这里截断!SSE 的第一个 chunk 含 model(在开头),
+	// 截断到末尾会丢掉 model → 费用算不出。SSE 的滑动窗口在 main.go 已处理。
+	if len(body) > 2*1024*1024 && !bytesContains(body, "data: ") {
 		body = body[len(body)-512*1024:]
 	}
 
