@@ -269,6 +269,7 @@ func (a *adminServer) handleKeys(w http.ResponseWriter, r *http.Request) {
 	}
 	data := struct {
 		Aliases   map[string]KeyConfig
+		Expired   map[string]bool
 		BasePath  string
 		EditAlias string
 		EditCfg   KeyConfig
@@ -277,6 +278,7 @@ func (a *adminServer) handleKeys(w http.ResponseWriter, r *http.Request) {
 		CopyFrom  string
 	}{
 		Aliases:   a.keys.allConfigs(),
+		Expired:   a.keys.expiredMap(),
 		BasePath:  "/k/",
 		EditAlias: editAlias,
 		EditCfg:   editCfg,

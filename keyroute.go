@@ -212,6 +212,25 @@ func (ks *keyStore) isExpired(alias string) bool {
 	return time.Now().After(exp)
 }
 
+// expiredMap 返回所有 alias 的过期状态(给管理界面置灰用)。
+// 只在渲染 Keys 页时调用一次,不影响请求路径性能。
+func (ks *keyStore) expiredMap() map[string]bool {
+	ks.mu.RLock()
+	defer ks.mu.RUnlock()
+	now := time.Now()
+	out := make(map[string]bool, len(ks.configs))
+	for alias, cfg := range ks.configs {
+		if cfg.Expires == "" {
+			continue
+		}
+		exp, ok := parseExpires(cfg.Expires)
+		if ok && now.After(exp) {
+			out[alias] = true
+		}
+	}
+	return out
+}
+
 // allow 检查 alias 是否被限流放行。返回 true=允许,false=超限。
 func (ks *keyStore) allow(alias string) bool {
 	ks.mu.RLock()

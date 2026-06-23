@@ -75,7 +75,7 @@ button{padding:10px 20px;cursor:pointer}
 <table>
 <tr><th>Alias</th><th>调用地址</th><th>Header</th><th>Prefix</th><th>Key</th><th>Rate/min</th><th>Burst</th><th>有效期</th><th>操作</th></tr>
 {{range $alias, $cfg := .Aliases}}
-<tr>
+<tr {{if index $.Expired $alias}}class="expired"{{end}}>
 <td><b>{{$alias}}</b></td>
 <td><code style="font-size:12px" id="url-{{$alias}}">/k/{{$alias}}/</code> <button type="button" onclick="copyURL('{{$alias}}')" style="padding:2px 8px;font-size:12px">复制</button></td>
 <td>{{if $cfg.Header}}{{$cfg.Header}}{{else}}<span style="color:#888">自动</span>{{end}}</td>
@@ -83,7 +83,7 @@ button{padding:10px 20px;cursor:pointer}
 <td><code>{{$cfg.Key}}</code></td>
 <td>{{if $cfg.Rate}}{{$cfg.Rate}}{{else}}-{{end}}</td>
 <td>{{if $cfg.Burst}}{{$cfg.Burst}}{{else}}-{{end}}</td>
-<td>{{if $cfg.Expires}}{{$cfg.Expires}}{{else}}永久{{end}}</td>
+<td>{{if $cfg.Expires}}{{$cfg.Expires}}{{if index $.Expired $alias}}<span class="expired-tag">已到期</span>{{end}}{{else}}永久{{end}}</td>
 <td style="white-space:nowrap">
 <a href="/__admin/keys?edit={{$alias}}"><button type="button">编辑</button></a>
 <a href="/__admin/keys?copy={{$alias}}"><button type="button">复制</button></a>
@@ -208,6 +208,9 @@ table{border-collapse:collapse;width:100%;background:#fff}
 th,td{border:1px solid #ddd;padding:6px 10px;text-align:left;white-space:nowrap}
 th{background:#eee;position:sticky;top:0}
 tr:hover{background:#f0f8ff}
+tr.expired td{opacity:.5}
+tr.expired:hover{background:#fff0f0;opacity:.7}
+.expired-tag{color:#c00;font-weight:bold;margin-left:6px}
 code{background:#eee;padding:2px 4px;border-radius:3px}
 input,select{padding:4px}
 button{padding:6px 14px;cursor:pointer}

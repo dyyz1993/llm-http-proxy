@@ -1648,6 +1648,57 @@ func TestParseExpires(t *testing.T) {
 	}
 }
 
+// TestAdminKeysExpiredRow 验证已过期的 key 在 Keys 页置灰 + 显示"已到期"标记,
+// 而永久 / 未过期的 key 不受影响。
+func TestAdminKeysExpiredRow(t *testing.T) {
+	now := time.Now().In(beijing)
+	ks := newKeyStore()
+	ks.setConfig("expired", KeyConfig{Key: "sk", Expires: now.Add(-1 * time.Hour).Format("2006-01-02 15:04")})
+	ks.setConfig("active", KeyConfig{Key: "sk", Expires: now.Add(24 * time.Hour).Format("2006-01-02 15:04")})
+	ks.setConfig("forever", KeyConfig{Key: "sk"}) // 无 expires = 永久
+
+	proxy := startProxyWithAdmin(t, "pw", ks)
+	defer proxy.Close()
+
+	jar := newTestCookieJar()
+	client := &http.Client{Jar: jar, Transport: &http.Transport{DisableCompression: true}}
+	resp, _ := client.PostForm(proxy.URL+"/__admin/login", url.Values{"password": {"pw"}})
+	resp.Body.Close()
+
+	resp, err := client.Get(proxy.URL + "/__admin/keys")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	html := string(body)
+
+	// 过期的行:应有 expired class + 已到期标记
+	if !strings.Contains(html, `class="expired"`) {
+		t.Errorf("过期 key 应有 class=\"expired\",页面未找到")
+	}
+	if !strings.Contains(html, "已到期") {
+		t.Errorf("过期 key 应显示\"已到期\"标记,页面未找到")
+	}
+
+	// 永久 key 不应显示有效期
+	if !strings.Contains(html, "永久") {
+		t.Errorf("永久 key 应显示\"永久\",页面未找到")
+	}
+
+	// expiredMap 单元测试
+	m := ks.expiredMap()
+	if !m["expired"] {
+		t.Errorf("expiredMap[\"expired\"] = false, want true")
+	}
+	if m["active"] {
+		t.Errorf("expiredMap[\"active\"] = true, want false")
+	}
+	if m["forever"] {
+		t.Errorf("expiredMap[\"forever\"] = true, want false(永久 key 不应进 map)")
+	}
+}
+
 // TestNormalizeExpires 验证 datetime-local 的 T 分隔符被规范成空格存储。
 func TestNormalizeExpires(t *testing.T) {
 	cases := map[string]string{
