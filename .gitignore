@@ -27,3 +27,9 @@ vendor/
 
 # 协作约定(本地用,不提交)
 agents.md
+
+# 敏感配置 / 运行时数据(绝不提交真实 key 和统计)
+keys.yaml
+*.usage
+stats.json
+stats.json.*

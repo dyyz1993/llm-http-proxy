@@ -14,8 +14,14 @@ bin/
 *.exe
 *.dll
 *.so
-*.dylog
+*.dylib
 llm-http-proxy
+
+# 敏感配置 / 运行时数据(绝不烤进镜像)
+keys.yaml
+*.usage
+stats.json
+stats.json.*
 
 # 测试覆盖率
 *.out

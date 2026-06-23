@@ -21,7 +21,9 @@ import (
 	"encoding/hex"
 	"fmt"
 	"html/template"
+	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -46,7 +48,9 @@ func newAdminServer(password string, stats *statsCollector, ks *keyStore, qc *qu
 		return nil
 	}
 	secret := make([]byte, 32)
-	rand.Read(secret)
+	if _, err := rand.Read(secret); err != nil {
+		log.Fatalf("生成 HMAC 密钥失败: %v", err)
+	}
 	return &adminServer{
 		password: password,
 		secret:   secret,
@@ -160,11 +164,15 @@ func (a *adminServer) handleLogin(w http.ResponseWriter, r *http.Request) {
 		pw := r.FormValue("password")
 		// 常数时间比较防时序攻击
 		if subtle.ConstantTimeCompare([]byte(pw), []byte(a.password)) == 1 {
+			// HTTPS 请求时给 cookie 加 Secure 标志,防止明文链路截获。
+			// 开发环境(HTTP)不加,否则 cookie 不生效。
+			secure := r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https"
 			http.SetCookie(w, &http.Cookie{
 				Name:     cookieName,
 				Value:    a.makeCookieValue(),
 				Path:     "/",
 				HttpOnly: true,
+				Secure:   secure,
 				MaxAge:   int(cookieTTL.Seconds()),
 				SameSite: http.SameSiteLaxMode,
 			})
@@ -180,8 +188,9 @@ func (a *adminServer) handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *adminServer) handleLogout(w http.ResponseWriter, r *http.Request) {
+	secure := r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https"
 	http.SetCookie(w, &http.Cookie{
-		Name: cookieName, Value: "", Path: "/", MaxAge: -1,
+		Name: cookieName, Value: "", Path: "/", MaxAge: -1, Secure: secure,
 	})
 	http.Redirect(w, r, "/__admin/login", http.StatusSeeOther)
 }
@@ -304,10 +313,14 @@ func (a *adminServer) handleKeyNew(w http.ResponseWriter, r *http.Request) {
 	header := strings.TrimSpace(r.FormValue("header"))
 	// prefix 不 TrimSpace(保留尾空格,如 "Bearer "),但去掉首空格
 	prefix := strings.TrimLeft(r.FormValue("prefix"), " ")
-	rate := 0
-	burst := 0
-	fmt.Sscanf(r.FormValue("rate"), "%d", &rate)
-	fmt.Sscanf(r.FormValue("burst"), "%d", &burst)
+	rate, _ := strconv.Atoi(strings.TrimSpace(r.FormValue("rate")))
+	burst, _ := strconv.Atoi(strings.TrimSpace(r.FormValue("burst")))
+	if rate < 0 {
+		rate = 0
+	}
+	if burst < 0 {
+		burst = 0
+	}
 	expires := normalizeExpires(r.FormValue("expires"))
 
 	if alias == "" {
