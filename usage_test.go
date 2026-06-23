@@ -2,10 +2,14 @@ package main
 
 import (
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestExtractUsageOpenAI 验证 OpenAI 格式的 usage 提取。
@@ -513,5 +517,74 @@ func TestUsagePersistOverwrite(t *testing.T) {
 	}
 	if got.TotalCost != 0.0005 {
 		t.Errorf("覆盖后 TotalCost = %f, want 0.0005", got.TotalCost)
+	}
+}
+
+// TestProxyNonStreamUsageCapture 端到端验证:非流式(普通 JSON)GLM 响应
+// 经过代理后,usage 是否被正确捕获并记录到 usageTracker。
+// 这是排查"线上非流式统计不到 token"的关键测试。
+func TestProxyNonStreamUsageCapture(t *testing.T) {
+	// 后端:模拟真实非流式 GLM 响应(含 usage + cached_tokens)
+	glmResp := `{
+		"id":"123","object":"chat.completion","model":"glm-4.7",
+		"choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}],
+		"usage":{"prompt_tokens":1500,"completion_tokens":80,"prompt_tokens_details":{"cached_tokens":500}}
+	}`
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(200)
+		io.WriteString(w, glmResp)
+	}))
+	defer backend.Close()
+
+	// 临时设置包级 usageTracker(模拟 main() 初始化),测试后还原
+	oldTracker := usageTracker
+	usageTracker = newUsageStats()
+	defer func() { usageTracker = oldTracker }()
+
+	stats := newStatsCollector()
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		newProxyHandler(stats, nil, "").ServeHTTP(w, req)
+	}))
+	defer proxy.Close()
+
+	// 用 Authorization 走透传模式(statKey = key:xxxx)
+	req, _ := http.NewRequest("POST",
+		proxyURL(proxy.URL, backend.URL+"/v4/chat/completions"),
+		strings.NewReader(`{"model":"glm-4.7","messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Authorization", "Bearer sk-abcd1234efgh5678")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := noCompressClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	// 给后台解析一点时间(record 在响应结束后同步调用,但保险起见)
+	time.Sleep(50 * time.Millisecond)
+
+	// 检查 usageTracker 有没有记录到
+	snap := usageTracker.snapshot()
+	t.Logf("snapshot: %+v", snap)
+	if len(snap) == 0 {
+		t.Fatalf("usageTracker 为空,非流式 usage 未被捕获")
+	}
+	// 透传模式 alias = 掩码 key
+	var s aliasUsageStats
+	for _, v := range snap {
+		s = v
+		break
+	}
+	if s.Prompt != 1500 {
+		t.Errorf("Prompt = %d, want 1500", s.Prompt)
+	}
+	if s.Cached != 500 {
+		t.Errorf("Cached = %d, want 500", s.Cached)
+	}
+	if s.Completion != 80 {
+		t.Errorf("Completion = %d, want 80", s.Completion)
+	}
+	if s.Count != 1 {
+		t.Errorf("Count = %d, want 1", s.Count)
 	}
 }
