@@ -173,6 +173,11 @@ func main() {
 		}
 		switch {
 		case req.URL.Path == "/__version":
+			// 启用了管理界面时,/__version 也要求登录(防止泄露版本/uptime 等运行时信息)
+			if admin != nil && !admin.authCheck(req) {
+				http.Redirect(w, req, "/__admin/login", http.StatusSeeOther)
+				return
+			}
 			versionHandler(w, req)
 			return
 		case req.URL.Path == "/__stats":
@@ -402,16 +407,21 @@ func handleKeyRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, stat
 	newProxyHandler(stats, inject, statLabel).ServeHTTP(w, req)
 }
 
+// sharedTransport / sharedClient 是全局共享的连接池。
+// 之前每个请求都 new 一个 Transport+Client,导致连接池失效、每次都 TCP/TLS 握手。
+// 改为全局复用后,空闲连接可 keep-alive,大幅减少延迟和资源消耗。
+var sharedTransport = &http.Transport{
+	DisableCompression:  true, // 不偷偷加 Accept-Encoding: gzip
+	MaxIdleConnsPerHost: 20,   // 每个 host 最多保持 20 条空闲连接
+	IdleConnTimeout:     90 * time.Second,
+}
+var sharedClient = &http.Client{Transport: sharedTransport}
+
 // newProxyHandler 构造代理的 http.Handler。测试和 main 共用同一份逻辑。
 // stats 非 nil 时,记录每次请求的 IP/掩码key/状态码统计。
 // injectHeaders 非 nil 时(key 注入模式),这些 header 会在转发前覆盖进请求头。
 // statKeyLabel 用于统计里替代掩码 key 显示(如 key 注入模式显示 alias "glm")。
 func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLabel string) http.Handler {
-	transport := &http.Transport{
-		DisableCompression: true, // 不偷偷加 Accept-Encoding: gzip
-	}
-	client := &http.Client{Transport: transport}
-
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		raw := strings.TrimPrefix(req.RequestURI, "/")
 		if raw == "" || !strings.Contains(raw, "://") {
@@ -465,7 +475,7 @@ func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLa
 		stripProxyHeaders(outReq.Header)         // 剥离上游网关注入的反代特征头,保持原始性
 		outReq.ContentLength = req.ContentLength // 显式带上 body 长度,避免 body 不被发送
 
-		resp, err := client.Do(outReq)
+		resp, err := sharedClient.Do(outReq)
 		if err != nil {
 			// 区分"客户端断连"和"真正的上游错误"。
 			// 客户端主动断连(超时/取消)→ req.Context() 被取消 → 499 Client Closed Request(nginx 约定)。
