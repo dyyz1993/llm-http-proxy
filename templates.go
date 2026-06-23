@@ -160,7 +160,7 @@ function copyURL(alias) {
 	<body>{{template "nav"}}
 	<h2>最近日志 ({{len .}} 条)</h2>
 	{{if not .}}<p>暂无日志。</p>{{else}}
-	<table style="font-size:13px">
+	<div class="table-wrap"><table style="font-size:13px">
 	<tr><th>时间</th><th>IP</th><th>Key</th><th>Method</th><th>Host</th><th>Status</th><th>TTFB</th><th>耗时</th><th>流式</th><th>输入</th><th>缓存</th><th>输出</th><th>命中率</th><th>输入费用</th><th>输出费用</th><th>总费用</th></tr>
 	{{range .}}
 	<tr {{if ge .Status 400}}style="color:red"{{end}}>
@@ -176,7 +176,7 @@ function copyURL(alias) {
 	<td>{{if .CostCalculated}}{{printf "%.6f" .TotalCost}}{{else}}-{{end}}</td>
 	</tr>
 	{{end}}
-	</table>{{end}}
+	</table></div>{{end}}
 	</body></html>`,
 
 	"msg": `<!DOCTYPE html>
@@ -202,10 +202,11 @@ body{font-family:system-ui;margin:0;padding:0;background:#f5f5f5}
 .nav a{color:#8bf;text-decoration:none}
 .nav a:hover{text-decoration:underline}
 .nav .title{font-weight:bold;margin-right:auto}
-.container{padding:20px;max-width:1000px;margin:0 auto}
-table{border-collapse:collapse;width:100%;background:#fff;margin:10px 0}
-th,td{border:1px solid #ddd;padding:6px 10px;text-align:left}
-th{background:#eee}
+.container{padding:20px;margin:0 auto}
+.table-wrap{overflow-x:auto;background:#fff;margin:10px 0;border-radius:4px}
+table{border-collapse:collapse;width:100%;background:#fff}
+th,td{border:1px solid #ddd;padding:6px 10px;text-align:left;white-space:nowrap}
+th{background:#eee;position:sticky;top:0}
 tr:hover{background:#f0f8ff}
 code{background:#eee;padding:2px 4px;border-radius:3px}
 input,select{padding:4px}

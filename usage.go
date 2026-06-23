@@ -70,11 +70,19 @@ func extractUsage(body []byte) usageData {
 	}
 
 	// 尝试方式 2:SSE 流式,扫每个 data: 行,取最后一个含 usage 的
-	if u := trySSE(body); u.HasData {
-		return u
+	u := trySSE(body)
+	if !u.HasData && len(body) > 0 {
+		// DEBUG: 提取失败时记录诊断信息(前 200 字节 + 后 200 字节)
+		head, tail := body, body
+		if len(head) > 200 {
+			head = head[:200]
+		}
+		if len(tail) > 200 {
+			tail = tail[len(tail)-200:]
+		}
+		log.Printf("extractUsage SSE 失败: bodyLen=%d head=%q tail=%q", len(body), string(head), string(tail))
 	}
-
-	return usageData{}
+	return u
 }
 
 // tryJSON 尝试把 body 当成单个 JSON 解析。
