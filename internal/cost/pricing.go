@@ -163,6 +163,7 @@ var knownModels = []struct {
 	{"glm-5.1", "glm-5.1"},
 	{"glm-5-turbo", "glm-5-turbo"},
 	{"glm-5", "glm-5"},
+	{"glm-4.6", "glm-4.7"}, // glm-4.6 约等于 glm-4.7,复用同一套定价
 	{"glm-4.7", "glm-4.7"},
 }
 
