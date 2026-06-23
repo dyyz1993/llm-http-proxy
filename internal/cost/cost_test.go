@@ -154,3 +154,23 @@ func TestCalculate_UnknownModel(t *testing.T) {
 		t.Fatal("expected error for unknown model")
 	}
 }
+
+func TestCalculate_NegativeTokens(t *testing.T) {
+	// 负值保护:上游可能返回异常负值,不应产生负费用
+	r, err := Calculate("GLM-5.2", -100, -50, -30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.InputCost != 0 {
+		t.Errorf("负 input 的 InputCost = %.6f, want 0", r.InputCost)
+	}
+	if r.OutputCost != 0 {
+		t.Errorf("负 output 的 OutputCost = %.6f, want 0", r.OutputCost)
+	}
+	if r.TotalCost != 0 {
+		t.Errorf("TotalCost = %.6f, want 0", r.TotalCost)
+	}
+	if r.InputTokens != 0 || r.OutputTokens != 0 {
+		t.Errorf("InputTokens=%d OutputTokens=%d, want 0", r.InputTokens, r.OutputTokens)
+	}
+}

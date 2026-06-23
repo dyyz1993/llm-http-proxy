@@ -569,11 +569,18 @@ func maskKey(k string) string {
 		prefix = k[:4]
 	}
 
-	tail := k[n-4:]
-	stars := strings.Repeat("*", 4)
-	if n-len(prefix)-4 > 4 {
-		stars = strings.Repeat("*", n-len(prefix)-4)
+	// 如果 prefix 太长(prefix + tail 会重叠),全掩码保护避免明文泄露。
+	// 例:"123456-789"(n=9, prefix="123456-")→ prefix+len("tail")=11 > 9 → 全掩码。
+	if len(prefix)+4 >= n {
+		return strings.Repeat("*", n)
 	}
+
+	tail := k[n-4:]
+	gap := n - len(prefix) - 4
+	if gap < 4 {
+		gap = 4 // 至少 4 个 *
+	}
+	stars := strings.Repeat("*", gap)
 	return prefix + stars + tail
 }
 

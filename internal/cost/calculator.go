@@ -36,13 +36,19 @@ type CostResult struct {
 //   - *CostResult: 详细的费用结构
 //   - error: 如果模型未找到或没有匹配的定价档位则返回错误
 func Calculate(modelName string, inputTokens, outputTokens, cachedTokens int) (*CostResult, error) {
-	// 0. 参数保护：cachedTokens 不能超过 inputTokens
-	// （某些上游可能返回 cached > prompt 的异常数据，钳制到 inputTokens）
-	if cachedTokens > inputTokens {
-		cachedTokens = inputTokens
+	// 0. 参数保护：负值钳制为 0（上游可能返回异常负值，防止负费用污染统计）
+	if inputTokens < 0 {
+		inputTokens = 0
+	}
+	if outputTokens < 0 {
+		outputTokens = 0
 	}
 	if cachedTokens < 0 {
 		cachedTokens = 0
+	}
+	// cachedTokens 不能超过 inputTokens（异常数据保护）
+	if cachedTokens > inputTokens {
+		cachedTokens = inputTokens
 	}
 
 	// 1. 解析模型名

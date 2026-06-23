@@ -166,6 +166,10 @@ func startProxyWithAdmin(t *testing.T, password string, ks *keyStore) *httptest.
 		}
 		switch {
 		case req.URL.Path == "/__version":
+			if admin != nil && !admin.authCheck(req) {
+				http.Redirect(w, req, "/__admin/login", http.StatusSeeOther)
+				return
+			}
 			versionHandler(w, req)
 			return
 		case req.URL.Path == "/__stats":
@@ -638,11 +642,39 @@ func TestMaskKey(t *testing.T) {
 		{"short", "*****"},            // <=8 全掩码
 		{"12345678", "********"},      // 恰好 8 全掩码
 		{"123456789", "1234****6789"}, // 9 字符,空隙=1≤4,用 4 个 *
+		// 重叠保护: '-' 靠后导致 prefix+tail 重叠 → 全掩码,不泄露明文
+		{"123456-789", "**********"},   // n=10, prefix="123456-"(7), 7+4=11>10 → 全掩码
+		{"abcdefgh-i", "**********"},   // n=10, prefix="abcdefgh-"(9), 9+4=13>10 → 全掩码
+		{"abc-defghi", "abc-****fghi"}, // n=10, prefix="abc-"(4), gap=2→clamp4, 正常
+		{"ab-cdefghij", "ab-****ghij"}, // n=11, prefix="ab-"(3), gap=4, 正常
 	}
 	for _, c := range cases {
 		got := maskKey(c.in)
 		if got != c.want {
 			t.Errorf("maskKey(%q) = %q,期望 %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestMaskKeyNoLeak 确保掩码后不会泄露 key 中间的明文字符。
+// 回归 bug: prefix 和 tail 重叠时,输出会重复明文。
+func TestMaskKeyNoLeak(t *testing.T) {
+	// 关键: key 中间的字符不应该出现在掩码结果里
+	// 只验证"重叠 bug":当 '-' 靠后时,中间字符不应被重复输出
+	tests := []struct {
+		key      string
+		mustHide string // 这些中间字符绝对不应出现在结果里
+	}{
+		{"123456-789", "78"},    // n=10,prefix="123456-",tail="0789"→全掩码,中间不应有 "78"
+		{"abcdefgh-i", "hi"},    // 全掩码
+		{"secret-key-1234", ""}, // 正常,prefix="secret-",tail="1234",中间被 *
+	}
+	for _, tt := range tests {
+		masked := maskKey(tt.key)
+		// 全掩码时不应有任何明文
+		if tt.mustHide != "" && strings.Contains(masked, tt.mustHide) {
+			t.Errorf("maskKey(%q) = %q, 泄露了中间字符 %q",
+				tt.key, masked, tt.mustHide)
 		}
 	}
 }
@@ -2405,5 +2437,100 @@ func TestServeHelpRootAndBareAlias(t *testing.T) {
 		if !strings.Contains(bodyStr, "/k/"+p.wantAlias+"/") {
 			t.Errorf("%s: 教程里未找到别名 %s", p.path, p.wantAlias)
 		}
+	}
+}
+
+// TestAdminCookieSecureHTTP 验证 HTTP 请求时 cookie 没有 Secure 标志(开发环境兼容)。
+func TestAdminCookieSecureHTTP(t *testing.T) {
+	proxy := startProxyWithAdmin(t, "pw", nil)
+	defer proxy.Close()
+
+	noRedirect := &http.Client{
+		Transport: &http.Transport{DisableCompression: true},
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	resp, err := noRedirect.PostForm(proxy.URL+"/__admin/login", url.Values{"password": {"pw"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	cookies := resp.Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("未设 cookie")
+	}
+	if cookies[0].Secure {
+		t.Error("HTTP 请求时 cookie 不应有 Secure 标志")
+	}
+}
+
+// TestAdminKeyInvalidRate 验证非数字 rate/burst 输入不 panic 且存为 0。
+func TestAdminKeyInvalidRate(t *testing.T) {
+	ks := newKeyStore()
+	proxy := startProxyWithAdmin(t, "pw", ks)
+	defer proxy.Close()
+
+	jar := newTestCookieJar()
+	client := &http.Client{Jar: jar, Transport: &http.Transport{DisableCompression: true}}
+	resp, _ := client.PostForm(proxy.URL+"/__admin/login", url.Values{"password": {"pw"}})
+	resp.Body.Close()
+
+	// 提交非数字 rate
+	resp, err := client.PostForm(proxy.URL+"/__admin/keys/new",
+		url.Values{"alias": {"badrate"}, "key": {"sk-test1234567890"},
+			"rate": {"abc"}, "burst": {"xyz"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	cfg, ok := ks.allConfigs()["badrate"]
+	if !ok {
+		t.Fatal("key 未保存")
+	}
+	if cfg.Rate != 0 {
+		t.Errorf("非数字 rate 应存为 0,实际 %d", cfg.Rate)
+	}
+	if cfg.Burst != 0 {
+		t.Errorf("非数字 burst 应存为 0,实际 %d", cfg.Burst)
+	}
+}
+
+// TestVersionRequiresAuth 验证启用 admin 时 /__version 需要登录。
+func TestVersionRequiresAuth(t *testing.T) {
+	ks := newKeyStore()
+	proxy := startProxyWithAdmin(t, "pw", ks)
+	defer proxy.Close()
+
+	// 未登录:应重定向到登录页(303)
+	noRedirect := &http.Client{
+		Transport: &http.Transport{DisableCompression: true},
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	resp, err := noRedirect.Get(proxy.URL + "/__version")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Errorf("未登录访问 /__version 状态码 %d, 期望 303 重定向", resp.StatusCode)
+	}
+
+	// 登录后:应能正常访问
+	jar := newTestCookieJar()
+	client := &http.Client{Jar: jar, Transport: &http.Transport{DisableCompression: true}}
+	resp2, _ := client.PostForm(proxy.URL+"/__admin/login", url.Values{"password": {"pw"}})
+	resp2.Body.Close()
+
+	resp3, err := client.Get(proxy.URL + "/__version")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp3.Body.Close()
+	if resp3.StatusCode != 200 {
+		t.Errorf("登录后访问 /__version 状态码 %d, 期望 200", resp3.StatusCode)
 	}
 }
