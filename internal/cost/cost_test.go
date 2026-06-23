@@ -25,6 +25,8 @@ func TestResolveModelName(t *testing.T) {
 		{"GLM-5", "glm-5"},
 		{"GLM-4.6", "glm-4.7"}, // 4.6 约等于 4.7,复用定价
 		{"glm-4.6-flash", "glm-4.7"},
+		{"GLM-4.5", "glm-4.7"}, // 4.5 约等于 4.7,复用定价
+		{"glm-4.5-flash", "glm-4.7"},
 		{"GLM-4.7", "glm-4.7"},
 	}
 	for _, tt := range tests {
