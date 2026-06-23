@@ -589,6 +589,9 @@ func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLa
 					u.InputCost = c.InputCost
 					u.OutputCost = c.OutputCost
 					u.TotalCost = c.TotalCost
+				} else {
+					// 费用算不出(模型不在定价表),记录模型名方便排查该配哪个模型
+					log.Printf("费用计算失败(模型不在定价表): model=%q alias=%s prompt=%d", u.Model, statKey, u.Prompt)
 				}
 				// 即使费用计算失败(模型不在定价表),也照常记录 token 用量
 
@@ -717,6 +720,13 @@ func stripProxyHeaders(h http.Header) {
 			"x-original-url", "x-rewrite-url", "x-nginx-proxy",
 			"true-client-ip", "cf-connecting-ip", "cf-ipcountry",
 			"cf-ray", "cf-visitor":
+			delete(h, k)
+		}
+		// Accept-Encoding: 强制剥离,让上游返回明文(不压缩)。
+		// 否则客户端带了 gzip 时,上游会返回 gzip 压缩的 SSE 流,
+		// 导致 captureBuf 里是二进制压缩数据,extractUsage 解不出 usage/token/费用。
+		// 副作用:SSE 流式不再被 gzip 缓冲,实时性反而更好。
+		if lk == "accept-encoding" {
 			delete(h, k)
 		}
 	}
