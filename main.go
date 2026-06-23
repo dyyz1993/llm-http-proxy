@@ -468,8 +468,8 @@ func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLa
 		if len(captureBuf) > 0 {
 			u = extractUsage(captureBuf)
 			if u.HasData && usageTracker != nil {
-				// 尝试用 glm-cost 计算费用
-				c, err := cost.Calculate(u.Model, int(u.Prompt), int(u.Completion), u.Cached > 0)
+				// 尝试用 cost 计算费用（混合计费：未命中按标准价 + 命中按优惠价）
+				c, err := cost.Calculate(u.Model, int(u.Prompt), int(u.Completion), int(u.Cached))
 				if err == nil {
 					u.CostCalculated = true
 					u.InputCost = c.InputCost
