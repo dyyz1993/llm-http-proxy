@@ -164,11 +164,24 @@ func trySSE(body []byte) usageData {
 		//    可能在不同 chunk —— GLM/OpenAI 的 SSE,model 在第一个 chunk,
 		//    usage 在最后一个)
 		if result.Model == "" && bytesContains([]byte(line), `"model"`) {
+			// OpenAI 格式:顶层 {"model":"glm-4.6",...}
 			var mc struct {
 				Model string `json:"model"`
 			}
 			if json.Unmarshal([]byte(line), &mc) == nil && mc.Model != "" {
 				result.Model = mc.Model
+			}
+			// Anthropic 格式:嵌套 {"message":{"model":"glm-4.6",...}}
+			// 顶层无 "model" 字段,上面的解析会漏掉,这里兜底。
+			if result.Model == "" {
+				var ac struct {
+					Message struct {
+						Model string `json:"model"`
+					} `json:"message"`
+				}
+				if json.Unmarshal([]byte(line), &ac) == nil && ac.Message.Model != "" {
+					result.Model = ac.Message.Model
+				}
 			}
 		}
 

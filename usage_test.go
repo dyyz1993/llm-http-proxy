@@ -588,3 +588,40 @@ func TestProxyNonStreamUsageCapture(t *testing.T) {
 		t.Errorf("Count = %d, want 1", s.Count)
 	}
 }
+
+// TestExtractAnthropicSSEModel 验证 Anthropic 格式 SSE 能提取嵌套的 model。
+// 回归 bug: Anthropic SSE 的 model 在 message.model 里(嵌套),
+// 之前 trySSE 只解顶层 model → model 为空 → 费用算不出。
+// 导致走 api.z.ai/api/anthropic 路径的请求全部没费用。
+func TestExtractAnthropicSSEModel(t *testing.T) {
+	body := []byte(`event: message_start
+data: {"type": "message_start", "message": {"id": "msg_123", "type": "message", "role": "assistant", "model": "glm-4.6", "content": [], "usage": {"input_tokens": 0, "output_tokens": 0}}}
+
+event: content_block_delta
+data: {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "Hi"}}
+
+event: message_delta
+data: {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 5}}
+
+event: message_stop
+data: {"type": "message_stop"}
+`)
+	u := extractUsage(body)
+	if u.Model != "glm-4.6" {
+		t.Errorf("Model = %q, want glm-4.6 (Anthropic 嵌套 message.model)", u.Model)
+	}
+}
+
+// TestExtractOpenAISSEModelStillafterFix 验证 OpenAI 格式(顶层 model)修复后仍正常。
+func TestExtractOpenAISSEModelStillafterFix(t *testing.T) {
+	body := []byte(`data: {"id":"1","model":"glm-4.6","choices":[{"delta":{"content":"hi"}}]}
+
+data: {"id":"1","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":3}}}
+
+data: [DONE]
+`)
+	u := extractUsage(body)
+	if u.Model != "glm-4.6" {
+		t.Errorf("OpenAI SSE Model = %q, want glm-4.6", u.Model)
+	}
+}
