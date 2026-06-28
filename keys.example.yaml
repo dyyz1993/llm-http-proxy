@@ -1,119 +1,88 @@
-# llm-http-proxy key 注入配置示例
+# keys.yaml — 代理 key 配置文件
 #
-# 用户通过 /k/{alias}/https://目标 访问,代理自动注入对应的 key。
-# 用户永远看不到真实 key(配置在服务端,不出网)。
+# 格式: alias → 配置,alias 是简短的标识,如 glm、claude、deepseek。
+# 管理后台用 alias 区分统计,日志用 alias 标识来源。
 #
-# 用法:
-#   1. 复制此文件为 keys.yaml,填入真实 key
-#   2. 启动代理加 -keys /path/to/keys.yaml
-#   3. 启动时建议加 -allow-domains 限制可代理的域名(安全!)
-#      例: -allow-domains api.z.ai,open.bigmodel.cn
-#   4. 访问 https://代理地址/k/glm/https://api.z.ai/api/...
-#
-# 改完配置后无需重启,代理每 10 秒自动重读(检测到文件变化才重载)。
-#
-# === Header 自动检测(推荐) ===
-# 不写 header 字段时,代理根据目标路径自动选择:
-#   - 路径含 /anthropic/ (如 /api/anthropic/v1/messages) → x-api-key
-#   - 其他 → Authorization: Bearer
-# 一个 alias 一个 key,同时兼容 OpenAI 和 Anthropic 两种接口。
+# 所有拦截器参数支持三种设置方式(优先级高→低):
+#   1. alias 直接写字段
+#   2. override 覆盖
+#   3. Profile 模板(interceptor_profiles 段定义)
 
-	glm:
-	  key: "你的GLM真实key"
-	  # header 不写 = 自动检测(推荐)
-	  # 路径含 /anthropic/ → x-api-key,否则 → Authorization: Bearer
-	  rate: 60        # 每分钟最多 60 次(可选,不写则不限流)
-	  burst: 10       # 突发上限 10(可选)
-	  # 用量限额(可选,不写/0=不限):
-	  max_tokens: 10000000    # 每个窗口期内最多 1 千万 token(输入+输出)
-	  max_requests: 5000      # 每个窗口期内最多 5000 次成功请求
-	  window: 24h             # 窗口期时长: 5h / 24h / 7d / 30d(空=默认100天=硬上限)
-	  # 禁止时段(可选,北京时间,每天重复):
-	  # time_block:
-	  #   start: "22:00"    # 每天22:00开始禁止
-	  #   end: "08:00"      # 次日08:00结束禁止
+# === 拦截器模板(可选)=====================================================
+# 多个 alias 共用一套规则时,定义模板然后引用,避免重复。
+# 没有显式 profile 的 alias 自动用 "default" 模板(如果定义了)。
+# 模板中的参数可以被 alias 的 override 或直接字段覆盖。
 
-# === 显式指定 header(向后兼容老配置) ===
-# 如果你想固定用某个 header,也可以显式写:
-claude:
-  key: "你的Claude真实key"
-  header: x-api-key
-  prefix: ""        # x-api-key 不需要前缀
+interceptor_profiles:
+  # 默认模板:所有没有 profile 的 alias 自动使用
+  default:
+    rate: 60              # 每分钟最多 60 次
+    burst: 10             # 突发上限 10
+    max_tokens: 10000000  # 每 24h 最多 1 千万 token
+    max_requests: 5000    # 每 24h 最多 5000 次请求
+    window: 24h           # 窗口期
+
+  # 夜间关闭:22:00~08:00 禁止访问
+  night_block:
+    rate: 30
+    max_tokens: 5000000
+    max_requests: 2000
+    window: 12h
+    time_block:
+      start: "22:00"
+      end: "08:00"
+
+  # 严格模式:高频限制+窄窗口
+  strict:
+    rate: 20
+    burst: 3
+    max_tokens: 1000000
+    max_requests: 500
+    window: 1h
+
+# === Key 配置 ============================================================
+
+# 简单用法:用 default 模板(自动),只写 key
+glm:
+  key: "你的GLM真实key"
+
+# 引用模板 + 覆盖部分参数
+max-0:
+  key: "你的max0 key"
+  profile: night_block
+  override:
+    max_tokens: 2000000   # 只改 token 上限,其他用 night_block
+
+# 完全手动:不引用模板,所有参数 inline
+qingdengxuejie:
+  key: "你的qingdengxuejie key"
   rate: 30
-  burst: 5
+  max_tokens: 5000000
+  max_requests: 2000
+  window: 12h
+  time_block:
+    start: "23:00"
+    end: "07:00"
 
-# === 不限流的内部用途 ===
-internal:
-  key: "sk-内部key"
-  # 不写 rate/burst 即不限流
+# 无限制:不加任何参数 = 不限流不限量
+claude:
+  key: "你的Claude key"
 
-# === 全局 image_url 过滤规则(v2.6.0+) ===
-#
-# 某些 LLM 模型(如 DeepSeek)不支持 image_url 类型的内容块,请求含图片会报错。
-# 配置 image_filter 规则后,代理会自动将 image_url 块替换为 [Image] 文本占位符。
-#
-# 匹配方式:
-#   models  — 按请求 body 中的 model 字段匹配(子串匹配,大小写不敏感)
-#   domains — 按上游目标域名匹配(子串匹配,大小写不敏感)
-#   两者都设置时需同时满足(AND)
-#
-# action:
-#   to_text — 替换 image_url 为 [Image] 文本(推荐)
-#   strip   — 直接删除 image_url 块
-#
-# 示例:对 DeepSeek 模型的所有请求自动过滤图片
-# image_filter:
-#   - models: ["deepseek-chat", "deepseek-coder"]
-#     action: to_text
-#
-# 示例:对所有走 api.deepseek.com 的请求过滤图片
-# image_filter:
-#   - domains: ["api.deepseek.com"]
-#     action: to_text
-#
-# 示例:同时按模型和域名过滤(双重条件)
-# image_filter:
-#   - models: ["deepseek-chat"]
-#     domains: ["api.deepseek.com"]
-#     action: to_text
+# 指定 header(自动检测不对时手动指定):
+deepseek:
+  key: "你的DeepSeek key"
+  header: Authorization
+  prefix: "Bearer "
 
+# 有效期(过期后返回 410):
+trial:
+  key: "sk-trial"
+  expires: "2026-12-31"
 
-# === 全局 Token 用量乘数规则(v2.7.0+) ===
-#
-# 某些模型计费特殊(如按实际用量×3计费),可配置乘数规则。
-# 规则匹配后,该请求的 Prompt/Cached/Completion token 和费用全部乘以乘数。
-# 多条规则同时命中时,乘数相乘叠加。
-#
-# 匹配方式:
-#   models  — 按模型名 glob 匹配(大小写不敏感),如 "glm-5*"
-#   domains — 按上游目标域名 glob 匹配(大小写不敏感),如 "*.bigmodel.cn"
-#   两者都设置时需同时满足(AND)
-#   models/domains 不写或空列表 = 匹配所有
-#
-# multiply:
-#   >1 — 放大(如计费×3)
-#   =1 — 不变
-#    0 — 免费(不计费)
-#
-# 示例:GLM-5 系列模型计费×3
-# token_multipliers:
-#   - models: ["glm-5*"]
-#     multiply: 3.0
-#
-# 示例:Claude Opus 走 Anthropic 时计费×2
-# token_multipliers:
-#   - models: ["claude-3-opus*"]
-#     domains: ["api.anthropic.com"]
-#     multiply: 2.0
-#
-# 示例:多条规则叠加(glm-5* 走 bigmodel.cn 时 = 2.0 × 1.5 = 3.0 倍)
-# token_multipliers:
-#   - models: ["glm-5*"]
-#     multiply: 2.0
-#   - domains: ["*.bigmodel.cn"]
-#     multiply: 1.5
-#
-# 示例:特定域名下所有模型免费
-# token_multipliers:
-#   - domains: ["free-test.example.com"]
-#     multiply: 0
+# === 全局规则(非 alias 级别)==============================================
+
+# Token 用量乘数(匹配模型名+域名,命中后用量和费用×N):
+# 详见 USAGE.md
+
+# Image URL 过滤(自动替换/删除请求 body 中的 image_url 块):
+# 详见 USAGE.md

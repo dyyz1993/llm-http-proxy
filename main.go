@@ -389,6 +389,9 @@ func handleKeyRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, stat
 		return
 	}
 
+	// 合并拦截器模板(profile → override → alias 直接字段)
+	cfg = resolveConfig(cfg, ks.getInterceptorProfiles(), "default")
+
 	// 构建拦截器上下文
 	ctx := &CheckContext{
 		Alias:    alias,

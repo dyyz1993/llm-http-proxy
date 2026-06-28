@@ -20,19 +20,34 @@ import (
 )
 
 // KeyConfig 是单个 alias 的注入规则 + 可选限流 + 可选有效期 + 可选用量限额 + 可选禁止时段。
+//
+// 所有拦截器参数可以写在 alias 里直接使用,也可以通过 profile 引用模板后再用 override
+// 局部覆盖。详见 resolveConfig。
 type KeyConfig struct {
 	Key     string `yaml:"key"`     // 真实 API key(不对外暴露)
 	Header  string `yaml:"header"`  // 注入到哪个 header: Authorization / x-api-key / api-key
 	Prefix  string `yaml:"prefix"`  // 可选前缀(如 Authorization 需要 "Bearer ")
-	Rate    int    `yaml:"rate"`    // 限流:每分钟补充令牌数(0=不限流)
-	Burst   int    `yaml:"burst"`   // 限流:桶容量上限(突发上限)
-	Expires string `yaml:"expires"` // 可选有效期:"YYYY-MM-DD"(到当天结束) 或 "YYYY-MM-DD HH:MM"(精确到分,北京时间)。空=永久
-	// 用量限额(窗口内,0=不限)
-	MaxTokens int64  `yaml:"max_tokens"`   // 窗口内总 token 上限(输入+输出),0=不限
-	MaxReqs   int64  `yaml:"max_requests"` // 窗口内成功请求次数上限(HTTP 2xx/3xx),0=不限
-	Window    string `yaml:"window"`       // 窗口时长,如 "5h"/"24h"/"7d"/"30d"。空=默认 100d(硬上限)
-	// 禁止时段(北京时间,每天重复)
-	TimeBlock *TimeBlock `yaml:"time_block"` // 可选:在此时段内请求返回 403
+	Profile string `yaml:"profile"` // 引用拦截器模板 ID(interceptor_profiles 段)
+	// 拦截器参数(可以直接写在这里,或通过 profile 引用+override 覆盖)
+	Rate      int                 `yaml:"rate"`         // 限流:每分钟补充令牌数(0=不限流)
+	Burst     int                 `yaml:"burst"`        // 限流:桶容量上限(突发上限)
+	Expires   string              `yaml:"expires"`      // 可选有效期
+	MaxTokens int64               `yaml:"max_tokens"`   // 窗口内总 token 上限
+	MaxReqs   int64               `yaml:"max_requests"` // 窗口内成功请求次数上限
+	Window    string              `yaml:"window"`       // 窗口时长
+	TimeBlock *TimeBlock          `yaml:"time_block"`   // 禁止时段
+	Override  *InterceptorProfile `yaml:"override"`     // 覆盖 profile 中的部分参数
+}
+
+// InterceptorProfile 是拦截器模板,在 interceptor_profiles 段定义,被 KeyConfig.Profile 引用。
+type InterceptorProfile struct {
+	Rate      int        `yaml:"rate"`
+	Burst     int        `yaml:"burst"`
+	Expires   string     `yaml:"expires"`
+	MaxTokens int64      `yaml:"max_tokens"`
+	MaxReqs   int64      `yaml:"max_requests"`
+	Window    string     `yaml:"window"`
+	TimeBlock *TimeBlock `yaml:"time_block"`
 }
 
 // HasQuota 返回该 alias 是否配置了用量限额。
@@ -120,6 +135,92 @@ func parseHHMM(s string) (hour, min int, ok bool) {
 	return hour, min, true
 }
 
+// resolveConfig 将 interceptor_profiles 模板与 KeyConfig 合并。
+//
+// 合并优先级(高→低):
+//
+//  1. KeyConfig 直接字段(alias 里直接写的)
+//  2. KeyConfig.Override 字段
+//  3. KeyConfig.Profile 引用的模板
+//  4. defaultProfile(如果 Profile 为空且存在该模板)
+//
+// 没有 profile 且没有 defaultProfile → 原样返回。
+func resolveConfig(cfg KeyConfig, profiles map[string]InterceptorProfile, defaultProfile string) KeyConfig {
+	// 确定 base profile
+	profileID := cfg.Profile
+	if profileID == "" {
+		profileID = defaultProfile
+	}
+	if profileID == "" || profiles == nil {
+		return cfg
+	}
+	base, ok := profiles[profileID]
+	if !ok {
+		return cfg // 找不到 profile → 原样
+	}
+
+	// 合并优先级(高→低): alias 直接字段 > override > profile
+	// 先保存 alias 直接字段
+	direct := struct {
+		rate, burst        int
+		expires            string
+		maxTokens, maxReqs int64
+		window             string
+		timeBlock          *TimeBlock
+	}{cfg.Rate, cfg.Burst, cfg.Expires, cfg.MaxTokens, cfg.MaxReqs, cfg.Window, cfg.TimeBlock}
+
+	// 从 profile 开始
+	result := KeyConfig{
+		Key:    cfg.Key,
+		Header: cfg.Header,
+		Prefix: cfg.Prefix,
+	}
+	mergeInto(&result, base)
+
+	// override 覆盖
+	if cfg.Override != nil {
+		mergeInto(&result, *cfg.Override)
+	}
+
+	// alias 直接字段(最高优先级)
+	mergeInto(&result, InterceptorProfile{
+		Rate:      direct.rate,
+		Burst:     direct.burst,
+		Expires:   direct.expires,
+		MaxTokens: direct.maxTokens,
+		MaxReqs:   direct.maxReqs,
+		Window:    direct.window,
+		TimeBlock: direct.timeBlock,
+	})
+
+	return result
+}
+
+// mergeInto 将 src 的非零非空字段合并到 target。
+func mergeInto(target *KeyConfig, src InterceptorProfile) {
+	if src.Rate != 0 {
+		target.Rate = src.Rate
+	}
+	if src.Burst != 0 {
+		target.Burst = src.Burst
+	}
+	if src.Expires != "" {
+		target.Expires = src.Expires
+	}
+	if src.MaxTokens != 0 {
+		target.MaxTokens = src.MaxTokens
+	}
+	if src.MaxReqs != 0 {
+		target.MaxReqs = src.MaxReqs
+	}
+	if src.Window != "" {
+		target.Window = src.Window
+	}
+	if src.TimeBlock != nil {
+		target.TimeBlock = src.TimeBlock
+	}
+}
+
 // expiresLayouts 是支持的有效期格式,按优先级尝试。
 // 全部按北京时间解析(用户填的就是北京时间)。
 var expiresLayouts = []string{
@@ -171,13 +272,14 @@ type rateLimiter struct {
 
 // keyStore 管理 keys.yaml 的加载、热重载、限流器。
 type keyStore struct {
-	mu               sync.RWMutex
-	configs          map[string]KeyConfig // alias → config
-	limiters         map[string]*rateLimiter
-	path             string
-	lastMtime        time.Time
-	imageFilter      []ImageFilterRule     // 全局 image_url 过滤规则
-	tokenMultipliers []TokenMultiplierRule // 全局 Token 用量乘数规则
+	mu                  sync.RWMutex
+	configs             map[string]KeyConfig // alias → config
+	limiters            map[string]*rateLimiter
+	path                string
+	lastMtime           time.Time
+	imageFilter         []ImageFilterRule             // 全局 image_url 过滤规则
+	tokenMultipliers    []TokenMultiplierRule         // 全局 Token 用量乘数规则
+	interceptorProfiles map[string]InterceptorProfile // 拦截器模板(interceptor_profiles 段)
 }
 
 // newKeyStore 创建空的 key store。
@@ -203,6 +305,7 @@ func (ks *keyStore) load(path string) error {
 	// 这样 keys.yaml 现有格式不变，只需加顶层字段。
 	var rules []ImageFilterRule
 	var multipliers []TokenMultiplierRule
+	var profiles map[string]InterceptorProfile
 	var configs map[string]KeyConfig
 	{
 		var raw map[string]interface{}
@@ -221,9 +324,16 @@ func (ks *keyStore) load(path string) error {
 				log.Printf("解析 token_multipliers 配置失败: %v", err)
 			}
 		}
+		if profRaw, ok := raw["interceptor_profiles"]; ok {
+			profData, _ := yaml.Marshal(profRaw)
+			if err := yaml.Unmarshal(profData, &profiles); err != nil {
+				log.Printf("解析 interceptor_profiles 配置失败: %v", err)
+			}
+		}
 		// 去掉已知的全局字段，剩余部分作为 keys 解析
 		delete(raw, "image_filter")
 		delete(raw, "token_multipliers")
+		delete(raw, "interceptor_profiles")
 		keysData, _ := yaml.Marshal(raw)
 		if err := yaml.Unmarshal(keysData, &configs); err != nil {
 			return err
@@ -235,18 +345,20 @@ func (ks *keyStore) load(path string) error {
 	ks.configs = configs
 	ks.imageFilter = rules
 	ks.tokenMultipliers = multipliers
+	ks.interceptorProfiles = profiles
 	ks.path = path
 	if fi, err := os.Stat(path); err == nil {
 		ks.lastMtime = fi.ModTime()
 	}
-	// 为有限流的 alias 创建/更新限流器
+	// 为有限流的 alias 创建/更新限流器(用合并模板后的配置)
 	for alias, cfg := range configs {
-		if cfg.Rate > 0 {
-			ks.getOrCreateLimiter(alias, cfg)
+		resolved := resolveConfig(cfg, profiles, "default")
+		if resolved.Rate > 0 {
+			ks.getOrCreateLimiter(alias, resolved)
 		}
 	}
-	log.Printf("已加载 %d 个 key 配置, %d 条 image_filter 规则, %d 条 token_multipliers 规则",
-		len(configs), len(rules), len(multipliers))
+	log.Printf("已加载 %d 个 key 配置, %d 条 image_filter 规则, %d 条 token_multipliers 规则, %d 个拦截器模板",
+		len(configs), len(rules), len(multipliers), len(profiles))
 	return nil
 }
 
@@ -401,6 +513,20 @@ func (ks *keyStore) getTokenMultipliers() []TokenMultiplierRule {
 	ks.mu.RLock()
 	defer ks.mu.RUnlock()
 	return ks.tokenMultipliers
+}
+
+// getInterceptorProfiles 返回 interceptor_profiles 模板副本(只读)。
+func (ks *keyStore) getInterceptorProfiles() map[string]InterceptorProfile {
+	ks.mu.RLock()
+	defer ks.mu.RUnlock()
+	if ks.interceptorProfiles == nil {
+		return nil
+	}
+	cp := make(map[string]InterceptorProfile, len(ks.interceptorProfiles))
+	for k, v := range ks.interceptorProfiles {
+		cp[k] = v
+	}
+	return cp
 }
 
 // --- 管理用写方法(给 admin UI 用) ---
