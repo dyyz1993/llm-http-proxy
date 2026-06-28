@@ -119,7 +119,7 @@ func startProxy(t *testing.T) *httptest.Server {
 			statsHandler(stats, nil).ServeHTTP(w, req)
 			return
 		}
-		newProxyHandler(stats, nil, "").ServeHTTP(w, req)
+		newProxyHandler(stats, nil, "", nil, nil).ServeHTTP(w, req)
 	})
 	return httptest.NewServer(mux)
 }
@@ -127,7 +127,12 @@ func startProxy(t *testing.T) *httptest.Server {
 // startProxyWithKeys 启动带 key 注入模式的代理(模拟 main 的完整路由)。
 func startProxyWithKeys(t *testing.T, ks *keyStore) *httptest.Server {
 	t.Helper()
+	// 确保 settingsMgr 不为 nil（空 = 不限制域名）
+	if settingsMgr == nil {
+		settingsMgr = newSettingsManager()
+	}
 	stats := newStatsCollector()
+	us := newUsageStats()
 	mux := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		switch {
 		case req.URL.Path == "/__version":
@@ -140,10 +145,10 @@ func startProxyWithKeys(t *testing.T, ks *keyStore) *httptest.Server {
 			serveHelp(w, "")
 			return
 		case strings.HasPrefix(req.URL.Path, "/k/"):
-			handleKeyRoute(w, req, ks, stats)
+			handleKeyRoute(w, req, ks, stats, us)
 			return
 		default:
-			newProxyHandler(stats, nil, "").ServeHTTP(w, req)
+			newProxyHandler(stats, nil, "", nil, nil).ServeHTTP(w, req)
 		}
 	})
 	return httptest.NewServer(mux)
@@ -158,7 +163,7 @@ func startProxyWithAdmin(t *testing.T, password string, ks *keyStore) *httptest.
 	if ks != nil {
 		qc = newQuotaCache(":0") // 测试用任意端口,probe 不会真连
 	}
-	admin := newAdminServer(password, stats, ks, qc, newUsageStats())
+	admin := newAdminServer(password, stats, ks, qc, newUsageStats(), newSettingsManager(), "", "", "")
 	mux := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if admin != nil && (req.URL.Path == "/__admin" || strings.HasPrefix(req.URL.Path, "/__admin/")) {
 			admin.handler().ServeHTTP(w, req)
@@ -180,7 +185,7 @@ func startProxyWithAdmin(t *testing.T, password string, ks *keyStore) *httptest.
 			statsHandler(stats, authFn).ServeHTTP(w, req)
 			return
 		default:
-			newProxyHandler(stats, nil, "").ServeHTTP(w, req)
+			newProxyHandler(stats, nil, "", nil, nil).ServeHTTP(w, req)
 		}
 	})
 	return httptest.NewServer(mux)
@@ -731,7 +736,7 @@ func TestStatsRecordAndAggregate(t *testing.T) {
 			statsHandler(stats, nil).ServeHTTP(w, req)
 			return
 		}
-		newProxyHandler(stats, nil, "").ServeHTTP(w, req)
+		newProxyHandler(stats, nil, "", nil, nil).ServeHTTP(w, req)
 	})
 	proxy := httptest.NewServer(mux)
 	defer proxy.Close()
@@ -974,7 +979,7 @@ func TestStatsByKeyView(t *testing.T) {
 			statsHandler(stats, nil).ServeHTTP(w, req)
 			return
 		}
-		newProxyHandler(stats, nil, "").ServeHTTP(w, req)
+		newProxyHandler(stats, nil, "", nil, nil).ServeHTTP(w, req)
 	})
 	proxy := httptest.NewServer(mux)
 	defer proxy.Close()
@@ -1032,7 +1037,7 @@ func TestStatsDistinctCount(t *testing.T) {
 			statsHandler(stats, nil).ServeHTTP(w, req)
 			return
 		}
-		newProxyHandler(stats, nil, "").ServeHTTP(w, req)
+		newProxyHandler(stats, nil, "", nil, nil).ServeHTTP(w, req)
 	})
 	proxy := httptest.NewServer(mux)
 	defer proxy.Close()
@@ -1098,7 +1103,7 @@ func TestStatsFormatTable(t *testing.T) {
 			statsHandler(stats, nil).ServeHTTP(w, req)
 			return
 		}
-		newProxyHandler(stats, nil, "").ServeHTTP(w, req)
+		newProxyHandler(stats, nil, "", nil, nil).ServeHTTP(w, req)
 	})
 	proxy := httptest.NewServer(mux)
 	defer proxy.Close()
@@ -2136,9 +2141,10 @@ func TestKeyRouteDomainWhitelist(t *testing.T) {
 	ks.setConfig("glm", KeyConfig{Key: "sk-secret", Header: "", Prefix: ""}) // 自动模式
 
 	// 设白名单:只允许 api.z.ai
-	oldAllow := allowDomains
-	allowDomains = map[string]bool{"api.z.ai": true}
-	defer func() { allowDomains = oldAllow }()
+	oldSettings := settingsMgr
+	settingsMgr = newSettingsManager()
+	settingsMgr.AddDomain("api.z.ai")
+	defer func() { settingsMgr = oldSettings }()
 
 	proxy := startProxyWithKeys(t, ks)
 	defer proxy.Close()
@@ -2171,9 +2177,9 @@ func TestKeyRouteAutoHeader(t *testing.T) {
 	ks.setConfig("glm", KeyConfig{Key: "sk-secret", Header: "", Prefix: ""}) // 自动检测
 
 	// 不设白名单(空=不限制)
-	oldAllow := allowDomains
-	allowDomains = nil
-	defer func() { allowDomains = oldAllow }()
+	oldSettings := settingsMgr
+	settingsMgr = newSettingsManager() // 空 = 不限制
+	defer func() { settingsMgr = oldSettings }()
 
 	backend := echoBackend() // 回显收到的 header
 	proxy := startProxyWithKeys(t, ks)
@@ -2533,4 +2539,334 @@ func TestVersionRequiresAuth(t *testing.T) {
 	if resp3.StatusCode != 200 {
 		t.Errorf("登录后访问 /__version 状态码 %d, 期望 200", resp3.StatusCode)
 	}
+}
+
+// --- 用量限额 HTTP 端到端测试 -----------------------------------------------
+
+// TestKeyRouteQuotaReqsExceeded 验证请求次数超限时返回 402 + Retry-After。
+func TestKeyRouteQuotaReqsExceeded(t *testing.T) {
+	backend := echoBackend()
+	defer backend.Close()
+
+	ks := newKeyStore()
+	ks.setConfig("test", KeyConfig{
+		Key:     "sk-test-key",
+		Header:  "Authorization",
+		MaxReqs: 3,
+		Window:  "1h",
+	})
+
+	// 确保 settingsMgr 不为 nil
+	oldSettings := settingsMgr
+	settingsMgr = newSettingsManager()
+	defer func() { settingsMgr = oldSettings }()
+
+	oldTracker := usageTracker
+	usageTracker = newUsageStats()
+	defer func() { usageTracker = oldTracker }()
+
+	stats := newStatsCollector()
+	us := usageTracker // 同一个实例,checkQuota + recordSuccess 共享
+
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if strings.HasPrefix(req.URL.Path, "/k/") {
+			handleKeyRoute(w, req, ks, stats, us)
+			return
+		}
+		newProxyHandler(stats, nil, "", nil, nil).ServeHTTP(w, req)
+	}))
+	defer proxy.Close()
+
+	url := proxy.URL + "/k/test/" + backend.URL + "/"
+
+	// 前 3 次成功(未超限)
+	for i := 0; i < 3; i++ {
+		resp, err := http.Get(url)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+	}
+
+	// 第 4 次应被拒绝 → 402
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusPaymentRequired {
+		t.Errorf("超限后状态码 = %d, 期望 402", resp.StatusCode)
+	}
+	if resp.Header.Get("Retry-After") == "" {
+		t.Error("quota 拒绝应包含 Retry-After header")
+	}
+}
+
+// TestKeyRouteQuotaTokensExceeded 验证用量超限时返回 402。
+func TestKeyRouteQuotaTokensExceeded(t *testing.T) {
+	backend := echoBackend()
+	defer backend.Close()
+
+	ks := newKeyStore()
+	ks.setConfig("test", KeyConfig{
+		Key:       "sk-test-key",
+		Header:    "Authorization",
+		MaxTokens: 100,
+		Window:    "1h",
+	})
+
+	oldSettings := settingsMgr
+	settingsMgr = newSettingsManager()
+	defer func() { settingsMgr = oldSettings }()
+
+	oldTracker := usageTracker
+	usageTracker = newUsageStats()
+	defer func() { usageTracker = oldTracker }()
+
+	stats := newStatsCollector()
+	us := usageTracker
+
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if strings.HasPrefix(req.URL.Path, "/k/") {
+			handleKeyRoute(w, req, ks, stats, us)
+			return
+		}
+		newProxyHandler(stats, nil, "", nil, nil).ServeHTTP(w, req)
+	}))
+	defer proxy.Close()
+
+	// 手动预填用量(模拟已触发限流)
+	us.record("test", usageData{HasData: true, Prompt: 80, Completion: 30})
+
+	url := proxy.URL + "/k/test/" + backend.URL + "/"
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusPaymentRequired {
+		t.Errorf("用量超限状态码 = %d, 期望 402", resp.StatusCode)
+	}
+}
+
+// TestKeyRouteQuotaNoLimit 验证无 quota 配置时正常转发。
+func TestKeyRouteQuotaNoLimit(t *testing.T) {
+	backend := echoBackend()
+	defer backend.Close()
+
+	ks := newKeyStore()
+	ks.setConfig("test", KeyConfig{
+		Key:    "sk-test-key",
+		Header: "Authorization",
+		// 无 MaxReqs/MaxTokens → HasQuota=false
+	})
+
+	proxy := startProxyWithKeys(t, ks)
+	defer proxy.Close()
+
+	resp, err := http.Get(proxy.URL + "/k/test/" + backend.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusPaymentRequired {
+		t.Error("无 quota 配置不应返回 402")
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("无 quota 应正常转发,状态码 = %d", resp.StatusCode)
+	}
+}
+
+// TestKeyRouteQuotaNoUsageTracker 验证 usageTracker=nil 时不 panic。
+func TestKeyRouteQuotaNoUsageTracker(t *testing.T) {
+	backend := echoBackend()
+	defer backend.Close()
+
+	ks := newKeyStore()
+	ks.setConfig("test", KeyConfig{
+		Key:       "sk-test-key",
+		Header:    "Authorization",
+		MaxReqs:   3,
+		MaxTokens: 100,
+	})
+
+	// 设置 settingsMgr 确保能转发
+	oldSettings := settingsMgr
+	settingsMgr = newSettingsManager() // 空 = 不限制
+	defer func() { settingsMgr = oldSettings }()
+
+	stats := newStatsCollector()
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if strings.HasPrefix(req.URL.Path, "/k/") {
+			// 传 nil usageTracker → handleKeyRoute 跳过 quota check
+			handleKeyRoute(w, req, ks, stats, nil)
+			return
+		}
+		newProxyHandler(stats, nil, "", nil, nil).ServeHTTP(w, req)
+	}))
+	defer proxy.Close()
+
+	resp, err := http.Get(proxy.URL + "/k/test/" + backend.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	// 不应 panic,应正常转发(即使没有 usageTracker)
+	t.Logf("usageTracker=nil 时状态码 = %d", resp.StatusCode)
+}
+
+// TestKeyRouteQuotaRetryAfter 验证 quota 超限后 Retry-After header 格式正确。
+func TestKeyRouteQuotaRetryAfter(t *testing.T) {
+	ks := newKeyStore()
+	ks.setConfig("test", KeyConfig{
+		Key:     "sk-test-key",
+		Header:  "Authorization",
+		MaxReqs: 1,
+		Window:  "5m",
+	})
+
+	oldSettings := settingsMgr
+	settingsMgr = newSettingsManager()
+	defer func() { settingsMgr = oldSettings }()
+
+	oldTracker := usageTracker
+	usageTracker = newUsageStats()
+	defer func() { usageTracker = oldTracker }()
+
+	stats := newStatsCollector()
+	us := usageTracker
+
+	// 预填:已达上限
+	us.recordSuccess("test")
+
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if strings.HasPrefix(req.URL.Path, "/k/") {
+			handleKeyRoute(w, req, ks, stats, us)
+			return
+		}
+		newProxyHandler(stats, nil, "", nil, nil).ServeHTTP(w, req)
+	}))
+	defer proxy.Close()
+
+	resp, err := http.Get(proxy.URL + "/k/test/https://api.example.com/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusPaymentRequired {
+		t.Errorf("超限状态码 = %d, 期望 402", resp.StatusCode)
+	}
+	retryAfter := resp.Header.Get("Retry-After")
+	if retryAfter == "" {
+		t.Fatal("应包含 Retry-After header")
+	}
+	// Retry-After 应是数字(秒数)
+	var seconds float64
+	if _, err := fmt.Sscanf(retryAfter, "%f", &seconds); err != nil || seconds <= 0 {
+		t.Errorf("Retry-After 应为正数(秒), got %q", retryAfter)
+	}
+}
+
+// TestKeyRouteRecordSuccessOnSuccess 验证成功请求后 recordSuccess 被正确调用。
+func TestKeyRouteRecordSuccessOnSuccess(t *testing.T) {
+	backend := echoBackend()
+	defer backend.Close()
+
+	ks := newKeyStore()
+	ks.setConfig("test", KeyConfig{
+		Key:     "sk-test-key",
+		Header:  "Authorization",
+		MaxReqs: 5, // 留空间
+	})
+
+	oldSettings := settingsMgr
+	settingsMgr = newSettingsManager()
+	defer func() { settingsMgr = oldSettings }()
+
+	oldTracker := usageTracker
+	usageTracker = newUsageStats()
+	defer func() { usageTracker = oldTracker }()
+
+	stats := newStatsCollector()
+	us := usageTracker
+
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if strings.HasPrefix(req.URL.Path, "/k/") {
+			handleKeyRoute(w, req, ks, stats, us)
+			return
+		}
+		newProxyHandler(stats, nil, "", nil, nil).ServeHTTP(w, req)
+	}))
+	defer proxy.Close()
+
+	// 发 2 次成功请求
+	for i := 0; i < 2; i++ {
+		resp, err := http.Get(proxy.URL + "/k/test/" + backend.URL + "/")
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+	}
+
+	snap := usageTracker.snapshot()
+	s, ok := snap["test"]
+	if !ok {
+		t.Fatal("snapshot 应包含 test alias")
+	}
+	if s.WindowSuccess < 2 {
+		t.Errorf("WindowSuccess 应 >= 2, got %d", s.WindowSuccess)
+	}
+	t.Logf("成功请求后 WindowSuccess=%d", s.WindowSuccess)
+}
+
+// TestKeyRouteRecordErrorOnFailure 验证后端 4xx 响应被 recordError 记录。
+func TestKeyRouteRecordErrorOnFailure(t *testing.T) {
+	// 后端:返回 500
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer backend.Close()
+
+	ks := newKeyStore()
+	ks.setConfig("test", KeyConfig{
+		Key:    "sk-test-key",
+		Header: "Authorization",
+	})
+
+	oldSettings := settingsMgr
+	settingsMgr = newSettingsManager()
+	defer func() { settingsMgr = oldSettings }()
+
+	oldTracker := usageTracker
+	usageTracker = newUsageStats()
+	defer func() { usageTracker = oldTracker }()
+
+	stats := newStatsCollector()
+	us := usageTracker
+
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if strings.HasPrefix(req.URL.Path, "/k/") {
+			handleKeyRoute(w, req, ks, stats, us)
+			return
+		}
+		newProxyHandler(stats, nil, "", nil, nil).ServeHTTP(w, req)
+	}))
+	defer proxy.Close()
+
+	resp, err := http.Get(proxy.URL + "/k/test/" + backend.URL + "/fail")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	snap := usageTracker.snapshot()
+	s, ok := snap["test"]
+	if !ok {
+		t.Fatal("snapshot 应包含 test alias")
+	}
+	if s.Errors < 1 {
+		t.Errorf("Errors 应 >= 1, got %d", s.Errors)
+	}
+	t.Logf("错误请求后 Errors=%d", s.Errors)
 }

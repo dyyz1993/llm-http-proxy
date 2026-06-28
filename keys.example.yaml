@@ -18,12 +18,20 @@
 #   - 其他 → Authorization: Bearer
 # 一个 alias 一个 key,同时兼容 OpenAI 和 Anthropic 两种接口。
 
-glm:
-  key: "你的GLM真实key"
-  # header 不写 = 自动检测(推荐)
-  # 路径含 /anthropic/ → x-api-key,否则 → Authorization: Bearer
-  rate: 60    # 每分钟最多 60 次(可选,不写则不限流)
-  burst: 10   # 突发上限 10(可选)
+	glm:
+	  key: "你的GLM真实key"
+	  # header 不写 = 自动检测(推荐)
+	  # 路径含 /anthropic/ → x-api-key,否则 → Authorization: Bearer
+	  rate: 60        # 每分钟最多 60 次(可选,不写则不限流)
+	  burst: 10       # 突发上限 10(可选)
+	  # 用量限额(可选,不写/0=不限):
+	  max_tokens: 10000000    # 每个窗口期内最多 1 千万 token(输入+输出)
+	  max_requests: 5000      # 每个窗口期内最多 5000 次成功请求
+	  window: 24h             # 窗口期时长: 5h / 24h / 7d / 30d(空=默认100天=硬上限)
+	  # 禁止时段(可选,北京时间,每天重复):
+	  # time_block:
+	  #   start: "22:00"    # 每天22:00开始禁止
+	  #   end: "08:00"      # 次日08:00结束禁止
 
 # === 显式指定 header(向后兼容老配置) ===
 # 如果你想固定用某个 header,也可以显式写:
@@ -38,3 +46,74 @@ claude:
 internal:
   key: "sk-内部key"
   # 不写 rate/burst 即不限流
+
+# === 全局 image_url 过滤规则(v2.6.0+) ===
+#
+# 某些 LLM 模型(如 DeepSeek)不支持 image_url 类型的内容块,请求含图片会报错。
+# 配置 image_filter 规则后,代理会自动将 image_url 块替换为 [Image] 文本占位符。
+#
+# 匹配方式:
+#   models  — 按请求 body 中的 model 字段匹配(子串匹配,大小写不敏感)
+#   domains — 按上游目标域名匹配(子串匹配,大小写不敏感)
+#   两者都设置时需同时满足(AND)
+#
+# action:
+#   to_text — 替换 image_url 为 [Image] 文本(推荐)
+#   strip   — 直接删除 image_url 块
+#
+# 示例:对 DeepSeek 模型的所有请求自动过滤图片
+# image_filter:
+#   - models: ["deepseek-chat", "deepseek-coder"]
+#     action: to_text
+#
+# 示例:对所有走 api.deepseek.com 的请求过滤图片
+# image_filter:
+#   - domains: ["api.deepseek.com"]
+#     action: to_text
+#
+# 示例:同时按模型和域名过滤(双重条件)
+# image_filter:
+#   - models: ["deepseek-chat"]
+#     domains: ["api.deepseek.com"]
+#     action: to_text
+
+
+# === 全局 Token 用量乘数规则(v2.7.0+) ===
+#
+# 某些模型计费特殊(如按实际用量×3计费),可配置乘数规则。
+# 规则匹配后,该请求的 Prompt/Cached/Completion token 和费用全部乘以乘数。
+# 多条规则同时命中时,乘数相乘叠加。
+#
+# 匹配方式:
+#   models  — 按模型名 glob 匹配(大小写不敏感),如 "glm-5*"
+#   domains — 按上游目标域名 glob 匹配(大小写不敏感),如 "*.bigmodel.cn"
+#   两者都设置时需同时满足(AND)
+#   models/domains 不写或空列表 = 匹配所有
+#
+# multiply:
+#   >1 — 放大(如计费×3)
+#   =1 — 不变
+#    0 — 免费(不计费)
+#
+# 示例:GLM-5 系列模型计费×3
+# token_multipliers:
+#   - models: ["glm-5*"]
+#     multiply: 3.0
+#
+# 示例:Claude Opus 走 Anthropic 时计费×2
+# token_multipliers:
+#   - models: ["claude-3-opus*"]
+#     domains: ["api.anthropic.com"]
+#     multiply: 2.0
+#
+# 示例:多条规则叠加(glm-5* 走 bigmodel.cn 时 = 2.0 × 1.5 = 3.0 倍)
+# token_multipliers:
+#   - models: ["glm-5*"]
+#     multiply: 2.0
+#   - domains: ["*.bigmodel.cn"]
+#     multiply: 1.5
+#
+# 示例:特定域名下所有模型免费
+# token_multipliers:
+#   - domains: ["free-test.example.com"]
+#     multiply: 0

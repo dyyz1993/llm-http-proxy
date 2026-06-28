@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -202,10 +203,10 @@ func TestBuildUsageHTMLHighCache(t *testing.T) {
 	}
 	// 不应 panic
 	assertNotPanic(t, func() {
-		_ = buildUsageHTML(snap)
+		_ = buildUsageHTML(snap, nil)
 	})
 
-	html := buildUsageHTML(snap)
+	html := buildUsageHTML(snap, nil)
 	if !strings.Contains(html, "max-0") {
 		t.Error("应包含 max-0 alias")
 	}
@@ -544,7 +545,7 @@ func TestProxyNonStreamUsageCapture(t *testing.T) {
 
 	stats := newStatsCollector()
 	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		newProxyHandler(stats, nil, "").ServeHTTP(w, req)
+		newProxyHandler(stats, nil, "", nil, nil).ServeHTTP(w, req)
 	}))
 	defer proxy.Close()
 
@@ -623,5 +624,393 @@ data: [DONE]
 	u := extractUsage(body)
 	if u.Model != "glm-4.6" {
 		t.Errorf("OpenAI SSE Model = %q, want glm-4.6", u.Model)
+	}
+}
+
+// --- Quota / 限额 测试 ---
+
+// TestCheckQuotaNoLimit 验证未配置限额时永远允许。
+func TestCheckQuotaNoLimit(t *testing.T) {
+	us := newUsageStats()
+	cfg := KeyConfig{Key: "sk-test"} // HasQuota() == false
+
+	ok, reason, _ := us.checkQuota("test-alias", cfg)
+	if !ok {
+		t.Errorf("未配置限额时应允许, 但被拒绝: %s", reason)
+	}
+}
+
+// TestCheckQuotaUnderLimit 验证未超限时允许。
+func TestCheckQuotaUnderLimit(t *testing.T) {
+	us := newUsageStats()
+	cfg := KeyConfig{MaxReqs: 10, MaxTokens: 1000}
+
+	// 先记录一点用量
+	us.recordSuccess("test-alias")
+	us.record("test-alias", usageData{HasData: true, Prompt: 50, Completion: 30})
+
+	ok, reason, _ := us.checkQuota("test-alias", cfg)
+	if !ok {
+		t.Errorf("未超限时应允许, 但被拒绝: %s", reason)
+	}
+}
+
+// TestCheckQuotaReqsExceeded 验证请求次数超限时拒绝。
+func TestCheckQuotaReqsExceeded(t *testing.T) {
+	us := newUsageStats()
+	cfg := KeyConfig{MaxReqs: 5, Window: "1h"}
+
+	// 已达上限
+	for i := int64(0); i < 5; i++ {
+		us.recordSuccess("test-alias")
+	}
+
+	ok, reason, retryAfter := us.checkQuota("test-alias", cfg)
+	if ok {
+		t.Fatal("请求次数超限时应拒绝, 但被允许")
+	}
+	if retryAfter <= 0 {
+		t.Errorf("应返回 retryAfter > 0, 但 got %v", retryAfter)
+	}
+	t.Logf("拒绝原因: %s, retryAfter: %v", reason, retryAfter)
+}
+
+// TestCheckQuotaTokensExceeded 验证 token 用量超限时拒绝。
+func TestCheckQuotaTokensExceeded(t *testing.T) {
+	us := newUsageStats()
+	cfg := KeyConfig{MaxTokens: 100, Window: "1h"}
+
+	// 已达上限
+	us.record("test-alias", usageData{HasData: true, Prompt: 60, Completion: 40})
+	us.recordSuccess("test-alias")
+
+	ok, reason, retryAfter := us.checkQuota("test-alias", cfg)
+	if ok {
+		t.Fatal("用量超限时应拒绝, 但被允许")
+	}
+	if retryAfter <= 0 {
+		t.Errorf("应返回 retryAfter > 0, 但 got %v", retryAfter)
+	}
+	t.Logf("拒绝原因: %s, retryAfter: %v", reason, retryAfter)
+}
+
+// TestCheckQuotaHardLimit 验证硬上限(默认 100d 窗口)不自动重置。
+func TestCheckQuotaHardLimit(t *testing.T) {
+	us := newUsageStats()
+	cfg := KeyConfig{MaxReqs: 3} // 无 window, 默认 100 天
+
+	for i := int64(0); i < 3; i++ {
+		us.recordSuccess("test-alias")
+	}
+
+	ok, _, _ := us.checkQuota("test-alias", cfg)
+	if ok {
+		t.Fatal("硬上限超限时应拒绝, 但被允许")
+	}
+}
+
+// TestCheckQuotaWindowReset 验证窗口过期后自动重置。
+func TestCheckQuotaWindowReset(t *testing.T) {
+	us := newUsageStats()
+	// 用一个极短的窗口(10ms 就过期)
+	cfg := KeyConfig{MaxReqs: 2, Window: "10ms"}
+
+	// 填满窗口
+	us.recordSuccess("test-alias")
+	us.recordSuccess("test-alias")
+
+	ok, _, _ := us.checkQuota("test-alias", cfg)
+	if ok {
+		t.Fatal("窗口未过期时应拒绝, 但被允许")
+	}
+
+	// 等窗口过期
+	time.Sleep(15 * time.Millisecond)
+
+	ok, reason, _ := us.checkQuota("test-alias", cfg)
+	if !ok {
+		t.Errorf("窗口过期后应自动重置并允许, 但被拒绝: %s", reason)
+	}
+}
+
+// TestCheckQuotaMixedLimits 验证同时配置两种限额时,先达到的优先拒绝。
+func TestCheckQuotaMixedLimits(t *testing.T) {
+	us := newUsageStats()
+	// 请求上限 3, token 上限 100。先达 token 上限。
+	cfg := KeyConfig{MaxReqs: 3, MaxTokens: 100}
+
+	us.record("test-alias", usageData{HasData: true, Prompt: 80, Completion: 30})
+	us.recordSuccess("test-alias")
+
+	ok, _, _ := us.checkQuota("test-alias", cfg)
+	if ok {
+		t.Fatal("token 超限时应拒绝, 但被允许")
+	}
+}
+
+// TestRecordSuccess 验证 recordSuccess 正确累加窗口计数器。
+func TestRecordSuccess(t *testing.T) {
+	us := newUsageStats()
+
+	us.recordSuccess("test-alias")
+	us.recordSuccess("test-alias")
+	us.recordSuccess("test-alias")
+
+	snap := us.snapshot()
+	s, ok := snap["test-alias"]
+	if !ok {
+		t.Fatal("应存在 test-alias")
+	}
+	if s.WindowSuccess != 3 {
+		t.Errorf("WindowSuccess = %d, want 3", s.WindowSuccess)
+	}
+}
+
+// ---------- 窗口时长解析 / 友好格式 / recordError / 边界测试 ----------
+
+// TestParseWindowDuration 验证 parseWindowDuration 各种格式。
+func TestParseWindowDuration(t *testing.T) {
+	tests := []struct {
+		input string
+		want  time.Duration
+		err   bool
+	}{
+		{"", 0, true}, // 空 → 报错
+		{"5h", 5 * time.Hour, false},
+		{"1h", 1 * time.Hour, false},
+		{"24h", 24 * time.Hour, false},
+		{"7d", 7 * 24 * time.Hour, false},
+		{"30d", 30 * 24 * time.Hour, false},
+		{"100d", 100 * 24 * time.Hour, false},
+		{"1d", 1 * 24 * time.Hour, false},
+		{"100000d", 100000 * 24 * time.Hour, false},
+		{"abc", 0, true},
+		{"1.5h", 90 * time.Minute, false}, // Go time.ParseDuration 支持小数
+		{"-5h", -5 * time.Hour, false},    // Go time.ParseDuration 支持负数
+		{"0d", 0, false},                  // 0 days is valid
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got, err := parseWindowDuration(tt.input)
+			if tt.err {
+				if err == nil {
+					t.Errorf("parseWindowDuration(%q) 应报错, got %v", tt.input, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Errorf("parseWindowDuration(%q) 不应报错: %v", tt.input, err)
+				return
+			}
+			if got != tt.want {
+				t.Errorf("parseWindowDuration(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestWindowDurationDefault 验证 WindowDuration() 的默认值和错误回退。
+func TestWindowDurationDefault(t *testing.T) {
+	defaultDur := 100 * 24 * time.Hour
+
+	// 空 Window → 默认 100 天
+	if d := (KeyConfig{}).WindowDuration(); d != defaultDur {
+		t.Errorf("空 Window = %v, want %v", d, defaultDur)
+	}
+	// Window="invalid" → 默认 100 天
+	if d := (KeyConfig{Window: "invalid"}).WindowDuration(); d != defaultDur {
+		t.Errorf("无效 Window = %v, want %v", d, defaultDur)
+	}
+	// Window="5h" → 5h
+	if d := (KeyConfig{Window: "5h"}).WindowDuration(); d != 5*time.Hour {
+		t.Errorf("5h = %v, want %v", d, 5*time.Hour)
+	}
+}
+
+// TestFriendlyDuration 验证友好时长格式(中文输出)。
+func TestFriendlyDuration(t *testing.T) {
+	tests := []struct {
+		d    time.Duration
+		want string
+	}{
+		{0, "0分钟"},
+		{30 * time.Minute, "30分钟"},
+		{1 * time.Hour, "1小时"},
+		{2*time.Hour + 30*time.Minute, "2小时30分钟"},
+		{25 * time.Hour, "1天1小时"},
+		{7 * 24 * time.Hour, "7天"},
+		{100 * 24 * time.Hour, "100天"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.want, func(t *testing.T) {
+			if got := friendlyDuration(tt.d); got != tt.want {
+				t.Errorf("friendlyDuration(%v) = %q, want %q", tt.d, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestRecordError 验证 recordError 正确累加错误计数。
+func TestRecordError(t *testing.T) {
+	us := newUsageStats()
+
+	// 空 alias/空 statKey → 忽略
+	us.recordError("")
+	us.recordError("-")
+
+	us.recordError("glm")
+	us.recordError("glm")
+	us.recordError("claude")
+
+	snap := us.snapshot()
+	if g, ok := snap["glm"]; !ok {
+		t.Fatal("glm 应存在")
+	} else if g.Errors != 2 {
+		t.Errorf("glm Errors = %d, want 2", g.Errors)
+	}
+	if g, ok := snap["claude"]; !ok {
+		t.Fatal("claude 应存在")
+	} else if g.Errors != 1 {
+		t.Errorf("claude Errors = %d, want 1", g.Errors)
+	}
+	// 空 alias 不应产生条目
+	if len(snap) != 2 {
+		t.Errorf("snapshot 条目数 = %d, want 2 (空 alias 不应创建条目)", len(snap))
+	}
+}
+
+// TestRecordErrorAfterRecord 验证 record 后 recordError 不丢失统计数据。
+func TestRecordErrorAfterRecord(t *testing.T) {
+	us := newUsageStats()
+	us.record("glm", usageData{HasData: true, Prompt: 100, Completion: 50})
+	us.recordError("glm")
+
+	snap := us.snapshot()
+	s := snap["glm"]
+	if s.Prompt != 100 {
+		t.Errorf("Prompt = %d, want 100", s.Prompt)
+	}
+	if s.Errors != 1 {
+		t.Errorf("Errors = %d, want 1", s.Errors)
+	}
+}
+
+// TestCheckQuotaEdgeCase_ZeroLimits 验证 HasQuota=false 时不检查。
+func TestCheckQuotaEdgeCase_ZeroLimits(t *testing.T) {
+	us := newUsageStats()
+	cfg := KeyConfig{MaxReqs: 0, MaxTokens: 0} // HasQuota=false
+
+	ok, reason, _ := us.checkQuota("test", cfg)
+	if !ok {
+		t.Errorf("0 限额应允许, 但被拒绝: %s", reason)
+	}
+}
+
+// TestCheckQuotaEdgeCase_NoRecordBefore 验证从未记录过统计的 alias 自动创建。
+func TestCheckQuotaEdgeCase_NoRecordBefore(t *testing.T) {
+	us := newUsageStats()
+	cfg := KeyConfig{MaxReqs: 5, Window: "1h"}
+
+	// 从未 record 过,直接 checkQuota → 应自动创建条目,允许通过
+	ok, reason, _ := us.checkQuota("new-alias", cfg)
+	if !ok {
+		t.Errorf("新 alias 应自动创建并允许, 但被拒绝: %s", reason)
+	}
+
+	// snapshot 里应包含新 alias
+	snap := us.snapshot()
+	if _, exists := snap["new-alias"]; !exists {
+		t.Error("checkQuota 后 snapshot 应包含 new-alias")
+	}
+}
+
+// TestCheckQuota_SuccessCountDoesntAffectTokenLimit 验证成功计数不影响 token 限额。
+func TestCheckQuota_SuccessCountDoesntAffectTokenLimit(t *testing.T) {
+	us := newUsageStats()
+	cfg := KeyConfig{MaxTokens: 100}
+
+	// 产生大量成功请求(不消耗 token)
+	for i := int64(0); i < 1000; i++ {
+		us.recordSuccess("test")
+	}
+
+	// token 用量为 0,不应被拒绝
+	ok, reason, _ := us.checkQuota("test", cfg)
+	if !ok {
+		t.Errorf("只有成功计数不应触发 token 限额: %s", reason)
+	}
+}
+
+// TestCheckQuota_TokensCombo 验证 prompt+cached+completion 合计计入 MaxTokens。
+func TestCheckQuota_TokensCombo(t *testing.T) {
+	us := newUsageStats()
+	cfg := KeyConfig{MaxTokens: 500}
+
+	us.record("test", usageData{HasData: true, Prompt: 200, Cached: 100, Completion: 150})
+
+	ok, _, _ := us.checkQuota("test", cfg)
+	if !ok {
+		t.Fatal("合计 450 < 500, 应允许")
+	}
+
+	// 再来一次,现在合计 > 500
+	us.record("test", usageData{HasData: true, Prompt: 100, Cached: 0, Completion: 50})
+
+	ok, reason, _ := us.checkQuota("test", cfg)
+	if ok {
+		t.Fatal("合计 600 >= 500, 应拒绝")
+	}
+	t.Logf("拒绝原因: %s", reason)
+}
+
+// TestCheckQuota_LongDurationNoOverflow 验证超大窗口不溢出。
+func TestCheckQuota_LongDurationNoOverflow(t *testing.T) {
+	us := newUsageStats()
+	cfg := KeyConfig{MaxReqs: 1, Window: "100000d"}
+
+	// 填满(1 次成功)
+	us.recordSuccess("test")
+
+	// 应被拒绝
+	ok, reason, retryAfter := us.checkQuota("test", cfg)
+	if ok {
+		t.Fatal("100000d 窗口应拒绝超额请求")
+	}
+	if retryAfter <= 0 {
+		t.Errorf("retryAfter 应 > 0, got %v", retryAfter)
+	}
+	t.Logf("拒绝原因: %s, retryAfter: %v", reason, retryAfter)
+}
+
+// TestCheckQuota_Concurrent 并发调用 checkQuota / recordSuccess / record 无 data race。
+func TestCheckQuota_Concurrent(t *testing.T) {
+	us := newUsageStats()
+	cfg := KeyConfig{MaxReqs: 1000, MaxTokens: 1000000, Window: "1h"}
+
+	var wg sync.WaitGroup
+	// 20 个 goroutine 同时读写
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				us.recordSuccess("concurrent")
+				us.record("concurrent", usageData{HasData: true, Prompt: 10, Completion: 5})
+				us.recordError("concurrent")
+				ok, reason, _ := us.checkQuota("concurrent", cfg)
+				_ = ok
+				_ = reason
+			}
+		}()
+	}
+	wg.Wait()
+
+	snap := us.snapshot()
+	s := snap["concurrent"]
+	// 只是大致验证:20*50=1000 次成功,但可能窗口重置了,只检查不 panic
+	t.Logf("并发后: WindowSuccess=%d, Prompt=%d, Errors=%d",
+		s.WindowSuccess, s.Prompt, s.Errors)
+	if s.Prompt == 0 {
+		t.Error("并发后 Prompt 不应为 0")
 	}
 }

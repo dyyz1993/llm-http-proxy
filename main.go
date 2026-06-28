@@ -70,10 +70,8 @@ var (
 	buildTime = "unknown"
 	startTime = time.Now() // 进程启动时即记录
 
-	// allowDomains 是全局域名白名单(key 注入模式下只允许代理到这些域名)。
-	// 防止有人把请求指向自己的网站,利用代理注入的真实 key 造成泄露。
-	// 为空时表示不限制(仅限内网/受信环境)。
-	allowDomains map[string]bool
+	// settingsMgr 管理运行时可修改的服务设置（域名白名单等）。
+	settingsMgr *settingsManager
 
 	// usageTracker 按 alias 聚合 token 用量统计(prompt/cached/completion)。
 	// 在 proxy handler 里异步解析响应里的 usage 字段后记录,不影响转发延迟。
@@ -90,20 +88,28 @@ func main() {
 	flag.Parse()
 
 	// 解析域名白名单:-flag 优先,其次 ALLOW_DOMAINS 环境变量
+	var cliDomains []string
 	allowSrc := *allowDom
 	if allowSrc == "" {
 		allowSrc = os.Getenv("ALLOW_DOMAINS")
 	}
 	if allowSrc != "" {
-		allowDomains = make(map[string]bool)
 		for _, d := range strings.Split(allowSrc, ",") {
-			d = strings.TrimSpace(strings.ToLower(d))
+			d = strings.TrimSpace(d)
 			if d != "" {
-				allowDomains[d] = true
+				cliDomains = append(cliDomains, d)
 			}
 		}
-		log.Printf("域名白名单已启用: %d 个域名", len(allowDomains))
+		log.Printf("域名白名单已启用: %d 个域名", len(cliDomains))
 	}
+	// 初始化运行时设置管理器
+	settingsMgr = newSettingsManager()
+	if settingsPath := persistSettingsPath(*persist); settingsPath != "" {
+		if err := settingsMgr.load(settingsPath); err != nil {
+			log.Printf("读取设置持久化失败(将从头开始): %v", err)
+		}
+	}
+	settingsMgr.mergeFromCLI(cliDomains)
 
 	if *ver {
 		fmt.Printf("llm-http-proxy %s (built %s)\n", version, buildTime)
@@ -136,6 +142,10 @@ func main() {
 			log.Printf("已从 %s 读回历史 usage 统计", usagePath)
 		}
 		usageTracker.startPersistLoop(usagePath, 30*time.Second)
+
+		// settings 持久化(独立文件,与 stats/usage 共用同一基础路径)
+		settingsPath := *persist + ".settings"
+		settingsMgr.startPersistLoop(settingsPath, 30*time.Second)
 	}
 
 	// key 注入模式:加载 keys.yaml + 启动热加载
@@ -160,7 +170,7 @@ func main() {
 	// 管理界面(密码非空才启用)
 	var admin *adminServer
 	if adminPassword != "" {
-		admin = newAdminServer(adminPassword, stats, ks, quotaCacheInst, usageTracker)
+		admin = newAdminServer(adminPassword, stats, ks, quotaCacheInst, usageTracker, settingsMgr, *addr, *persist, *keys)
 		log.Printf("管理界面已启用: http://localhost%s/__admin", *addr)
 	}
 
@@ -194,11 +204,15 @@ func main() {
 			return
 		case ks != nil && strings.HasPrefix(req.URL.Path, "/k/"):
 			// key 注入模式:/k/{alias}/https://目标
-			handleKeyRoute(w, req, ks, stats)
+			handleKeyRoute(w, req, ks, stats, usageTracker)
 			return
 		default:
 			// 纯透传模式:/https://目标
-			newProxyHandler(stats, nil, "").ServeHTTP(w, req)
+			ctx := &CheckContext{
+				Store: ks,
+			}
+			runChecks(w, passthroughChecks, ctx)
+			newProxyHandler(stats, nil, "", ctx.ImageFilter, ctx.TokenMultipliers).ServeHTTP(w, req)
 		}
 	})
 
@@ -332,9 +346,10 @@ func serveHelp(w http.ResponseWriter, alias string) {
 }
 
 // handleKeyRoute 处理 key 注入模式: /k/{alias}/https://目标
-// 从 keyStore 查 alias 配置,限流检查,注入真实 key 到 header,然后走转发。
+// 从 keyStore 查 alias 配置,经拦截器链(禁止时段/用量限额/限流/白名单)审查,
+// 通过后注入真实 key 到 header,然后走转发。
 // 用户不需要带 key(带了也会被配置的 key 覆盖)。
-func handleKeyRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, stats *statsCollector) {
+func handleKeyRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, stats *statsCollector, us *usageStats) {
 	// 原始 RequestURI 形如: /k/glm/https://open.bigmodel.cn/api/...
 	// 去掉前导 / 得: k/glm/https://open.bigmodel.cn/api/...
 	raw := strings.TrimPrefix(req.RequestURI, "/")
@@ -374,37 +389,27 @@ func handleKeyRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, stat
 		return
 	}
 
-	// 限流检查
-	if !ks.allow(alias) {
-		w.Header().Set("Retry-After", "60")
-		http.Error(w, "请求过于频繁,请稍后重试 (alias: "+alias+")\n", http.StatusTooManyRequests)
+	// 构建拦截器上下文
+	ctx := &CheckContext{
+		Alias:    alias,
+		Target:   target,
+		Domain:   extractDomain(target),
+		Config:   cfg,
+		Request:  req,
+		Store:    ks,
+		Usage:    us,
+		Settings: settingsMgr,
+	}
+
+	// 走拦截器链
+	if !runChecks(w, keyRouteChecks, ctx) {
 		return
 	}
 
-	// 域名白名单检查:提取目标域名,不在白名单内则拒绝(防 key 泄露)
-	targetDomain := extractDomain(target)
-	if len(allowDomains) > 0 && !allowDomains[targetDomain] {
-		log.Printf("拒绝代理: 目标域名 %q 不在白名单 (alias=%s)", targetDomain, alias)
-		http.Error(w, "目标域名不在白名单: "+targetDomain+"\n", http.StatusForbidden)
-		return
-	}
-
-	// 构造注入 header(自动模式:客户端带了什么就替换什么)
-	inject := pickHeader(cfg, req.Header)
-	if len(inject) == 0 {
-		// 客户端没带 x-api-key 也没带 Authorization → 不注入,直接透传
-		// (上游会用客户端自己的 header,通常没 key 会被拒)
-	}
-
-	// 重写 RequestURI 让 newProxyHandler 解析出正确的 target。
-	// 直接改原 req(本函数之后不再用它),避免 Clone 不复制 Body 导致 POST body 丢失。
-	// 注意: http.Request.Clone 文档明确 Body 不会被克隆(io.Reader 不可复制),
-	// 所以 GET(无 body)能过但 POST 会丢 body。直接改原 req 最可靠。
+	// 全部通过,转发
 	req.RequestURI = "/" + target
-	// 统计标签用 alias(如 "glm"),不暴露真实 key
-	statLabel := "key:" + alias
-
-	newProxyHandler(stats, inject, statLabel).ServeHTTP(w, req)
+	newProxyHandler(stats, ctx.HeadersToInject, ctx.StatLabel,
+		ctx.ImageFilter, ctx.TokenMultipliers).ServeHTTP(w, req)
 }
 
 // sharedTransport / sharedClient 是全局共享的连接池。
@@ -421,7 +426,9 @@ var sharedClient = &http.Client{Transport: sharedTransport}
 // stats 非 nil 时,记录每次请求的 IP/掩码key/状态码统计。
 // injectHeaders 非 nil 时(key 注入模式),这些 header 会在转发前覆盖进请求头。
 // statKeyLabel 用于统计里替代掩码 key 显示(如 key 注入模式显示 alias "glm")。
-func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLabel string) http.Handler {
+// imageFilter 是 image_url 过滤规则,非空时在转发前过滤请求 body。
+// tokenMultipliers 是 Token 用量乘数规则,在提取 usage 后应用。
+func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLabel string, imageFilter []ImageFilterRule, tokenMultipliers []TokenMultiplierRule) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		raw := strings.TrimPrefix(req.RequestURI, "/")
 		if raw == "" || !strings.Contains(raw, "://") {
@@ -450,18 +457,30 @@ func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLa
 			handleWebSocket(rec, req, raw)
 			if stats != nil {
 				stats.record(ip, statKey, targetHost, rec.status)
-				logRequest(ip, statKey, req.Method, targetHost, rec.status, time.Since(start), 0, false, usageData{})
+				logRequest(ip, statKey, req.Method, targetHost, rec.status, time.Since(start), 0, false, usageData{}, false)
 			}
 			return
 		}
 
 		// 普通 HTTP:原样转发
-		outReq, err := http.NewRequestWithContext(req.Context(), req.Method, raw, req.Body)
+		// body 过滤(image_url → text):只对配置了 image_filter 规则的请求生效
+		bodyReader := req.Body
+		contentLength := req.ContentLength
+		imageFiltered := false
+		if len(imageFilter) > 0 {
+			newBody, newLen, modified := filterImageBlocks(req.Body, imageFilter, targetHost)
+			if newLen >= 0 {
+				bodyReader = newBody
+				contentLength = newLen
+				imageFiltered = modified
+			}
+		}
+		outReq, err := http.NewRequestWithContext(req.Context(), req.Method, raw, bodyReader)
 		if err != nil {
 			http.Error(rec, "目标 URL 无法解析: "+err.Error(), http.StatusBadRequest)
 			if stats != nil {
 				stats.record(ip, statKey, targetHost, rec.status)
-				logRequest(ip, statKey, req.Method, targetHost, rec.status, time.Since(start), 0, false, usageData{})
+				logRequest(ip, statKey, req.Method, targetHost, rec.status, time.Since(start), 0, false, usageData{}, false)
 			}
 			return
 		}
@@ -472,8 +491,8 @@ func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLa
 				outReq.Header[k] = vs
 			}
 		}
-		stripProxyHeaders(outReq.Header)         // 剥离上游网关注入的反代特征头,保持原始性
-		outReq.ContentLength = req.ContentLength // 显式带上 body 长度,避免 body 不被发送
+		stripProxyHeaders(outReq.Header)     // 剥离上游网关注入的反代特征头,保持原始性
+		outReq.ContentLength = contentLength // 显式带上 body 长度,避免 body 不被发送
 
 		resp, err := sharedClient.Do(outReq)
 		if err != nil {
@@ -489,7 +508,7 @@ func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLa
 			http.Error(rec, "转发失败: "+err.Error(), status)
 			if stats != nil {
 				stats.record(ip, statKey, targetHost, rec.status)
-				logRequest(ip, statKey, req.Method, targetHost, rec.status, time.Since(start), 0, false, usageData{})
+				logRequest(ip, statKey, req.Method, targetHost, rec.status, time.Since(start), 0, false, usageData{}, false)
 			}
 			return
 		}
@@ -614,6 +633,22 @@ func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLa
 				}
 				// 即使费用计算失败(模型不在定价表),也照常记录 token 用量
 
+				// Token 用量乘数: 按模型名+域名匹配,乘数作用于 Prompt/Cached/Completion 和费用
+				if len(tokenMultipliers) > 0 && u.HasData {
+					m := applyTokenMultiplier(tokenMultipliers, u.Model, targetHost)
+					if m != 1.0 {
+						u.Multiplier = m
+						u.Prompt = int64(float64(u.Prompt) * m)
+						u.Cached = int64(float64(u.Cached) * m)
+						u.Completion = int64(float64(u.Completion) * m)
+						u.InputCost *= m
+						u.OutputCost *= m
+						u.TotalCost *= m
+						log.Printf("用量乘数: alias=%s model=%q host=%s multiplier=%.2f prompt=%d cached=%d completion=%d cost=%.6f",
+							statKey, u.Model, targetHost, m, u.Prompt, u.Cached, u.Completion, u.TotalCost)
+					}
+				}
+
 				// 统计分组:别名模式用别名,透传模式用掩码 key
 				alias := statKey
 				if strings.HasPrefix(statKey, "key:") {
@@ -637,8 +672,15 @@ func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLa
 				alias = strings.TrimPrefix(statKey, "key:")
 			}
 			usageTracker.recordError(alias)
+		} else if usageTracker != nil && rec.status >= 200 && rec.status < 400 {
+			// 成功请求(2xx/3xx)记录到窗口计数器(用于用量限额)
+			alias := statKey
+			if strings.HasPrefix(statKey, "key:") {
+				alias = strings.TrimPrefix(statKey, "key:")
+			}
+			usageTracker.recordSuccess(alias)
 		}
-		logRequest(ip, statKey, req.Method, targetHost, rec.status, time.Since(start), ttfb, isStream, u)
+		logRequest(ip, statKey, req.Method, targetHost, rec.status, time.Since(start), ttfb, isStream, u, imageFiltered)
 	})
 }
 

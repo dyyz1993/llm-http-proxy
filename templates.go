@@ -160,13 +160,15 @@ function copyURL(alias) {
 	<body>{{template "nav"}}
 	<h2>最近日志 ({{len .}} 条)</h2>
 	{{if not .}}<p>暂无日志。</p>{{else}}
-	<div class="table-wrap"><table style="font-size:13px">
-	<tr><th>时间</th><th>IP</th><th>Key</th><th>Method</th><th>Host</th><th>Status</th><th>TTFB</th><th>耗时</th><th>流式</th><th>输入</th><th>缓存</th><th>输出</th><th>命中率</th><th>输入费用</th><th>输出费用</th><th>总费用</th></tr>
-	{{range .}}
-	<tr {{if ge .Status 400}}style="color:red"{{end}}>
-	<td>{{.Time}}</td><td>{{.IP}}</td><td>{{.Key}}</td><td>{{.Method}}</td>
-	<td>{{.Host}}</td><td>{{.Status}}</td><td>{{if .TTFB}}{{.TTFB}}{{else}}-{{end}}</td><td>{{.Duration}}</td>
-	<td>{{if .Stream}}⚡{{else}}-{{end}}</td>
+		<div class="table-wrap"><table style="font-size:13px">
+			<tr><th>时间</th><th>IP</th><th>Key</th><th>Method</th><th>Host</th><th>Status</th><th>TTFB</th><th>耗时</th><th>流式</th><th>过滤</th><th>乘数</th><th>输入</th><th>缓存</th><th>输出</th><th>命中率</th><th>输入费用</th><th>输出费用</th><th>总费用</th></tr>
+			{{range .}}
+			<tr {{if ge .Status 400}}style="color:red"{{end}}>
+			<td>{{.Time}}</td><td>{{.IP}}</td><td>{{.Key}}</td><td>{{.Method}}</td>
+			<td>{{.Host}}</td><td>{{.Status}}</td><td>{{if .TTFB}}{{.TTFB}}{{else}}-{{end}}</td><td>{{.Duration}}</td>
+			<td>{{if .Stream}}⚡{{else}}-{{end}}</td>
+			<td>{{if .ImageFiltered}}📷{{else}}-{{end}}</td>
+			<td>{{if gt .Multiplier 1.0}}×{{printf "%.0f" .Multiplier}}{{else}}-{{end}}</td>
 	<td>{{if .Prompt}}{{.Prompt}}{{else}}-{{end}}</td>
 	<td>{{if .Cached}}{{.Cached}}{{else}}-{{end}}</td>
 	<td>{{if .Completion}}{{.Completion}}{{else}}-{{end}}</td>
@@ -179,6 +181,48 @@ function copyURL(alias) {
 	</table></div>{{end}}
 	</body></html>`,
 
+	"settings": `<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>设置 - llm-http-proxy</title>
+{{template "head"}}</head>
+<body>{{template "nav"}}
+<h2>设置</h2>
+<h3>域名白名单</h3>
+{{if .WhitelistEnabled}}
+<p style="color:#555;font-size:14px">已启用 <b>{{.DomainCount}}</b> 个域名。不在白名单中的域名将被拒绝代理（仅限 key 注入模式）。</p>
+<table>
+<tr><th>域名</th><th>操作</th></tr>
+{{range .Domains}}
+<tr>
+<td><code>{{.}}</code></td>
+<td>
+<form method="post" action="/__admin/settings" style="display:inline">
+<input type="hidden" name="action" value="remove">
+<input type="hidden" name="domain" value="{{.}}">
+<button type="submit" onclick="return confirm('确定移出 {{.}}?')">移出</button>
+</form>
+</td>
+</tr>
+{{end}}
+</table>
+{{else}}
+<p>白名单当前为空（<b>不限制任何域名</b>）。建议添加常用域名以提高安全性。</p>
+{{end}}
+
+<h4>添加域名</h4>
+<form method="post" action="/__admin/settings">
+<input type="hidden" name="action" value="add">
+<input name="domain" placeholder="如 api.z.ai" required style="width:300px">
+<button type="submit">添加</button>
+</form>
+
+<h3>启动配置（只读）</h3>
+<table>
+<tr><td>监听地址</td><td><code>{{.Addr}}</code></td></tr>
+<tr><td>持久化路径</td><td>{{if .Persist}}{{.Persist}}{{else}}<span style="color:#888">未启用</span>{{end}}</td></tr>
+<tr><td>Key 配置</td><td>{{if .Keys}}{{.Keys}}{{else}}<span style="color:#888">未启用（透传模式）</span>{{end}}</td></tr>
+<tr><td>管理密码</td><td>{{if .AdminEnabled}}✅ 已启用{{else}}❌ 未启用{{end}}</td></tr>
+</table>
+</body></html>`,
 	"msg": `<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8"><title>{{.Title}}</title>
 {{template "head"}}</head>
@@ -222,6 +266,7 @@ h2{margin-top:0}
 <a href="/__admin/keys">Keys</a>
 <a href="/__admin/stats">Stats</a>
 <a href="/__admin/logs">Logs</a>
+<a href="/__admin/settings">设置</a>
 <a href="/__version" target="_blank">API</a>
 <form method="post" action="/__admin/logout" style="display:inline">
 <button type="submit" style="padding:4px 10px">登出</button>

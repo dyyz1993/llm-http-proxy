@@ -160,18 +160,176 @@ client = OpenAI(base_url="http://localhost:8080/https://open.bigmodel.cn/api/cod
 
 ---
 
+## Key 注入模式（可选）
+
+启动时加 `-keys keys.yaml` 启用，用户通过 `/k/{alias}/` 路径访问，真实 API key 只存在服务端。
+
+```bash
+# keys.yaml 配置
+cat > keys.yaml << 'EOF'
+glm:
+  key: "你的GLM真实key"
+  rate: 60        # 限流:每分钟最多 60 次
+  burst: 10       # 突发上限 10
+
+claude:
+  key: "你的Claude真实key"
+  header: x-api-key
+EOF
+
+# 启动
+llm-http-proxy -addr :8080 -keys keys.yaml -admin MyPassword
+
+# 使用(用户不需要带 key,服务端自动注入)
+curl http://localhost:8080/k/glm/https://open.bigmodel.cn/api/paas/v4/chat/completions \
+  -H "Authorization: Bearer anything" \
+  -d '{"model":"glm-4.6","messages":[{"role":"user","content":"hi"}]}'
+```
+
+### Header 自动检测
+
+不写 `header` 字段时，代理根据路径自动选择注入方式：
+- 路径含 `/anthropic/`（如 Claude API）→ `x-api-key`
+- 其他 → `Authorization: Bearer`
+
+客户端带什么 header，就自动替换什么 header（支持同时带 `x-api-key` 和 `Authorization`）。
+
+---
+
+## 高级配置（keys.yaml）
+
+在 keys.yaml 中可配置用量限额、禁止时段、费用乘数、图片过滤等高级功能。
+
+### 用量限额（MaxTokens / MaxRequests / Window）
+
+每个 alias 可配置窗口期内的 token 用量和请求次数上限。超限后返回 402 Payment Required。
+
+```yaml
+glm:
+  key: "你的GLM真实key"
+  max_tokens: 10000000    # 窗口期内最多 1 千万 token(输入+输出)
+  max_requests: 5000      # 窗口期内最多 5000 次成功请求
+  window: 24h             # 窗口期时长: 5h / 24h / 7d / 30d(空=默认100天)
+```
+
+窗口自动滚动：窗口过期后计数器自动重置。
+
+### 禁止时段（TimeBlock）
+
+限制某个 alias 每天只能在特定时段使用：
+
+```yaml
+glm:
+  key: "你的GLM真实key"
+  time_block:
+    start: "22:00"    # 每天22:00开始禁止
+    end: "08:00"      # 次日08:00结束禁止(跨午夜)
+```
+
+- `start < end`：单日区间（如 09:00-18:00）
+- `start > end`：跨午夜区间（如 22:00-08:00）
+- `start == end`：全天禁止
+- 被禁时段请求返回 403 Forbidden
+
+### Token 用量乘数（token_multipliers）
+
+某些模型按实际用量×N 计费，可配置乘数规则：
+
+```yaml
+token_multipliers:
+  - models: ["glm-5*"]           # glob 匹配模型名
+    multiply: 3.0                # 用量×3
+  - models: ["claude-3-opus*"]
+    domains: ["api.anthropic.com"]
+    multiply: 2.0
+  - domains: ["free-test.example.com"]
+    multiply: 0                  # 免费不计费
+```
+
+- Models 和 Domains 用 glob 匹配（`*` 通配符），大小写不敏感
+- 多条规则同时命中时，乘数相乘叠加
+- 作用于 Prompt / Cached / Completion token + 所有费用字段
+
+### 图片过滤（image_filter）
+
+某些模型不支持 image_url 内容块，可自动替换为文本占位符：
+
+```yaml
+image_filter:
+  - models: ["deepseek-chat"]
+    domains: ["api.deepseek.com"]
+    action: to_text    # 替换 image_url 为 [Image] 文本
+```
+
+- `to_text`：替换为 `[Image]` 文本（推荐）
+- `strip`：直接删除 image_url 块
+- Models / Domains 为空 = 匹配所有
+
+### 完整示例
+
+```yaml
+glm:
+  key: "sk-glm-key"
+  rate: 60
+  burst: 10
+  max_tokens: 10000000
+  max_requests: 5000
+  window: 24h
+  time_block:
+    start: "22:00"
+    end: "08:00"
+
+claude:
+  key: "sk-claude-key"
+  header: x-api-key
+
+# 全局规则
+token_multipliers:
+  - models: ["glm-5*"]
+    multiply: 3.0
+
+image_filter:
+  - models: ["deepseek-chat"]
+    action: to_text
+```
+
+---
+
+## 管理界面（Web UI）
+
+启动时加 `-admin <密码>` 启用，访问 `http://<代理地址>/__admin`：
+
+| 页面 | 路径 | 功能 |
+|------|------|------|
+| Dashboard | `/__admin` | Token 用量统计 + 费用汇总 + 限额状态 |
+| Keys | `/__admin/keys` | 查看/添加/删除 alias 配置 |
+| Stats | `/__admin/stats` | 请求来源统计(同 `/__stats`) |
+| Logs | `/__admin/logs` | 最近 200 条请求日志(含 token/费用/乘数) |
+| Settings | `/__admin/settings` | 运行时添加/移除域名白名单 |
+
+管理界面支持：
+- Token 用量统计表（输入/缓存/输出/费用 + 命中率柱状图）
+- 单条日志查看（含 TTFB、╳乘数徽标、流式标识 ⚡）
+- 运行时修改域名白名单（无需重启）
+
+---
+
 ## 命令行参数
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `-addr` | `:8080` | 监听地址 |
 | `-persist` | (空) | 统计持久化文件路径。指定后重启不丢统计 |
+| `-keys` | (空) | key 注入配置文件路径(keys.yaml)。启用后支持 `/k/{alias}/` 模式 |
+| `-admin` | (空) | 管理界面密码。设置后启用 Web 管理 UI，路径 `/__admin` |
+| `-allow-domains` | (空) | 域名白名单(逗号分隔)。key 注入模式下限制可代理的域名 |
 | `-version` | | 打印版本号 |
 
 示例：
 ```bash
 llm-http-proxy -addr :3000
 llm-http-proxy -addr :8080 -persist /var/lib/llm-http-proxy/stats.json
+llm-http-proxy -keys /etc/llm-http-proxy/keys.yaml -admin MyPassword -allow-domains open.bigmodel.cn,api.z.ai
 ```
 
 ---

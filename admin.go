@@ -37,13 +37,19 @@ type adminServer struct {
 	password string // 登录密码
 	secret   []byte // HMAC 签名密钥(进程启动时随机生成)
 	stats    *statsCollector
-	keys     *keyStore   // 可能为 nil(未启用 -keys 时)
-	quota    *quotaCache // 可能为 nil(未启用 -keys 时)
-	usage    *usageStats // 可能为 nil(全局,直接用全局变量也行)
+	keys     *keyStore        // 可能为 nil(未启用 -keys 时)
+	quota    *quotaCache      // 可能为 nil(未启用 -keys 时)
+	usage    *usageStats      // 可能为 nil(全局,直接用全局变量也行)
+	settings *settingsManager // 运行时设置管理器
+	// 启动参数(只读展示)
+	startupAddr     string
+	startupPersist  string
+	startupKeys     string
+	startupAdminPwd bool
 }
 
 // newAdminServer 创建管理界面。password 为空则不启用(返回 nil)。
-func newAdminServer(password string, stats *statsCollector, ks *keyStore, qc *quotaCache, us *usageStats) *adminServer {
+func newAdminServer(password string, stats *statsCollector, ks *keyStore, qc *quotaCache, us *usageStats, sm *settingsManager, addr, persist, keys string) *adminServer {
 	if password == "" {
 		return nil
 	}
@@ -52,12 +58,17 @@ func newAdminServer(password string, stats *statsCollector, ks *keyStore, qc *qu
 		log.Fatalf("生成 HMAC 密钥失败: %v", err)
 	}
 	return &adminServer{
-		password: password,
-		secret:   secret,
-		stats:    stats,
-		keys:     ks,
-		quota:    qc,
-		usage:    us,
+		password:        password,
+		secret:          secret,
+		stats:           stats,
+		keys:            ks,
+		quota:           qc,
+		usage:           us,
+		settings:        sm,
+		startupAddr:     addr,
+		startupPersist:  persist,
+		startupKeys:     keys,
+		startupAdminPwd: password != "",
 	}
 }
 
@@ -139,6 +150,7 @@ func (a *adminServer) handler() http.Handler {
 	mux.HandleFunc("/__admin/keys/delete", a.requireAuth(a.handleKeyDelete))
 	mux.HandleFunc("/__admin/stats", a.requireAuth(a.handleStats))
 	mux.HandleFunc("/__admin/logs", a.requireAuth(a.handleLogs))
+	mux.HandleFunc("/__admin/settings", a.requireAuth(a.handleSettings))
 	mux.HandleFunc("/__admin/quota/refresh", a.requireAuth(a.handleQuotaRefresh))
 	return mux
 }
@@ -227,7 +239,8 @@ func (a *adminServer) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if a.usage != nil {
-		if html := buildUsageHTML(a.usage.snapshot()); html != "" {
+		keysCfg := a.keys.allConfigs() // 传 key 配置可展示限额列
+		if html := buildUsageHTML(a.usage.snapshot(), keysCfg); html != "" {
 			data.UsageHTML = template.HTML(html)
 		}
 	}
@@ -391,6 +404,59 @@ func (a *adminServer) handleStats(w http.ResponseWriter, r *http.Request) {
 func (a *adminServer) handleLogs(w http.ResponseWriter, r *http.Request) {
 	entries := globalLogRing.recent(200)
 	renderTemplate(w, "logs", entries)
+}
+
+// --- Settings ---
+
+func (a *adminServer) handleSettings(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		r.ParseForm()
+		action := r.FormValue("action")
+		switch action {
+		case "add":
+			domain := strings.TrimSpace(r.FormValue("domain"))
+			if domain == "" {
+				renderMsg(w, "无效输入", "域名不能为空")
+				return
+			}
+			a.settings.AddDomain(domain)
+			http.Redirect(w, r, "/__admin/settings", http.StatusSeeOther)
+			return
+		case "remove":
+			domain := strings.TrimSpace(r.FormValue("domain"))
+			if domain != "" {
+				a.settings.RemoveDomain(domain)
+			}
+			http.Redirect(w, r, "/__admin/settings", http.StatusSeeOther)
+			return
+		default:
+			renderMsg(w, "未知操作", "仅支持 add/remove")
+			return
+		}
+	}
+
+	// GET: 渲染设置页面
+	domains := a.settings.GetDomains()
+	whitelistEnabled := a.settings.IsWhitelistEnabled()
+
+	data := struct {
+		Domains          []string
+		WhitelistEnabled bool
+		DomainCount      int
+		Addr             string
+		Persist          string
+		Keys             string
+		AdminEnabled     bool
+	}{
+		Domains:          domains,
+		WhitelistEnabled: whitelistEnabled,
+		DomainCount:      len(domains),
+		Addr:             a.startupAddr,
+		Persist:          a.startupPersist,
+		Keys:             a.startupKeys,
+		AdminEnabled:     a.startupAdminPwd,
+	}
+	renderTemplate(w, "settings", data)
 }
 
 // --- 模板渲染 ---

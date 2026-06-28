@@ -33,6 +33,7 @@ type usageData struct {
 	InputCost      float64 // 输入费用（元,由调用方计算填入）
 	OutputCost     float64 // 输出费用（元）
 	TotalCost      float64 // 总费用（元）
+	Multiplier     float64 // Token 用量乘数(1.0=未乘,3.0=3倍)
 }
 
 // openAIUsage 对应 OpenAI 格式的 usage 字段。
@@ -265,6 +266,8 @@ func bytesContains(b []byte, sub string) bool {
 // ---------- 按 alias 聚合统计 ----------
 
 // aliasUsageStats 是单个 alias 的累计 token 统计与费用统计。
+// 注意:窗口计数器(Prompt/Cached/Completion/Success)的 JSON tag 是
+// json:"window_xxx",持久化时不会被旧版误读;旧版无此字段则默认为 0。
 type aliasUsageStats struct {
 	Prompt     int64   // 累计输入 token
 	Cached     int64   // 累计缓存命中 token
@@ -274,6 +277,12 @@ type aliasUsageStats struct {
 	OutputCost float64 // 累计输出费用（元）
 	TotalCost  float64 // 累计总费用（元）
 	Errors     int64   // 错误请求数(4xx/5xx)
+	// 窗口计数器(用于用量限额,持久化有独立 json tag)
+	WindowStart      int64 `json:"window_start"`      // 窗口起始 Unix 时间戳(秒),0=未开始
+	WindowPrompt     int64 `json:"window_prompt"`     // 窗口内累计输入 token
+	WindowCached     int64 `json:"window_cached"`     // 窗口内累计缓存命中 token
+	WindowCompletion int64 `json:"window_completion"` // 窗口内累计输出 token
+	WindowSuccess    int64 `json:"window_success"`    // 窗口内成功请求数(HTTP <400)
 }
 
 // cacheHitRate 计算缓存命中率 = cached / (prompt + cached)。
@@ -299,6 +308,7 @@ func newUsageStats() *usageStats {
 }
 
 // record 异步记录一次请求的 token 用量与费用到指定 alias。
+// 同时更新窗口计数器(用于用量限额)。
 // 安全地在 goroutine 里调用。
 func (us *usageStats) record(alias string, u usageData) {
 	if !u.HasData || alias == "" {
@@ -319,6 +329,11 @@ func (us *usageStats) record(alias string, u usageData) {
 	s.InputCost += u.InputCost
 	s.OutputCost += u.OutputCost
 	s.TotalCost += u.TotalCost
+
+	// 同时累加窗口计数器
+	atomic.AddInt64(&s.WindowPrompt, u.Prompt)
+	atomic.AddInt64(&s.WindowCached, u.Cached)
+	atomic.AddInt64(&s.WindowCompletion, u.Completion)
 }
 
 // recordError 异步记录一次错误请求(4xx/5xx)到指定 alias。
@@ -336,6 +351,104 @@ func (us *usageStats) recordError(alias string) {
 	atomic.AddInt64(&s.Errors, 1)
 }
 
+// recordSuccess 记录一次成功请求(HTTP <400)到窗口计数器。
+// 加锁安全,可从多个 goroutine 调用。
+func (us *usageStats) recordSuccess(alias string) {
+	if alias == "" || alias == "-" {
+		return
+	}
+	us.mu.Lock()
+	defer us.mu.Unlock()
+	s := us.data[alias]
+	if s == nil {
+		s = &aliasUsageStats{}
+		us.data[alias] = s
+	}
+	atomic.AddInt64(&s.WindowSuccess, 1)
+}
+
+// checkQuota 检查某个 alias 是否超限(窗口自动重置 + 限额比较)。
+// 返回:
+//   - ok=true:允许继续
+//   - ok=false + reason:超限原因 + retryAfter:建议重试时间
+//
+// 注意:此方法会在窗口过期时自动重置计数器(写锁),调用方需注意并发。
+func (us *usageStats) checkQuota(alias string, cfg KeyConfig) (ok bool, reason string, retryAfter time.Duration) {
+	if !cfg.HasQuota() {
+		return true, "", 0 // 未配置限额,永远允许
+	}
+
+	us.mu.Lock()
+	defer us.mu.Unlock()
+
+	s := us.data[alias]
+	if s == nil {
+		s = &aliasUsageStats{}
+		us.data[alias] = s
+	}
+
+	window := cfg.WindowDuration()
+
+	// 检查窗口是否过期:从 windowStart 起算超过了 window
+	if s.WindowStart > 0 {
+		elapsed := time.Since(time.Unix(s.WindowStart, 0))
+		if elapsed >= window {
+			// 窗口过期,重置
+			s.WindowStart = time.Now().Unix()
+			s.WindowPrompt = 0
+			s.WindowCached = 0
+			s.WindowCompletion = 0
+			s.WindowSuccess = 0
+		}
+	} else {
+		// 首次启动窗口
+		s.WindowStart = time.Now().Unix()
+	}
+
+	// 检查请求次数上限
+	if cfg.MaxReqs > 0 && s.WindowSuccess >= cfg.MaxReqs {
+		remain := window - time.Since(time.Unix(s.WindowStart, 0))
+		if remain < 0 {
+			remain = 0
+		}
+		return false, fmt.Sprintf("此 key 请求次数已达上限(%d次/%s)", cfg.MaxReqs, friendlyDuration(window)), remain
+	}
+
+	// 检查 token 用量上限
+	totalTokens := s.WindowPrompt + s.WindowCached + s.WindowCompletion
+	if cfg.MaxTokens > 0 && totalTokens >= cfg.MaxTokens {
+		remain := window - time.Since(time.Unix(s.WindowStart, 0))
+		if remain < 0 {
+			remain = 0
+		}
+		return false, fmt.Sprintf("此 key 用量已达上限(%s/%s)", fmtTokens(cfg.MaxTokens), friendlyDuration(window)), remain
+	}
+
+	return true, "", 0
+}
+
+// friendlyDuration 把 duration 转成人类可读的"Xd Xh Xm"格式。
+func friendlyDuration(d time.Duration) string {
+	d = d.Round(time.Minute)
+	days := int(d / (24 * time.Hour))
+	d -= time.Duration(days) * 24 * time.Hour
+	hours := int(d / time.Hour)
+	d -= time.Duration(hours) * time.Hour
+	minutes := int(d / time.Minute)
+
+	var parts []string
+	if days > 0 {
+		parts = append(parts, fmt.Sprintf("%d天", days))
+	}
+	if hours > 0 {
+		parts = append(parts, fmt.Sprintf("%d小时", hours))
+	}
+	if minutes > 0 || len(parts) == 0 {
+		parts = append(parts, fmt.Sprintf("%d分钟", minutes))
+	}
+	return strings.Join(parts, "")
+}
+
 // snapshot 返回所有 alias 统计的快照(给 Dashboard 展示用)。
 func (us *usageStats) snapshot() map[string]aliasUsageStats {
 	us.mu.RLock()
@@ -350,8 +463,9 @@ func (us *usageStats) snapshot() map[string]aliasUsageStats {
 // ---------- Dashboard 展示 ----------
 
 // buildUsageHTML 构建按 alias 聚合的 token 用量展示 HTML。
-// 展示:每个 alias 的累计输入/缓存/输出 token + 平均缓存命中率。
-func buildUsageHTML(snap map[string]aliasUsageStats) string {
+// 展示:每个 alias 的累计输入/缓存/输出 token + 平均缓存命中率 + 用量限额。
+// keysConfig 可选,传 nil 时不显示限额列。
+func buildUsageHTML(snap map[string]aliasUsageStats, keysConfig map[string]KeyConfig) string {
 	if len(snap) == 0 {
 		return ""
 	}
@@ -363,9 +477,24 @@ func buildUsageHTML(snap map[string]aliasUsageStats) string {
 	}
 	sort.Strings(aliases)
 
+	// 检查是否有任何 alias 配置了限额(决定是否展示限额列)
+	hasQuota := false
+	if keysConfig != nil {
+		for _, alias := range aliases {
+			if cfg, ok := keysConfig[alias]; ok && cfg.HasQuota() {
+				hasQuota = true
+				break
+			}
+		}
+	}
+
 	var b strings.Builder
 	b.WriteString(`<table style="font-size:13px;margin-top:8px">`)
-	b.WriteString(`<tr><th>Alias</th><th>请求数</th><th>错误</th><th>输入</th><th>缓存命中</th><th>输出</th><th>命中率</th><th>输入费用</th><th>输出费用</th><th>总费用</th></tr>`)
+	b.WriteString(`<tr><th>Alias</th><th>请求数</th><th>错误</th><th>输入</th><th>缓存命中</th><th>输出</th><th>命中率</th><th>输入费用</th><th>输出费用</th><th>总费用</th>`)
+	if hasQuota {
+		b.WriteString(`<th>请求/限额</th><th>用量/限额</th>`)
+	}
+	b.WriteString(`</tr>`)
 
 	var totalPrompt, totalCached, totalCompletion, totalErrors int64
 	var totalInputCost, totalOutputCost, totalCost float64
@@ -388,8 +517,31 @@ func buildUsageHTML(snap map[string]aliasUsageStats) string {
 			alias, s.Count, errDisplay, fmtTokens(s.Prompt), fmtTokens(s.Cached), fmtTokens(s.Completion))
 		fmt.Fprintf(&b, `<td><span style="font-family:monospace;font-size:11px">%s</span> %.1f%%</td>`,
 			bar, displayRate*100)
-		fmt.Fprintf(&b, `<td>%.4f</td><td>%.4f</td><td><b>%.4f</b></td></tr>`,
+		fmt.Fprintf(&b, `<td>%.4f</td><td>%.4f</td><td><b>%.4f</b></td>`,
 			s.InputCost, s.OutputCost, s.TotalCost)
+
+		// 限额展示列
+		if hasQuota {
+			if cfg, ok := keysConfig[alias]; ok && cfg.HasQuota() {
+				// 请求次数限额
+				if cfg.MaxReqs > 0 {
+					fmt.Fprintf(&b, `<td>%d/%d</td>`, s.WindowSuccess, cfg.MaxReqs)
+				} else {
+					b.WriteString(`<td>-</td>`)
+				}
+				// Token 用量限额
+				if cfg.MaxTokens > 0 {
+					total := s.WindowPrompt + s.WindowCached + s.WindowCompletion
+					fmt.Fprintf(&b, `<td>%s/%s</td>`, fmtTokens(total), fmtTokens(cfg.MaxTokens))
+				} else {
+					b.WriteString(`<td>-</td>`)
+				}
+			} else {
+				b.WriteString(`<td>-</td><td>-</td>`)
+			}
+		}
+
+		b.WriteString(`</tr>`)
 		totalPrompt += s.Prompt
 		totalCached += s.Cached
 		totalCompletion += s.Completion
@@ -415,7 +567,11 @@ func buildUsageHTML(snap map[string]aliasUsageStats) string {
 	fmt.Fprintf(&b, `<tr style="font-weight:bold;background:#eee"><td>合计</td><td>%d</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td>`,
 		totalCount, totalErrDisplay, fmtTokens(totalPrompt), fmtTokens(totalCached), fmtTokens(totalCompletion))
 	fmt.Fprintf(&b, `<td>%.1f%%</td>`, totalRate*100)
-	fmt.Fprintf(&b, `<td>%.4f</td><td>%.4f</td><td>%.4f</td></tr>`, totalInputCost, totalOutputCost, totalCost)
+	fmt.Fprintf(&b, `<td>%.4f</td><td>%.4f</td><td>%.4f</td>`, totalInputCost, totalOutputCost, totalCost)
+	if hasQuota {
+		b.WriteString(`<td></td><td></td>`)
+	}
+	b.WriteString(`</tr>`)
 	b.WriteString(`</table>`)
 	return b.String()
 }

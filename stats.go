@@ -613,6 +613,8 @@ type logEntry struct {
 	InputCost      float64 `json:"input_cost"`      // 输入费用（元）
 	OutputCost     float64 `json:"output_cost"`     // 输出费用（元）
 	TotalCost      float64 `json:"total_cost"`      // 总费用（元）
+	ImageFiltered  bool    `json:"image_filtered"`  // 请求 body 中的 image_url 被自动过滤
+	Multiplier     float64 `json:"multiplier"`      // Token 用量乘数(1.0=未乘)
 }
 
 // logRing 是内存环形缓冲,存最近 N 条请求日志(给 admin UI 看)。
@@ -658,7 +660,7 @@ func (r *logRing) recent(n int) []logEntry {
 // u 是从响应里异步提取的 token 用量(可能 HasData=false)。
 // isStream 标记是否为 SSE 流式响应。
 // ttfb 是首字节响应时间(从请求开始到第一个字节返回)。
-func logRequest(ip, maskedKey, method, targetHost string, status int, dur, ttfb time.Duration, isStream bool, u usageData) {
+func logRequest(ip, maskedKey, method, targetHost string, status int, dur, ttfb time.Duration, isStream bool, u usageData, imageFiltered bool) {
 	line := fmt.Sprintf("req ip=%s key=%s method=%s host=%s status=%d dur=%s",
 		ip, maskedKey, method, targetHost, status, dur)
 	if ttfb > 0 {
@@ -666,6 +668,9 @@ func logRequest(ip, maskedKey, method, targetHost string, status int, dur, ttfb 
 	}
 	if isStream {
 		line += " stream=1"
+	}
+	if imageFiltered {
+		line += " imgf=1"
 	}
 	if u.HasData {
 		line += fmt.Sprintf(" prompt=%d cached=%d completion=%d", u.Prompt, u.Cached, u.Completion)
@@ -691,6 +696,8 @@ func logRequest(ip, maskedKey, method, targetHost string, status int, dur, ttfb 
 		InputCost:      u.InputCost,
 		OutputCost:     u.OutputCost,
 		TotalCost:      u.TotalCost,
+		ImageFiltered:  imageFiltered,
+		Multiplier:     u.Multiplier,
 	})
 }
 

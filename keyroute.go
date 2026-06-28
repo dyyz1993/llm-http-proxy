@@ -8,8 +8,10 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -17,7 +19,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// KeyConfig 是单个 alias 的注入规则 + 可选限流 + 可选有效期。
+// KeyConfig 是单个 alias 的注入规则 + 可选限流 + 可选有效期 + 可选用量限额 + 可选禁止时段。
 type KeyConfig struct {
 	Key     string `yaml:"key"`     // 真实 API key(不对外暴露)
 	Header  string `yaml:"header"`  // 注入到哪个 header: Authorization / x-api-key / api-key
@@ -25,6 +27,97 @@ type KeyConfig struct {
 	Rate    int    `yaml:"rate"`    // 限流:每分钟补充令牌数(0=不限流)
 	Burst   int    `yaml:"burst"`   // 限流:桶容量上限(突发上限)
 	Expires string `yaml:"expires"` // 可选有效期:"YYYY-MM-DD"(到当天结束) 或 "YYYY-MM-DD HH:MM"(精确到分,北京时间)。空=永久
+	// 用量限额(窗口内,0=不限)
+	MaxTokens int64  `yaml:"max_tokens"`   // 窗口内总 token 上限(输入+输出),0=不限
+	MaxReqs   int64  `yaml:"max_requests"` // 窗口内成功请求次数上限(HTTP 2xx/3xx),0=不限
+	Window    string `yaml:"window"`       // 窗口时长,如 "5h"/"24h"/"7d"/"30d"。空=默认 100d(硬上限)
+	// 禁止时段(北京时间,每天重复)
+	TimeBlock *TimeBlock `yaml:"time_block"` // 可选:在此时段内请求返回 403
+}
+
+// HasQuota 返回该 alias 是否配置了用量限额。
+func (cfg KeyConfig) HasQuota() bool {
+	return cfg.MaxTokens > 0 || cfg.MaxReqs > 0
+}
+
+// WindowDuration 解析窗口时长。空或解析失败返回默认 100 天。
+func (cfg KeyConfig) WindowDuration() time.Duration {
+	if cfg.Window == "" {
+		return 100 * 24 * time.Hour
+	}
+	d, err := parseWindowDuration(cfg.Window)
+	if err != nil {
+		return 100 * 24 * time.Hour // 解析失败用默认
+	}
+	return d
+}
+
+// parseWindowDuration 解析窗口时长字符串,支持 "h"(小时) 和 "d"(天)。
+func parseWindowDuration(s string) (time.Duration, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, fmt.Errorf("empty window duration")
+	}
+	if strings.HasSuffix(s, "d") {
+		days, err := strconv.Atoi(strings.TrimSuffix(s, "d"))
+		if err != nil {
+			return 0, fmt.Errorf("invalid window duration %q", s)
+		}
+		return time.Duration(days) * 24 * time.Hour, nil
+	}
+	return time.ParseDuration(s)
+}
+
+// TimeBlock 定义每天重复的禁止访问时段(北京时间)。
+// Start/End 格式为 "HH:MM",如 "22:00"、"08:00"。
+//   - start < end: 区间内禁止(如 09:00-18:00)
+//   - start > end: 跨午夜禁止(如 22:00-08:00, 22:00~00:00 + 00:00~08:00)
+//   - start == end: 全天禁止
+//
+// nil/不配置 = 不禁止。
+type TimeBlock struct {
+	Start string `yaml:"start"`
+	End   string `yaml:"end"`
+}
+
+// IsBlocked 检查当前时间(北京时间)是否在禁止时段内。
+func (tb *TimeBlock) IsBlocked(now time.Time) bool {
+	if tb == nil || tb.Start == "" || tb.End == "" {
+		return false
+	}
+	// 转北京时间
+	now = now.In(beijing)
+	sh, sm, ok1 := parseHHMM(tb.Start)
+	eh, em, ok2 := parseHHMM(tb.End)
+	if !ok1 || !ok2 {
+		return false
+	}
+	startMin := sh*60 + sm
+	endMin := eh*60 + em
+	curMin := now.Hour()*60 + now.Minute()
+
+	if startMin < endMin {
+		// 单日区间: [start, end)
+		return curMin >= startMin && curMin < endMin
+	}
+	if startMin > endMin {
+		// 跨日区间: [start, 00:00) ∪ [00:00, end)
+		return curMin >= startMin || curMin < endMin
+	}
+	// startMin == endMin: 全天禁止
+	return true
+}
+
+// parseHHMM 把 "HH:MM" 解析成小时、分钟。
+func parseHHMM(s string) (hour, min int, ok bool) {
+	_, err := fmt.Sscanf(s, "%d:%d", &hour, &min)
+	if err != nil {
+		return 0, 0, false
+	}
+	if hour < 0 || hour > 23 || min < 0 || min > 59 {
+		return 0, 0, false
+	}
+	return hour, min, true
 }
 
 // expiresLayouts 是支持的有效期格式,按优先级尝试。
@@ -78,11 +171,13 @@ type rateLimiter struct {
 
 // keyStore 管理 keys.yaml 的加载、热重载、限流器。
 type keyStore struct {
-	mu        sync.RWMutex
-	configs   map[string]KeyConfig // alias → config
-	limiters  map[string]*rateLimiter
-	path      string
-	lastMtime time.Time
+	mu               sync.RWMutex
+	configs          map[string]KeyConfig // alias → config
+	limiters         map[string]*rateLimiter
+	path             string
+	lastMtime        time.Time
+	imageFilter      []ImageFilterRule     // 全局 image_url 过滤规则
+	tokenMultipliers []TokenMultiplierRule // 全局 Token 用量乘数规则
 }
 
 // newKeyStore 创建空的 key store。
@@ -94,6 +189,7 @@ func newKeyStore() *keyStore {
 }
 
 // load 从 path 读取 keys.yaml。文件不存在视为空配置(不报错)。
+// 支持在 keys.yaml 中同时存放 alias 配置和全局 image_filter 规则（向下兼容）。
 func (ks *keyStore) load(path string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -102,13 +198,43 @@ func (ks *keyStore) load(path string) error {
 		}
 		return err
 	}
+
+	// 两步解析：先提取 image_filter 和 token_multipliers，再解析剩余部分为 keys。
+	// 这样 keys.yaml 现有格式不变，只需加顶层字段。
+	var rules []ImageFilterRule
+	var multipliers []TokenMultiplierRule
 	var configs map[string]KeyConfig
-	if err := yaml.Unmarshal(data, &configs); err != nil {
-		return err
+	{
+		var raw map[string]interface{}
+		if err := yaml.Unmarshal(data, &raw); err != nil {
+			return err
+		}
+		if filterRaw, ok := raw["image_filter"]; ok {
+			filterData, _ := yaml.Marshal(filterRaw)
+			if err := yaml.Unmarshal(filterData, &rules); err != nil {
+				log.Printf("解析 image_filter 配置失败: %v", err)
+			}
+		}
+		if multRaw, ok := raw["token_multipliers"]; ok {
+			multData, _ := yaml.Marshal(multRaw)
+			if err := yaml.Unmarshal(multData, &multipliers); err != nil {
+				log.Printf("解析 token_multipliers 配置失败: %v", err)
+			}
+		}
+		// 去掉已知的全局字段，剩余部分作为 keys 解析
+		delete(raw, "image_filter")
+		delete(raw, "token_multipliers")
+		keysData, _ := yaml.Marshal(raw)
+		if err := yaml.Unmarshal(keysData, &configs); err != nil {
+			return err
+		}
 	}
+
 	ks.mu.Lock()
 	defer ks.mu.Unlock()
 	ks.configs = configs
+	ks.imageFilter = rules
+	ks.tokenMultipliers = multipliers
 	ks.path = path
 	if fi, err := os.Stat(path); err == nil {
 		ks.lastMtime = fi.ModTime()
@@ -119,7 +245,8 @@ func (ks *keyStore) load(path string) error {
 			ks.getOrCreateLimiter(alias, cfg)
 		}
 	}
-	log.Printf("已加载 %d 个 key 配置", len(configs))
+	log.Printf("已加载 %d 个 key 配置, %d 条 image_filter 规则, %d 条 token_multipliers 规则",
+		len(configs), len(rules), len(multipliers))
 	return nil
 }
 
@@ -258,6 +385,22 @@ func (ks *keyStore) allow(alias string) bool {
 		return true
 	}
 	return false
+}
+
+// getImageFilter 返回 image_filter 规则快照。
+// 调用方得到的是规则切片的副本（切片头复制但底层数组共享），
+// 但热加载时整个切片会被替换，读取方不受影响。
+func (ks *keyStore) getImageFilter() []ImageFilterRule {
+	ks.mu.RLock()
+	defer ks.mu.RUnlock()
+	return ks.imageFilter
+}
+
+// getTokenMultipliers 返回 token_multipliers 规则快照。
+func (ks *keyStore) getTokenMultipliers() []TokenMultiplierRule {
+	ks.mu.RLock()
+	defer ks.mu.RUnlock()
+	return ks.tokenMultipliers
 }
 
 // --- 管理用写方法(给 admin UI 用) ---
