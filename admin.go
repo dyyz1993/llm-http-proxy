@@ -23,9 +23,12 @@ import (
 	"html/template"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // cookieName 是登录态 cookie 的名字。
@@ -151,6 +154,10 @@ func (a *adminServer) handler() http.Handler {
 	mux.HandleFunc("/__admin/stats", a.requireAuth(a.handleStats))
 	mux.HandleFunc("/__admin/logs", a.requireAuth(a.handleLogs))
 	mux.HandleFunc("/__admin/settings", a.requireAuth(a.handleSettings))
+	mux.HandleFunc("/__admin/config", a.requireAuth(a.handleConfig))
+	mux.HandleFunc("/__admin/profiles", a.requireAuth(a.handleProfiles))
+	mux.HandleFunc("/__admin/profiles/new", a.requireAuth(a.handleProfileNew))
+	mux.HandleFunc("/__admin/profiles/delete", a.requireAuth(a.handleProfileDelete))
 	mux.HandleFunc("/__admin/quota/refresh", a.requireAuth(a.handleQuotaRefresh))
 	return mux
 }
@@ -257,6 +264,132 @@ func (a *adminServer) handleQuotaRefresh(w http.ResponseWriter, r *http.Request)
 	n := a.quota.refreshNow(a.keys)
 	renderMsg(w, "配额已刷新",
 		fmt.Sprintf("已重新拉取 %d 个 key 的配额数据,返回 Dashboard 查看。", n))
+}
+
+// --- Profiles 管理(拦截器模板) ---
+
+func (a *adminServer) handleProfiles(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if a.keys == nil {
+		renderMsg(w, "Key 注入模式未启用", "启动时需加 -keys 参数。")
+		return
+	}
+	editName := r.URL.Query().Get("edit")
+	copyName := r.URL.Query().Get("copy")
+	var editProf InterceptorProfile
+	editing := false
+	copying := false
+	if editName != "" {
+		if profiles := a.keys.allProfiles(); profiles != nil {
+			if p, ok := profiles[editName]; ok {
+				editProf = p
+				editing = true
+			}
+		}
+	} else if copyName != "" {
+		if profiles := a.keys.allProfiles(); profiles != nil {
+			if p, ok := profiles[copyName]; ok {
+				editProf = p
+				copying = true
+			}
+		}
+	}
+	data := struct {
+		Profiles     map[string]InterceptorProfile
+		EditName     string
+		EditProf     InterceptorProfile
+		Editing      bool
+		Copying      bool
+		CopyFrom     string
+		HasTimeBlock bool
+	}{
+		Profiles:     a.keys.allProfiles(),
+		EditName:     editName,
+		EditProf:     editProf,
+		Editing:      editing,
+		Copying:      copying,
+		CopyFrom:     copyName,
+		HasTimeBlock: editProf.TimeBlock != nil,
+	}
+	renderTemplate(w, "profiles", data)
+}
+
+func (a *adminServer) handleProfileNew(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if a.keys == nil {
+		http.Error(w, "key 模式未启用", http.StatusBadRequest)
+		return
+	}
+	r.ParseForm()
+	name := strings.TrimSpace(r.FormValue("name"))
+	rate, _ := strconv.Atoi(strings.TrimSpace(r.FormValue("rate")))
+	burst, _ := strconv.Atoi(strings.TrimSpace(r.FormValue("burst")))
+	maxTokens, _ := strconv.ParseInt(strings.TrimSpace(r.FormValue("max_tokens")), 10, 64)
+	maxReqs, _ := strconv.ParseInt(strings.TrimSpace(r.FormValue("max_requests")), 10, 64)
+	window := strings.TrimSpace(r.FormValue("window"))
+	tbStart := strings.TrimSpace(r.FormValue("time_block_start"))
+	tbEnd := strings.TrimSpace(r.FormValue("time_block_end"))
+
+	if name == "" {
+		renderMsg(w, "错误", "名称不能为空")
+		return
+	}
+	if rate < 0 {
+		rate = 0
+	}
+	if burst < 0 {
+		burst = 0
+	}
+	if maxTokens < 0 {
+		maxTokens = 0
+	}
+	if maxReqs < 0 {
+		maxReqs = 0
+	}
+
+	profile := InterceptorProfile{
+		Rate:      rate,
+		Burst:     burst,
+		MaxTokens: maxTokens,
+		MaxReqs:   maxReqs,
+		Window:    window,
+	}
+	if tbStart != "" || tbEnd != "" {
+		profile.TimeBlock = &TimeBlock{Start: tbStart, End: tbEnd}
+	}
+
+	if err := a.keys.setProfile(name, profile); err != nil {
+		renderMsg(w, "保存失败", err.Error())
+		return
+	}
+	http.Redirect(w, r, "/__admin/profiles", http.StatusSeeOther)
+}
+
+func (a *adminServer) handleProfileDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if a.keys == nil {
+		http.Error(w, "key 模式未启用", http.StatusBadRequest)
+		return
+	}
+	name := r.URL.Query().Get("name")
+	if name == "" {
+		http.Error(w, "缺少 name", http.StatusBadRequest)
+		return
+	}
+	if err := a.keys.deleteProfile(name); err != nil {
+		renderMsg(w, "删除失败", err.Error())
+		return
+	}
+	http.Redirect(w, r, "/__admin/profiles", http.StatusSeeOther)
 }
 
 // --- Keys 管理 ---
@@ -457,6 +590,109 @@ func (a *adminServer) handleSettings(w http.ResponseWriter, r *http.Request) {
 		AdminEnabled:     a.startupAdminPwd,
 	}
 	renderTemplate(w, "settings", data)
+}
+
+// --- Config (YAML 编辑器) ---
+
+func (a *adminServer) handleConfig(w http.ResponseWriter, r *http.Request) {
+	if a.keys == nil {
+		renderMsg(w, "Key 注入模式未启用", "启动时需加 -keys 参数才能编辑配置。")
+		return
+	}
+	// 路径可能为空(首次启动,还没保存过)
+	path := a.keys.getPath()
+
+	if r.Method == http.MethodPost {
+		r.ParseForm()
+		raw := r.FormValue("yaml")
+		if raw == "" {
+			renderConfig(w, "YAML 内容不能为空", raw, path)
+			return
+		}
+		// 校验 YAML 语法 + 结构完整性(和 load() 使用的相同逻辑)
+		if err := validateYAML([]byte(raw)); err != nil {
+			renderConfig(w, "YAML 语法错误: "+err.Error(), raw, path)
+			return
+		}
+		// 原子写回文件(tmp+rename)
+		tmp := path + ".tmp"
+		if err := os.WriteFile(tmp, []byte(raw), 0600); err != nil {
+			renderConfig(w, "写入失败: "+err.Error(), raw, path)
+			return
+		}
+		if err := os.Rename(tmp, path); err != nil {
+			renderConfig(w, "重命名失败: "+err.Error(), raw, path)
+			return
+		}
+		// 文件已变,reloadIfChanged 会在下次 tick 自动加载。
+		// 但为了即时生效,主动 reload 一次。
+		a.keys.forceReload()
+		renderMsg(w, "配置已保存", "YAML 配置已保存并重新加载。")
+		return
+	}
+
+	// GET: 读取当前文件内容
+	var current string
+	if data, err := os.ReadFile(path); err == nil {
+		current = string(data)
+	}
+	renderConfig(w, "", current, path)
+}
+
+// renderConfig 渲染 YAML 配置页(错误时保留编辑内容)。
+func renderConfig(w http.ResponseWriter, errMsg, rawYAML, path string) {
+	// 错误信息和 YAML 内容从 textarea 里拿
+	data := struct {
+		Error string
+		YAML  string
+		Path  string
+	}{
+		Error: errMsg,
+		YAML:  rawYAML,
+		Path:  path,
+	}
+	renderTemplate(w, "config", data)
+}
+
+// validateYAML 校验 YAML 语法和结构,和 keyStore.load() 使用相同逻辑。
+// 先解析为原始 map,然后尝试将各个段解析为实际类型。
+func validateYAML(data []byte) error {
+	var raw map[string]interface{}
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	// 尝试解析各个已知段
+	if filterRaw, ok := raw["image_filter"]; ok {
+		filterData, _ := yaml.Marshal(filterRaw)
+		var rules []ImageFilterRule
+		if err := yaml.Unmarshal(filterData, &rules); err != nil {
+			return fmt.Errorf("image_filter 段: %w", err)
+		}
+	}
+	if multRaw, ok := raw["token_multipliers"]; ok {
+		multData, _ := yaml.Marshal(multRaw)
+		var multipliers []TokenMultiplierRule
+		if err := yaml.Unmarshal(multData, &multipliers); err != nil {
+			return fmt.Errorf("token_multipliers 段: %w", err)
+		}
+	}
+	if profRaw, ok := raw["interceptor_profiles"]; ok {
+		profData, _ := yaml.Marshal(profRaw)
+		var profiles map[string]InterceptorProfile
+		if err := yaml.Unmarshal(profData, &profiles); err != nil {
+			return fmt.Errorf("interceptor_profiles 段: %w", err)
+		}
+	}
+	// 去掉已知全局段,剩余部分作为 keys 解析
+	delete(raw, "image_filter")
+	delete(raw, "token_multipliers")
+	delete(raw, "interceptor_profiles")
+	keysData, _ := yaml.Marshal(raw)
+	var configs map[string]KeyConfig
+	if err := yaml.Unmarshal(keysData, &configs); err != nil {
+		return fmt.Errorf("alias 配置段: %w", err)
+	}
+	return nil
 }
 
 // --- 模板渲染 ---

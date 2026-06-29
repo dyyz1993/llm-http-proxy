@@ -390,6 +390,29 @@ func (ks *keyStore) getOrCreateLimiter(alias string, cfg KeyConfig) *rateLimiter
 	return rl
 }
 
+// getPath 返回 keys.yaml 路径(线程安全)。
+func (ks *keyStore) getPath() string {
+	ks.mu.RLock()
+	defer ks.mu.RUnlock()
+	return ks.path
+}
+
+// forceReload 强制重新加载 keys.yaml(给 admin UI 保存后调用)。
+func (ks *keyStore) forceReload() {
+	path := func() string {
+		ks.mu.RLock()
+		defer ks.mu.RUnlock()
+		return ks.path
+	}()
+	if path == "" {
+		return
+	}
+	log.Printf("强制重新加载 %s ...", path)
+	if err := ks.load(path); err != nil {
+		log.Printf("强制重载 key 配置失败(保留旧配置): %v", err)
+	}
+}
+
 // reloadIfChanged 检查文件 mtime,变了才重读。
 func (ks *keyStore) reloadIfChanged() {
 	if ks.path == "" {
@@ -542,14 +565,52 @@ func (ks *keyStore) allConfigs() map[string]KeyConfig {
 	return out
 }
 
-// save 写入 ks.path(原子写:tmp+rename)。调用方需持写锁。
-func (ks *keyStore) saveLocked() error {
+// saveYAMLAll 将完整 YAML 写入文件(原子写:tmp+rename)。
+// 会合并内存中的 alias 配置 + interceptor profiles + 全局规则。
+// 写入前用 validateYAML 做结构校验,校验不通过不写。
+// 调用方需持写锁。
+func (ks *keyStore) saveYAMLAll() error {
 	if ks.path == "" {
 		return nil
 	}
-	data, err := yaml.Marshal(ks.configs)
+	// 读取当前原始 YAML(保留 comment 不现实,至少保留全局段结构)
+	raw, err := os.ReadFile(ks.path)
+	var full map[string]interface{}
+	if err == nil {
+		// 能读就解析,不能读就新建
+		yaml.Unmarshal(raw, &full)
+	}
+	if full == nil {
+		full = make(map[string]interface{})
+	}
+
+	// 替换 interceptor_profiles 段
+	full["interceptor_profiles"] = ks.interceptorProfiles
+
+	// 替换 alias 配置段(先把 alias 从 full 里去重,再填充 configs)
+	for k := range full {
+		// 跳过已知全局段
+		if k == "image_filter" || k == "token_multipliers" || k == "interceptor_profiles" {
+			continue
+		}
+		// 如果不是 configs 里的 alias,保留;否则让 configs 覆盖
+		if _, ok := ks.configs[k]; !ok {
+			continue
+		}
+		// 是 alias 且已在 full 中,删掉稍后由 configs 统一写入
+		delete(full, k)
+	}
+	for k, v := range ks.configs {
+		full[k] = v
+	}
+
+	data, err := yaml.Marshal(full)
 	if err != nil {
 		return err
+	}
+	// 结构校验(和 /__admin/config POST 一样严格)
+	if err := validateYAML(data); err != nil {
+		return fmt.Errorf("保存前校验失败: %w", err)
 	}
 	tmp := ks.path + ".tmp"
 	if err := os.WriteFile(tmp, data, 0600); err != nil {
@@ -573,7 +634,7 @@ func (ks *keyStore) setConfig(alias string, cfg KeyConfig) error {
 	if cfg.Rate > 0 {
 		ks.getOrCreateLimiter(alias, cfg)
 	}
-	return ks.saveLocked()
+	return ks.saveYAMLAll()
 }
 
 // deleteConfig 删除一个 alias 配置,并持久化。
@@ -582,5 +643,29 @@ func (ks *keyStore) deleteConfig(alias string) error {
 	defer ks.mu.Unlock()
 	delete(ks.configs, alias)
 	delete(ks.limiters, alias)
-	return ks.saveLocked()
+	return ks.saveYAMLAll()
+}
+
+// setProfile 新增/更新一个拦截器模板,并持久化。
+func (ks *keyStore) setProfile(name string, profile InterceptorProfile) error {
+	ks.mu.Lock()
+	defer ks.mu.Unlock()
+	if ks.interceptorProfiles == nil {
+		ks.interceptorProfiles = make(map[string]InterceptorProfile)
+	}
+	ks.interceptorProfiles[name] = profile
+	return ks.saveYAMLAll()
+}
+
+// deleteProfile 删除一个拦截器模板,并持久化。
+func (ks *keyStore) deleteProfile(name string) error {
+	ks.mu.Lock()
+	defer ks.mu.Unlock()
+	delete(ks.interceptorProfiles, name)
+	return ks.saveYAMLAll()
+}
+
+// allProfiles 返回所有拦截器模板的快照(深拷贝)。
+func (ks *keyStore) allProfiles() map[string]InterceptorProfile {
+	return ks.getInterceptorProfiles()
 }

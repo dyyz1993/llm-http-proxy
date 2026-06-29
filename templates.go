@@ -224,12 +224,74 @@ function copyURL(alias) {
 </table>
 </body></html>`,
 	"msg": `<!DOCTYPE html>
-<html lang="zh-CN"><head><meta charset="utf-8"><title>{{.Title}}</title>
-{{template "head"}}</head>
-<body>{{template "nav"}}
-<h2>{{.Title}}</h2><p>{{.Msg}}</p>
-<p><a href="/__admin">返回</a></p>
-</body></html>`,
+	<html lang="zh-CN"><head><meta charset="utf-8"><title>{{.Title}}</title>
+	{{template "head"}}</head>
+	<body>{{template "nav"}}
+	<h2>{{.Title}}</h2><p>{{.Msg}}</p>
+	<p><a href="/__admin">返回</a></p>
+	</body></html>`,
+
+	"config": `<!DOCTYPE html>
+	<html lang="zh-CN"><head><meta charset="utf-8"><title>YAML 配置 - llm-http-proxy</title>
+	{{template "head"}}</head>
+	<body>{{template "nav"}}
+	<h2>YAML 配置编辑器</h2>
+	{{if .Error}}<p style="color:red;font-weight:bold">⚠ {{.Error}}</p>{{end}}
+	<p style="color:#555;font-size:14px">直接编辑 <code>{{.Path}}</code> 文件。<br>
+	⚠ 保存时会校验 YAML 语法，校验通过后写入文件并重新加载。建议先备份。</p>
+	<form method="post" action="/__admin/config">
+	<textarea name="yaml" style="width:100%;height:500px;font-family:monospace;font-size:13px;padding:8px;box-sizing:border-box" spellcheck="false">{{.YAML}}</textarea>
+	<br><br>
+	<button type="submit">💾 保存配置</button>
+	<button type="button" onclick="document.getElementsByName('yaml')[0].scrollTo(0,0)" style="margin-left:8px">回到顶部</button>
+	</form>
+		</body></html>`,
+
+	"profiles": `<!DOCTYPE html>
+	<html lang="zh-CN"><head><meta charset="utf-8"><title>拦截器模板 - llm-http-proxy</title>
+	{{template "head"}}</head>
+	<body>{{template "nav"}}
+	<h2>拦截器模板 ({{if .Profiles}}{{len .Profiles}}{{else}}0{{end}})</h2>
+	<p style="color:#555;font-size:14px">拦截器模板(Profiles)定义了可复用的限流/限额/禁止时段参数组合。Alias 通过 <code>profile:</code> 字段引用模板,再用 <code>override:</code> 局部覆盖。</p>
+	{{if not .Profiles}}<p>暂无模板。在下方添加。</p>{{end}}
+	<table>
+	<tr><th>名称</th><th>Rate/min</th><th>Burst</th><th>MaxTokens</th><th>MaxReqs</th><th>Window</th><th>禁止时段</th><th>操作</th></tr>
+	{{range $name, $p := .Profiles}}
+	<tr>
+	<td><b>{{$name}}</b></td>
+	<td>{{if $p.Rate}}{{$p.Rate}}{{else}}-{{end}}</td>
+	<td>{{if $p.Burst}}{{$p.Burst}}{{else}}-{{end}}</td>
+	<td>{{if $p.MaxTokens}}{{$p.MaxTokens}}{{else}}-{{end}}</td>
+	<td>{{if $p.MaxReqs}}{{$p.MaxReqs}}{{else}}-{{end}}</td>
+	<td>{{if $p.Window}}{{$p.Window}}{{else}}-{{end}}</td>
+	<td>{{if $p.TimeBlock}}{{$p.TimeBlock.Start}} ~ {{$p.TimeBlock.End}}{{else}}-{{end}}</td>
+	<td style="white-space:nowrap">
+	<a href="/__admin/profiles?edit={{$name}}"><button type="button">编辑</button></a>
+	<a href="/__admin/profiles?copy={{$name}}"><button type="button">复制</button></a>
+	<form method="post" action="/__admin/profiles/delete?name={{$name}}" style="display:inline">
+	<button type="submit" onclick="return confirm('删除模板 {{$name}}?')">删除</button></form>
+	</td>
+	</tr>
+	{{end}}
+	</table>
+
+	<h3>{{if .Editing}}编辑 {{.EditName}}{{else if .Copying}}复制自 {{.CopyFrom}}{{else}}新增模板{{end}}</h3>
+	<form method="post" action="/__admin/profiles/new">
+	<table>
+	<tr><td>名称</td><td>{{if .Editing}}<b>{{.EditName}}</b>（不可修改）{{else}}<input name="name" placeholder="如 night_block" required>{{end}}</td></tr>
+	<tr><td>Rate/min</td><td><input name="rate" type="number" value="{{if or .Editing .Copying}}{{.EditProf.Rate}}{{end}}" placeholder="0=不限流"></td></tr>
+	<tr><td>Burst</td><td><input name="burst" type="number" value="{{if or .Editing .Copying}}{{.EditProf.Burst}}{{end}}" placeholder="0=默认"></td></tr>
+	<tr><td>MaxTokens</td><td><input name="max_tokens" type="number" value="{{if or .Editing .Copying}}{{.EditProf.MaxTokens}}{{end}}" placeholder="0=不限"></td></tr>
+	<tr><td>MaxRequests</td><td><input name="max_requests" type="number" value="{{if or .Editing .Copying}}{{.EditProf.MaxReqs}}{{end}}" placeholder="0=不限"></td></tr>
+	<tr><td>Window</td><td><input name="window" placeholder="如 24h, 12h, 7d" value="{{if or .Editing .Copying}}{{.EditProf.Window}}{{end}}"></td></tr>
+	<tr><td>禁止时段开始</td><td><input name="time_block_start" placeholder="如 22:00" value="{{if or .Editing .Copying}}{{if .EditProf.TimeBlock}}{{.EditProf.TimeBlock.Start}}{{end}}{{end}}"></td></tr>
+	<tr><td>禁止时段结束</td><td><input name="time_block_end" placeholder="如 08:00" value="{{if or .Editing .Copying}}{{if .EditProf.TimeBlock}}{{.EditProf.TimeBlock.End}}{{end}}{{end}}"></td></tr>
+	</table>
+	{{if .Editing}}<input type="hidden" name="name" value="{{.EditName}}">{{end}}
+	<button type="submit">{{if .Editing}}保存修改{{else if .Copying}}复制为新模板{{else}}保存{{end}}</button>
+	{{if or .Editing .Copying}}<a href="/__admin/profiles"><button type="button">取消</button></a>{{end}}
+	</form>
+	</body></html>`,
 }
 
 // head 是公共 <head> + CSS,所有页面用 {{template "head"}} 引用。
@@ -267,6 +329,8 @@ h2{margin-top:0}
 <a href="/__admin/stats">Stats</a>
 <a href="/__admin/logs">Logs</a>
 <a href="/__admin/settings">设置</a>
+<a href="/__admin/profiles">Profiles</a>
+<a href="/__admin/config">YAML</a>
 <a href="/__version" target="_blank">API</a>
 <form method="post" action="/__admin/logout" style="display:inline">
 <button type="submit" style="padding:4px 10px">登出</button>
