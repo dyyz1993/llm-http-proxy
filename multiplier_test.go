@@ -1,8 +1,10 @@
 package main
 
 import (
+	"fmt"
 	"math"
 	"testing"
+	"time"
 )
 
 // roundTo 辅助:将乘数舍入到给定精度(避免浮点比较问题)。
@@ -187,4 +189,96 @@ func TestApplyTokenMultiplier_CaseInsensitiveDomain(t *testing.T) {
 	if got := applyTokenMultiplier(rules, "", "open.bigmodel.cn"); !near(got, 2.0) {
 		t.Errorf("大小写不敏感:*.BIGMODEL.CN 应匹配 open.bigmodel.cn, got %v", got)
 	}
+}
+
+// --- 时间段乘数 ---
+
+func TestApplyTokenMultiplier_TimeBlockActive(t *testing.T) {
+	// 时间块覆盖所有时段 → 规则应命中
+	now := parseTime("15:04")
+	rules := []TokenMultiplierRule{
+		{
+			Multiply:  3.0,
+			TimeBlock: &TimeBlock{Start: "00:00", End: "23:59"},
+		},
+	}
+	if got := applyTokenMultiplierAt(rules, "any", "any", now); !near(got, 3.0) {
+		t.Errorf("全天时间块应命中 3x, got %v", got)
+	}
+}
+
+func TestApplyTokenMultiplier_TimeBlockActive_SpecificHours(t *testing.T) {
+	// 2:00-6:00 时段内 → 应命中
+	now := parseTime("03:00")
+	rules := []TokenMultiplierRule{
+		{
+			Multiply:  5.0,
+			TimeBlock: &TimeBlock{Start: "02:00", End: "06:00"},
+		},
+	}
+	if got := applyTokenMultiplierAt(rules, "any", "any", now); !near(got, 5.0) {
+		t.Errorf("02:00-06:00 内的 03:00 应命中 5x, got %v", got)
+	}
+}
+
+func TestApplyTokenMultiplier_TimeBlockInactive(t *testing.T) {
+	// 2:00-6:00 时段外 → 不应命中
+	now := parseTime("10:00")
+	rules := []TokenMultiplierRule{
+		{
+			Multiply:  3.0,
+			TimeBlock: &TimeBlock{Start: "02:00", End: "06:00"},
+		},
+	}
+	if got := applyTokenMultiplierAt(rules, "any", "any", now); !near(got, 1.0) {
+		t.Errorf("02:00-06:00 外的 10:00 应 1x, got %v", got)
+	}
+}
+
+func TestApplyTokenMultiplier_TimeBlockOvernight(t *testing.T) {
+	// 跨日时段: 22:00-08:00
+	// 01:00 在时段内
+	now := parseTime("01:00")
+	rules := []TokenMultiplierRule{
+		{
+			Multiply:  4.0,
+			TimeBlock: &TimeBlock{Start: "22:00", End: "08:00"},
+		},
+	}
+	if got := applyTokenMultiplierAt(rules, "any", "any", now); !near(got, 4.0) {
+		t.Errorf("22:00-08:00 内的 01:00 应命中 4x, got %v", got)
+	}
+	// 12:00 在时段外
+	now2 := parseTime("12:00")
+	if got := applyTokenMultiplierAt(rules, "any", "any", now2); !near(got, 1.0) {
+		t.Errorf("22:00-08:00 外的 12:00 应 1x, got %v", got)
+	}
+}
+
+func TestApplyTokenMultiplier_TimeBlockAndModel(t *testing.T) {
+	// 同时有时间块和模型限制 → AND
+	now := parseTime("03:00")
+	rules := []TokenMultiplierRule{
+		{
+			Models:    []string{"glm-5*"},
+			Multiply:  3.0,
+			TimeBlock: &TimeBlock{Start: "02:00", End: "06:00"},
+		},
+	}
+	// 时间命中 + 模型命中 → 3x
+	if got := applyTokenMultiplierAt(rules, "glm-5.1", "any", now); !near(got, 3.0) {
+		t.Errorf("时间+模型都命中应得 3x, got %v", got)
+	}
+	// 时间命中 + 模型不命中 → 1x
+	if got := applyTokenMultiplierAt(rules, "claude-4", "any", now); !near(got, 1.0) {
+		t.Errorf("仅时间命中应 1x, got %v", got)
+	}
+}
+
+// parseTime 解析 "HH:MM" 为当前日期的 time.Time。
+func parseTime(s string) time.Time {
+	now := time.Now()
+	h, m := 0, 0
+	fmt.Sscanf(s, "%d:%d", &h, &m)
+	return time.Date(now.Year(), now.Month(), now.Day(), h, m, 0, 0, time.Local)
 }
