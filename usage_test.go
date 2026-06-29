@@ -1014,3 +1014,139 @@ func TestCheckQuota_Concurrent(t *testing.T) {
 		t.Error("并发后 Prompt 不应为 0")
 	}
 }
+
+// TestMultiplierPlusQuota 验证 token 乘数(×3) + 额度限额(five_hour_window)同时生效。
+// 模拟完整链路: extractUsage → applyTokenMultiplier → record → checkQuota。
+func TestMultiplierPlusQuota(t *testing.T) {
+	us := newUsageStats()
+	// five_hour_window: 5h 窗口, 1 亿 token 上限
+	cfg := KeyConfig{
+		MaxTokens: 100000000,
+		Window:    "5h",
+	}
+
+	// token_multipliers: 2:00-6:00 ×3 (用 00:00-23:59 模拟"始终生效")
+	rules := []TokenMultiplierRule{
+		{
+			Multiply:  3.0,
+			TimeBlock: &TimeBlock{Start: "00:00", End: "23:59"},
+		},
+	}
+
+	// 模拟一次请求: 用了 100 输入(含 20 缓存) + 50 输出
+	model := "glm-5.1-flash"
+	domain := "open.bigmodel.cn"
+	promptOrig := int64(100)
+	cachedOrig := int64(20)
+	completionOrig := int64(50)
+
+	// 第一步: applyTokenMultiplier
+	m := applyTokenMultiplierAt(rules, model, domain, parseTime("03:00"))
+	if m != 3.0 {
+		t.Fatalf("乘数应=3.0, 得到 %.1f", m)
+	}
+
+	u := usageData{
+		HasData:    true,
+		Prompt:     int64(float64(promptOrig) * m),
+		Cached:     int64(float64(cachedOrig) * m),
+		Completion: int64(float64(completionOrig) * m),
+	}
+	t.Logf("乘数后: Prompt=%d(原%d), Cached=%d(原%d), Completion=%d(原%d)",
+		u.Prompt, promptOrig, u.Cached, cachedOrig, u.Completion, completionOrig)
+
+	// 第二步: record
+	us.record("mult-test", u)
+
+	// 第三步: checkQuota → 应允许(300+60+150=510 << 1亿)
+	ok, reason, _ := us.checkQuota("mult-test", cfg)
+	if !ok {
+		t.Fatalf("第一次请求不应超限: %s", reason)
+	}
+	t.Logf("第一次 checkQuota: 通过")
+
+	// 记录大量请求验证配额追踪
+	for i := 0; i < 50000; i++ {
+		us.record("mult-test", u)
+	}
+	ok, reason, _ = us.checkQuota("mult-test", cfg)
+	if !ok {
+		t.Fatalf("50000 次后不应超限(%d万 << 1亿): %s",
+			(510*50001)/10000, reason)
+	}
+	t.Logf("50000 次后: 通过(累计约 %dM)", (510*50001)/1000000)
+
+	// 再填 150000 次 → 超过 1 亿
+	for i := 0; i < 150000; i++ {
+		us.record("mult-test", u)
+	}
+	ok, reason, retryAfter := us.checkQuota("mult-test", cfg)
+	if ok {
+		t.Fatal("超限后应被拒绝")
+	}
+	t.Logf("超限后拒绝: %s (retryAfter=%v)", reason, retryAfter)
+	if retryAfter <= 0 {
+		t.Errorf("retryAfter 应 > 0")
+	}
+	t.Log("✓ 乘数×3 + 5h窗口 同时生效验证通过")
+}
+
+// TestMultiplierWithProfile 验证 profile 引用 + 乘数叠加的实际使用场景。
+func TestMultiplierWithProfile(t *testing.T) {
+	us := newUsageStats()
+
+	// five_hour_window profile
+	profiles := map[string]InterceptorProfile{
+		"five_hour_window": {
+			Window:    "5h",
+			MaxTokens: 100000000,
+		},
+	}
+
+	// alias 配置:引用 five_hour_window profile
+	cfg := KeyConfig{
+		Key:     "sk-test",
+		Profile: "five_hour_window",
+	}
+	// resolveConfig 合并
+	resolved := resolveConfig(cfg, profiles, "")
+	if !resolved.HasQuota() {
+		t.Fatal("resolveConfig 后应有配额限制")
+	}
+	if resolved.MaxTokens != 100000000 {
+		t.Errorf("MaxTokens 应为 100000000, 得到 %d", resolved.MaxTokens)
+	}
+	if resolved.Window != "5h" {
+		t.Errorf("Window 应为 5h, 得到 %s", resolved.Window)
+	}
+	t.Logf("resolveConfig: MaxTokens=%d Window=%s", resolved.MaxTokens, resolved.Window)
+
+	// 全局 token_multipliers
+	rules := []TokenMultiplierRule{
+		{
+			Multiply:  3.0,
+			TimeBlock: &TimeBlock{Start: "00:00", End: "23:59"},
+		},
+	}
+
+	model := "glm-5.1-flash"
+	domain := "open.bigmodel.cn"
+	m := applyTokenMultiplierAt(rules, model, domain, parseTime("03:00"))
+	if m != 3.0 {
+		t.Fatalf("乘数应=3.0, 得到 %.1f", m)
+	}
+
+	u := usageData{
+		HasData:    true,
+		Prompt:     int64(float64(100) * m), // 300
+		Cached:     int64(float64(20) * m),  // 60
+		Completion: int64(float64(50) * m),  // 150
+	}
+	us.record("profile-test", u)
+
+	ok, reason, _ := us.checkQuota("profile-test", resolved)
+	if !ok {
+		t.Fatalf("引用 profile 后配额检查失败: %s", reason)
+	}
+	t.Log("✓ profile 引用 + 乘数叠加 同时生效验证通过")
+}

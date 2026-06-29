@@ -168,10 +168,10 @@ function copyURL(alias) {
 			<td>{{.Host}}</td><td>{{.Status}}</td><td>{{if .TTFB}}{{.TTFB}}{{else}}-{{end}}</td><td>{{.Duration}}</td>
 			<td>{{if .Stream}}⚡{{else}}-{{end}}</td>
 			<td>{{if .ImageFiltered}}📷{{else}}-{{end}}</td>
-			<td>{{if gt .Multiplier 1.0}}×{{printf "%.0f" .Multiplier}}{{else}}-{{end}}</td>
-	<td>{{if .Prompt}}{{.Prompt}}{{else}}-{{end}}</td>
-	<td>{{if .Cached}}{{.Cached}}{{else}}-{{end}}</td>
-	<td>{{if .Completion}}{{.Completion}}{{else}}-{{end}}</td>
+		<td>{{if gt .Multiplier 1.0}}×{{printf "%.0f" .Multiplier}}{{else}}-{{end}}</td>
+		<td>{{if .Prompt}}{{fmtTokens .Prompt}}{{else}}-{{end}}</td>
+		<td>{{if .Cached}}{{fmtTokens .Cached}}{{else}}-{{end}}</td>
+		<td>{{if .Completion}}{{fmtTokens .Completion}}{{else}}-{{end}}</td>
 	<td>{{if and .Prompt .Cached}}{{printf "%.0f%%" (mul (divf .Cached .Prompt) 100)}}{{else}}-{{end}}</td>
 	<td>{{if .CostCalculated}}{{printf "%.6f" .InputCost}}{{else}}-{{end}}</td>
 	<td>{{if .CostCalculated}}{{printf "%.6f" .OutputCost}}{{else}}-{{end}}</td>

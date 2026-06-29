@@ -706,7 +706,8 @@ func renderTemplate(w http.ResponseWriter, name string, data interface{}) {
 			}
 			return float64(a) / float64(b)
 		},
-		"mul": func(a, b float64) float64 { return a * b },
+		"mul":       func(a, b float64) float64 { return a * b },
+		"fmtTokens": func(n int64) string { return fmtTokens(n) },
 	})
 	// 先解析公共片段(head/nav),再解析页面模板
 	if _, err := tmpl.Parse(baseTemplates); err != nil {
