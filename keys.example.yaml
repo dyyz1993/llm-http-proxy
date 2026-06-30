@@ -79,6 +79,12 @@ trial:
   key: "sk-trial"
   expires: "2026-12-31"
 
+# 引用拦截器模板(profile) + override 局部覆盖:
+# 每小时最多 500 次请求,1h 窗口自动重置
+myalias:
+  key: "sk-xxx"
+  profile: hourly_500
+
 # === 全局规则(非 alias 级别)==============================================
 #
 # Token 用量乘数(匹配模型名+域名+可选时间段,命中后用量和费用×N):
@@ -86,11 +92,14 @@ trial:
 #   Models/Domains 空 = 匹配所有。多个规则同时命中时乘数相乘。
 #   TimeBlock 可选:限制只在此时段内生效(格式 HH:MM,北京时间)。
 #
-# 例如:2:00-6:00 期间所有 token 用量 ×3
-# - multiply: 3
-#   time_block:
-#     start: "02:00"
-#     end: "06:00"
+# 例如:GLM 高峰期(14:00-18:00) GLM-5.2/5-Turbo/5.1 额度 ×3
+# token_multipliers:
+#   - domains: ["open.bigmodel.cn"]
+#     models: ["glm-5.2*", "glm-5-turbo*", "glm-5.1*"]
+#     multiply: 3
+#     time_block:
+#       start: "14:00"
+#       end: "18:00"
 #
 # 详见 USAGE.md
 

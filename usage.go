@@ -265,6 +265,18 @@ func bytesContains(b []byte, sub string) bool {
 
 // ---------- 按 alias 聚合统计 ----------
 
+// DailyUsage 是单个 alias 的单日 token 统计与费用统计。
+type DailyUsage struct {
+	Prompt     int64   `json:"prompt"`
+	Cached     int64   `json:"cached"`
+	Completion int64   `json:"completion"`
+	Count      int64   `json:"count"`
+	Errors     int64   `json:"errors"`
+	InputCost  float64 `json:"input_cost"`
+	OutputCost float64 `json:"output_cost"`
+	TotalCost  float64 `json:"total_cost"`
+}
+
 // aliasUsageStats 是单个 alias 的累计 token 统计与费用统计。
 // 注意:窗口计数器(Prompt/Cached/Completion/Success)的 JSON tag 是
 // json:"window_xxx",持久化时不会被旧版误读;旧版无此字段则默认为 0。
@@ -277,6 +289,8 @@ type aliasUsageStats struct {
 	OutputCost float64 // 累计输出费用（元）
 	TotalCost  float64 // 累计总费用（元）
 	Errors     int64   // 错误请求数(4xx/5xx)
+	// 每日用量(date string → *DailyUsage, 北京时间)
+	Daily map[string]*DailyUsage `json:"daily,omitempty"`
 	// 窗口计数器(用于用量限额,持久化有独立 json tag)
 	WindowStart      int64 `json:"window_start"`      // 窗口起始 Unix 时间戳(秒),0=未开始
 	WindowPrompt     int64 `json:"window_prompt"`     // 窗口内累计输入 token
@@ -308,7 +322,7 @@ func newUsageStats() *usageStats {
 }
 
 // record 异步记录一次请求的 token 用量与费用到指定 alias。
-// 同时更新窗口计数器(用于用量限额)。
+// 同时更新窗口计数器和每日用量。
 // 安全地在 goroutine 里调用。
 func (us *usageStats) record(alias string, u usageData) {
 	if !u.HasData || alias == "" {
@@ -334,6 +348,24 @@ func (us *usageStats) record(alias string, u usageData) {
 	atomic.AddInt64(&s.WindowPrompt, u.Prompt)
 	atomic.AddInt64(&s.WindowCached, u.Cached)
 	atomic.AddInt64(&s.WindowCompletion, u.Completion)
+
+	// 累加当日用量(北京时间)
+	today := time.Now().In(beijing).Format("2006-01-02")
+	d := s.Daily[today]
+	if d == nil {
+		d = &DailyUsage{}
+		if s.Daily == nil {
+			s.Daily = make(map[string]*DailyUsage)
+		}
+		s.Daily[today] = d
+	}
+	d.Prompt += u.Prompt
+	d.Cached += u.Cached
+	d.Completion += u.Completion
+	d.Count++
+	d.InputCost += u.InputCost
+	d.OutputCost += u.OutputCost
+	d.TotalCost += u.TotalCost
 }
 
 // recordError 异步记录一次错误请求(4xx/5xx)到指定 alias。
@@ -349,6 +381,18 @@ func (us *usageStats) recordError(alias string) {
 		us.data[alias] = s
 	}
 	atomic.AddInt64(&s.Errors, 1)
+
+	// 累加当日错误数(北京时间)
+	today := time.Now().In(beijing).Format("2006-01-02")
+	d := s.Daily[today]
+	if d == nil {
+		d = &DailyUsage{}
+		if s.Daily == nil {
+			s.Daily = make(map[string]*DailyUsage)
+		}
+		s.Daily[today] = d
+	}
+	d.Errors++
 }
 
 // recordSuccess 记录一次成功请求(HTTP <400)到窗口计数器。
@@ -455,7 +499,16 @@ func (us *usageStats) snapshot() map[string]aliasUsageStats {
 	defer us.mu.RUnlock()
 	out := make(map[string]aliasUsageStats, len(us.data))
 	for k, v := range us.data {
-		out[k] = *v
+		cp := *v
+		// 深拷贝 Daily map
+		if len(v.Daily) > 0 {
+			cp.Daily = make(map[string]*DailyUsage, len(v.Daily))
+			for date, dv := range v.Daily {
+				dvCp := *dv
+				cp.Daily[date] = &dvCp
+			}
+		}
+		out[k] = cp
 	}
 	return out
 }
@@ -573,6 +626,70 @@ func buildUsageHTML(snap map[string]aliasUsageStats, keysConfig map[string]KeyCo
 	}
 	b.WriteString(`</tr>`)
 	b.WriteString(`</table>`)
+	return b.String()
+}
+
+// buildDailyHTML 构建按 alias + 日期分组的每日用量展示 HTML。
+// 显示每个 alias 每天的使用情况,按日期降序排列。
+func buildDailyHTML(snap map[string]aliasUsageStats) string {
+	// 收集所有 (日期, alias) 条目
+	type dayEntry struct {
+		Date  string // "2006-01-02"
+		Alias string
+		DailyUsage
+	}
+	var entries []dayEntry
+	for alias, s := range snap {
+		for date, d := range s.Daily {
+			entries = append(entries, dayEntry{Date: date, Alias: alias, DailyUsage: *d})
+		}
+	}
+	if len(entries) == 0 {
+		return ""
+	}
+
+	// 按日期降序,同日期按 alias 升序
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].Date != entries[j].Date {
+			return entries[i].Date > entries[j].Date // 最新的在前
+		}
+		return entries[i].Alias < entries[j].Alias
+	})
+
+	var b strings.Builder
+	b.WriteString(`<div class="table-wrap"><table style="font-size:13px">`)
+	b.WriteString(`<tr><th>日期</th><th>Alias</th><th>请求</th><th>错误</th><th>输入</th><th>缓存命中</th><th>输出</th><th>命中率</th><th>输入费用</th><th>输出费用</th><th>总费用</th></tr>`)
+
+	var prevDate string
+	for _, e := range entries {
+		if e.Date != prevDate {
+			// 日期分组行
+			if prevDate != "" {
+				b.WriteString(`</tbody>`)
+			}
+			fmt.Fprintf(&b, `<tbody><tr style="background:#f5f5f5"><td colspan="11" style="font-weight:bold;padding:4px 10px">📅 %s</td></tr>`, e.Date)
+			prevDate = e.Date
+		}
+		rate := float64(0)
+		total := e.Prompt + e.Cached
+		if total > 0 {
+			rate = float64(e.Cached) / float64(total) * 100
+		}
+		errDisplay := "-"
+		if e.Errors > 0 {
+			errDisplay = fmt.Sprintf(`<span style="color:red">%d</span>`, e.Errors)
+		}
+		fmt.Fprintf(&b, `<tr><td></td><td><b>%s</b></td><td>%d</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td>`,
+			e.Alias, e.Count, errDisplay, fmtTokens(e.Prompt), fmtTokens(e.Cached), fmtTokens(e.Completion))
+		if total > 0 {
+			fmt.Fprintf(&b, `<td>%.1f%%</td>`, rate)
+		} else {
+			b.WriteString(`<td>-</td>`)
+		}
+		fmt.Fprintf(&b, `<td>%.4f</td><td>%.4f</td><td><b>%.4f</b></td></tr>`,
+			e.InputCost, e.OutputCost, e.TotalCost)
+	}
+	b.WriteString(`</tbody></table></div>`)
 	return b.String()
 }
 

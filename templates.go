@@ -179,6 +179,16 @@ function copyURL(alias) {
 	</tr>
 	{{end}}
 	</table></div>{{end}}
+		</body></html>`,
+
+	"daily": `<!DOCTYPE html>
+	<html lang="zh-CN"><head><meta charset="utf-8"><title>每日用量 - llm-http-proxy</title>
+	{{template "head"}}</head>
+	<body>{{template "nav"}}
+	<h2>每日用量</h2>
+	{{if .}}<p style="color:#555;font-size:14px">按 alias + 日期分组的每日 token 用量与费用。</p>
+	{{.}}
+	{{else}}<p>暂无每日用量数据。发送请求后会自动记录。</p>{{end}}
 	</body></html>`,
 
 	"settings": `<!DOCTYPE html>
@@ -326,8 +336,9 @@ h2{margin-top:0}
 <span class="title">llm-http-proxy</span>
 <a href="/__admin">Dashboard</a>
 <a href="/__admin/keys">Keys</a>
-<a href="/__admin/stats">Stats</a>
-<a href="/__admin/logs">Logs</a>
+	<a href="/__admin/stats">Stats</a>
+	<a href="/__admin/daily">每日</a>
+	<a href="/__admin/logs">Logs</a>
 <a href="/__admin/settings">设置</a>
 <a href="/__admin/profiles">Profiles</a>
 <a href="/__admin/config">YAML</a>

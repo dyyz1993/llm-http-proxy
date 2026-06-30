@@ -152,6 +152,7 @@ func (a *adminServer) handler() http.Handler {
 	mux.HandleFunc("/__admin/keys/new", a.requireAuth(a.handleKeyNew))
 	mux.HandleFunc("/__admin/keys/delete", a.requireAuth(a.handleKeyDelete))
 	mux.HandleFunc("/__admin/stats", a.requireAuth(a.handleStats))
+	mux.HandleFunc("/__admin/daily", a.requireAuth(a.handleDaily))
 	mux.HandleFunc("/__admin/logs", a.requireAuth(a.handleLogs))
 	mux.HandleFunc("/__admin/settings", a.requireAuth(a.handleSettings))
 	mux.HandleFunc("/__admin/config", a.requireAuth(a.handleConfig))
@@ -522,6 +523,14 @@ func (a *adminServer) handleKeyDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Redirect(w, r, "/__admin/keys", http.StatusSeeOther)
+}
+
+// --- Daily 用量 ---
+
+func (a *adminServer) handleDaily(w http.ResponseWriter, r *http.Request) {
+	snap := a.usage.snapshot()
+	html := buildDailyHTML(snap)
+	renderTemplate(w, "daily", template.HTML(html))
 }
 
 // --- Stats ---

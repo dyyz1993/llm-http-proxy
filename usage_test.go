@@ -1150,3 +1150,143 @@ func TestMultiplierWithProfile(t *testing.T) {
 	}
 	t.Log("✓ profile 引用 + 乘数叠加 同时生效验证通过")
 }
+
+// TestDailyTracking 验证每日用量统计正确记录。
+func TestDailyTracking(t *testing.T) {
+	us := newUsageStats()
+	today := time.Now().In(beijing).Format("2006-01-02")
+
+	// 记录第一天的用量
+	us.record("test-alias", usageData{HasData: true, Prompt: 1000, Cached: 200, Completion: 500, InputCost: 0.01, OutputCost: 0.02, TotalCost: 0.03})
+	us.record("test-alias", usageData{HasData: true, Prompt: 2000, Cached: 300, Completion: 600, InputCost: 0.02, OutputCost: 0.04, TotalCost: 0.06})
+	us.recordError("test-alias")
+
+	snap := us.snapshot()
+	s := snap["test-alias"]
+
+	// 验证当天数据
+	d, ok := s.Daily[today]
+	if !ok {
+		t.Fatal("当天应有每日统计")
+	}
+	if d.Prompt != 3000 {
+		t.Errorf("当天 Prompt = %d, want 3000", d.Prompt)
+	}
+	if d.Cached != 500 {
+		t.Errorf("当天 Cached = %d, want 500", d.Cached)
+	}
+	if d.Completion != 1100 {
+		t.Errorf("当天 Completion = %d, want 1100", d.Completion)
+	}
+	if d.Count != 2 {
+		t.Errorf("当天 Count = %d, want 2", d.Count)
+	}
+	if d.Errors != 1 {
+		t.Errorf("当天 Errors = %d, want 1", d.Errors)
+	}
+	if d.InputCost != 0.03 {
+		t.Errorf("当天 InputCost = %f, want 0.03", d.InputCost)
+	}
+	if d.OutputCost != 0.06 {
+		t.Errorf("当天 OutputCost = %f, want 0.06", d.OutputCost)
+	}
+	if d.TotalCost != 0.09 {
+		t.Errorf("当天 TotalCost = %f, want 0.09", d.TotalCost)
+	}
+
+	// 验证累计统计也正确
+	if s.Prompt != 3000 || s.Completion != 1100 {
+		t.Errorf("累计统计不正确: Prompt=%d Completion=%d", s.Prompt, s.Completion)
+	}
+	if s.Errors != 1 {
+		t.Errorf("累计错误数 = %d, want 1", s.Errors)
+	}
+
+	t.Log("✓ 每日用量统计正确")
+}
+
+// TestDailyTracking_MultipleAliases 验证多个 alias 的每日统计互不干扰。
+func TestDailyTracking_MultipleAliases(t *testing.T) {
+	us := newUsageStats()
+	today := time.Now().In(beijing).Format("2006-01-02")
+
+	us.record("alias-a", usageData{HasData: true, Prompt: 500, Completion: 300})
+	us.record("alias-b", usageData{HasData: true, Prompt: 800, Completion: 400})
+	us.recordError("alias-a")
+	us.record("alias-a", usageData{HasData: true, Prompt: 200, Completion: 100})
+
+	snap := us.snapshot()
+
+	// alias-a
+	a, ok := snap["alias-a"]
+	if !ok {
+		t.Fatal("alias-a 应有统计")
+	}
+	da := a.Daily[today]
+	if da == nil || da.Prompt != 700 || da.Completion != 400 || da.Errors != 1 || da.Count != 2 {
+		t.Fatalf("alias-a 每日统计错误: Prompt=%d Completion=%d Errors=%d Count=%d", da.Prompt, da.Completion, da.Errors, da.Count)
+	}
+
+	// alias-b
+	b, ok := snap["alias-b"]
+	if !ok {
+		t.Fatal("alias-b 应有统计")
+	}
+	db := b.Daily[today]
+	if db == nil || db.Prompt != 800 || db.Completion != 400 || db.Errors != 0 || db.Count != 1 {
+		t.Fatalf("alias-b 每日统计错误: Prompt=%d Completion=%d Errors=%d Count=%d", db.Prompt, db.Completion, db.Errors, db.Count)
+	}
+
+	t.Log("✓ 多 alias 每日统计互不干扰")
+}
+
+// TestDailyTracking_SnapshotDeepCopy 验证 snapshot 深拷贝,修改 snapshot 不影响原数据。
+func TestDailyTracking_SnapshotDeepCopy(t *testing.T) {
+	us := newUsageStats()
+	today := time.Now().In(beijing).Format("2006-01-02")
+
+	us.record("test", usageData{HasData: true, Prompt: 100, Completion: 50})
+
+	snap := us.snapshot()
+	s := snap["test"]
+	originalPrompt := s.Daily[today].Prompt
+
+	// 修改 snapshot(深拷贝,不应影响原数据)
+	s.Daily[today].Prompt = 999
+
+	// 原数据不应受影响
+	snap2 := us.snapshot()
+	d2 := snap2["test"].Daily[today]
+	if d2.Prompt != originalPrompt {
+		t.Fatalf("snapshot 深拷贝失败: 修改 snapshot 后原数据从 %d 变为了 %d", originalPrompt, d2.Prompt)
+	}
+
+	t.Log("✓ snapshot 深拷贝正确")
+}
+
+// TestDailyTracking_NoData 验证没有请求时不会创建空条目。
+func TestDailyTracking_NoData(t *testing.T) {
+	us := newUsageStats()
+	snap := us.snapshot()
+	if len(snap) != 0 {
+		t.Fatal("没有请求时 snapshot 应为空")
+	}
+
+	html := buildDailyHTML(snap)
+	if html != "" {
+		t.Fatal("没有数据时 buildDailyHTML 应返回空字符串")
+	}
+
+	t.Log("✓ 无数据时正确处理")
+}
+
+// TestDailyTracking_RecordNoUsage 验证 HasData=false 时不记录每日用量。
+func TestDailyTracking_RecordNoUsage(t *testing.T) {
+	us := newUsageStats()
+	us.record("test", usageData{HasData: false, Prompt: 999})
+	snap := us.snapshot()
+	if len(snap) > 0 {
+		t.Fatal("HasData=false 时不应创建统计")
+	}
+	t.Log("✓ HasData=false 正确忽略")
+}
