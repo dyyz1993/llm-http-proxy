@@ -585,7 +585,8 @@ func buildUsageHTML(snap map[string]aliasUsageStats, keysConfig map[string]KeyCo
 				}
 				// Token 用量限额
 				if cfg.MaxTokens > 0 {
-					total := s.WindowPrompt + s.WindowCached + s.WindowCompletion
+					// prompt_tokens(OpenAI/Anthropic)已包含 cached_tokens, 不重复加。
+					total := s.WindowPrompt + s.WindowCompletion
 					fmt.Fprintf(&b, `<td>%s/%s</td>`, fmtTokens(total), fmtTokens(cfg.MaxTokens))
 				} else {
 					b.WriteString(`<td>-</td>`)
