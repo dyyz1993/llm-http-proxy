@@ -278,7 +278,7 @@ HTTP / SSE / WebSocket 全透传,不追加任何 header,不修改响应体。
 【推荐】走 api.z.ai(国际域名,响应更稳,权限/计费更友好):
 
   # OpenAI 兼容格式
-  curl https://p.19930810.xyz:8443/k/%[1]s/https://api.z.ai/api/paas/v4/chat/completions \
+  curl https://p.19930810.xyz:8443/k/%[1]s/https://api.z.ai/api/coding/paas/v4/chat/completions \
     -H "Authorization: Bearer 任意值" \
     -H "Content-Type: application/json" \
     -d '{"model":"glm-4-flash","messages":[{"role":"user","content":"你好"}]}'
@@ -292,7 +292,7 @@ HTTP / SSE / WebSocket 全透传,不追加任何 header,不修改响应体。
 
 也可走官方域名 open.bigmodel.cn(同后端,路径相同):
 
-  curl https://p.19930810.xyz:8443/k/%[1]s/https://open.bigmodel.cn/api/paas/v4/chat/completions \
+  curl https://p.19930810.xyz:8443/k/%[1]s/https://open.bigmodel.cn/api/coding/paas/v4/chat/completions \
     -H "Authorization: Bearer 任意值" \
     -H "Content-Type: application/json" \
     -d '{"model":"glm-4-flash","messages":[{"role":"user","content":"你好"}]}'
@@ -303,7 +303,7 @@ HTTP / SSE / WebSocket 全透传,不追加任何 header,不修改响应体。
 
 把完整目标 URL 直接拼在路径里,key 由客户端提供:
 
-  curl https://p.19930810.xyz:8443/https://api.z.ai/api/paas/v4/chat/completions \
+  curl https://p.19930810.xyz:8443/https://api.z.ai/api/coding/paas/v4/chat/completions \
     -H "Authorization: Bearer 你的真实KEY" \
     -H "Content-Type: application/json" \
     -d '{"model":"glm-4-flash","messages":[{"role":"user","content":"你好"}]}'
@@ -318,9 +318,9 @@ HTTP / SSE / WebSocket 全透传,不追加任何 header,不修改响应体。
 2. Header 自动检测:客户端带 x-api-key 就替换 x-api-key,
    带 Authorization 就替换 Authorization,两个都带就都替换。
 3. 支持的三种上游路径(同一套 GLM 后端,优先用 api.z.ai):
-   - api.z.ai/api/paas/v4/...        (OpenAI 格式,推荐)
-   - api.z.ai/api/anthropic/v1/...   (Anthropic 格式,推荐)
-   - open.bigmodel.cn/api/paas/v4/... (OpenAI 格式,官方域名)
+   - api.z.ai/api/coding/paas/v4/...        (OpenAI 格式,推荐 / 编程套餐)
+   - api.z.ai/api/anthropic/v1/...          (Anthropic 格式,推荐)
+   - open.bigmodel.cn/api/coding/paas/v4/... (OpenAI 格式,官方域名 / 编程套餐)
    - open.bigmodel.cn/api/anthropic/v1/... (Anthropic 格式,官方域名)
 4. SSE 流式 / WebSocket 全程透传,边收边转发,不缓冲不修改。
 5. key 不会出现在日志、统计、URL 里;统计只用别名/掩码 key。

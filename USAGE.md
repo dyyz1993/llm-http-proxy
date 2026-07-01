@@ -181,7 +181,7 @@ EOF
 llm-http-proxy -addr :8080 -keys keys.yaml -admin MyPassword
 
 # 使用(用户不需要带 key,服务端自动注入)
-curl http://localhost:8080/k/glm/https://open.bigmodel.cn/api/paas/v4/chat/completions \
+curl http://localhost:8080/k/glm/https://open.bigmodel.cn/api/coding/paas/v4/chat/completions \
   -H "Authorization: Bearer anything" \
   -d '{"model":"glm-4.6","messages":[{"role":"user","content":"hi"}]}'
 ```
