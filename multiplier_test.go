@@ -275,10 +275,11 @@ func TestApplyTokenMultiplier_TimeBlockAndModel(t *testing.T) {
 	}
 }
 
-// parseTime 解析 "HH:MM" 为当前日期的 time.Time。
+// parseTime 解析 "HH:MM" 为北京时间(beijing)当天的 time.Time。
+// 使用固定北京时间而非 time.Local,确保 CI(Ubuntu UTC)和本地跑结果一致。
 func parseTime(s string) time.Time {
-	now := time.Now()
+	now := time.Now().In(beijing)
 	h, m := 0, 0
 	fmt.Sscanf(s, "%d:%d", &h, &m)
-	return time.Date(now.Year(), now.Month(), now.Day(), h, m, 0, 0, time.Local)
+	return time.Date(now.Year(), now.Month(), now.Day(), h, m, 0, 0, beijing)
 }

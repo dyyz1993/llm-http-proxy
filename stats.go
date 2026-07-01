@@ -221,6 +221,12 @@ func statsHandler(s *statsCollector, authCheck func(*http.Request) bool) http.Ha
 		if by != "key" && by != "window" {
 			by = "ip" // 默认
 		}
+		// 安全:by=key 模式会暴露(已掩码的)API key 信息。
+		// 未配置管理员密码时禁止使用此模式,防止 key 信息被公开访问。
+		if by == "key" && authCheck == nil {
+			http.Error(w, `{"error":"by=key requires admin authentication (set ADMIN_PASSWORD)"}`, http.StatusUnauthorized)
+			return
+		}
 		format := r.URL.Query().Get("format")
 		if format != "table" {
 			format = "json" // 默认

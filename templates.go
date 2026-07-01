@@ -73,25 +73,27 @@ button{padding:10px 20px;cursor:pointer}
 <h2>Key 配置 ({{len .Aliases}})</h2>
 {{if not .Aliases}}<p>暂无配置。在下方添加。</p>{{end}}
 <table>
-<tr><th>Alias</th><th>调用地址</th><th>Header</th><th>Prefix</th><th>Key</th><th>Rate/min</th><th>Burst</th><th>有效期</th><th>操作</th></tr>
-{{range $alias, $cfg := .Aliases}}
-<tr {{if index $.Expired $alias}}class="expired"{{end}}>
-<td><b>{{$alias}}</b></td>
-<td><code style="font-size:12px" id="url-{{$alias}}">/k/{{$alias}}/</code> <button type="button" onclick="copyURL('{{$alias}}')" style="padding:2px 8px;font-size:12px">复制</button></td>
-<td>{{if $cfg.Header}}{{$cfg.Header}}{{else}}<span style="color:#888">自动</span>{{end}}</td>
-<td>{{$cfg.Prefix}}</td>
-<td><code>{{$cfg.Key}}</code></td>
-<td>{{if $cfg.Rate}}{{$cfg.Rate}}{{else}}-{{end}}</td>
-<td>{{if $cfg.Burst}}{{$cfg.Burst}}{{else}}-{{end}}</td>
-<td>{{if $cfg.Expires}}{{$cfg.Expires}}{{if index $.Expired $alias}}<span class="expired-tag">已到期</span>{{end}}{{else}}永久{{end}}</td>
-<td style="white-space:nowrap">
-<a href="/__admin/keys?edit={{$alias}}"><button type="button">编辑</button></a>
-<a href="/__admin/keys?copy={{$alias}}"><button type="button">复制</button></a>
-<form method="post" action="/__admin/keys/delete?alias={{$alias}}" style="display:inline">
-<button type="submit" onclick="return confirm('删除 {{$alias}}?')">删除</button></form>
-</td>
-</tr>
-{{end}}
+	<tr><th>Alias</th><th>调用地址</th><th>Header</th><th>Prefix</th><th>Key</th><th>Rate/min</th><th>Burst</th><th>Token上限</th><th>窗口</th><th>有效期</th><th>操作</th></tr>
+	{{range $alias, $cfg := .Aliases}}
+	<tr {{if index $.Expired $alias}}class="expired"{{end}}>
+	<td><b>{{$alias}}</b></td>
+	<td><code style="font-size:12px" id="url-{{$alias}}">/k/{{$alias}}/</code> <button type="button" onclick="copyURL('{{$alias}}')" style="padding:2px 8px;font-size:12px">复制</button></td>
+	<td>{{if $cfg.Header}}{{$cfg.Header}}{{else}}<span style="color:#888">自动</span>{{end}}</td>
+	<td>{{$cfg.Prefix}}</td>
+	<td><code>{{$cfg.Key}}</code></td>
+	<td>{{if $cfg.Rate}}{{$cfg.Rate}}{{else}}-{{end}}</td>
+	<td>{{if $cfg.Burst}}{{$cfg.Burst}}{{else}}-{{end}}</td>
+	<td>{{if $cfg.MaxTokens}}{{fmtTokens $cfg.MaxTokens}}{{else}}-{{end}}</td>
+	<td>{{if $cfg.Window}}{{$cfg.Window}}{{else}}-{{end}}</td>
+	<td>{{if $cfg.Expires}}{{$cfg.Expires}}{{if index $.Expired $alias}}<span class="expired-tag">已到期</span>{{end}}{{else}}永久{{end}}</td>
+	<td style="white-space:nowrap">
+	<a href="/__admin/keys?edit={{$alias}}"><button type="button">编辑</button></a>
+	<a href="/__admin/keys?copy={{$alias}}"><button type="button">复制</button></a>
+	<form method="post" action="/__admin/keys/delete?alias={{$alias}}" style="display:inline">
+	<button type="submit" onclick="return confirm('删除 {{$alias}}?')">删除</button></form>
+	</td>
+	</tr>
+	{{end}}
 </table>
 <h3>{{if .Editing}}编辑 {{.EditAlias}}{{else if .Copying}}复制自 {{.CopyFrom}}{{else}}新增{{end}}</h3>
 <form method="post" action="/__admin/keys/new">

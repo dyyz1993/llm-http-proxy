@@ -974,9 +974,10 @@ func TestStatsByKeyView(t *testing.T) {
 	defer backend.Close()
 
 	stats := newStatsCollector()
+	alwaysAuth := func(r *http.Request) bool { return true }
 	mux := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if req.URL.Path == "/__stats" {
-			statsHandler(stats, nil).ServeHTTP(w, req)
+			statsHandler(stats, alwaysAuth).ServeHTTP(w, req)
 			return
 		}
 		newProxyHandler(stats, nil, "", nil, nil).ServeHTTP(w, req)
@@ -1032,9 +1033,10 @@ func TestStatsDistinctCount(t *testing.T) {
 	defer backend.Close()
 
 	stats := newStatsCollector()
+	alwaysAuth := func(r *http.Request) bool { return true }
 	mux := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if req.URL.Path == "/__stats" {
-			statsHandler(stats, nil).ServeHTTP(w, req)
+			statsHandler(stats, alwaysAuth).ServeHTTP(w, req)
 			return
 		}
 		newProxyHandler(stats, nil, "", nil, nil).ServeHTTP(w, req)

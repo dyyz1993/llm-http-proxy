@@ -191,18 +191,24 @@ func main() {
 			versionHandler(w, req)
 			return
 		case req.URL.Path == "/__stats":
-			// 统计端点鉴权:如果启用了管理界面,需登录才能看
-			var authFn func(*http.Request) bool
-			if admin != nil {
-				authFn = admin.authCheck
+			// 统计端点暴露了 key 别名、用量等敏感信息,必须登录才能查看。
+			// 未配置管理员密码时直接拒绝,防止信息泄露。
+			if admin == nil {
+				http.Error(w, `{"error":"stats require admin authentication (set ADMIN_PASSWORD)"}`, http.StatusUnauthorized)
+				return
 			}
-			statsHandler(stats, authFn).ServeHTTP(w, req)
+			statsHandler(stats, admin.authCheck).ServeHTTP(w, req)
 			return
 		case req.URL.Path == "/" || req.URL.Path == "":
 			// 根路径返回使用指南(TXT)
 			serveHelp(w, "")
 			return
 		case ks != nil && strings.HasPrefix(req.URL.Path, "/k/"):
+			if strings.HasSuffix(req.URL.Path, "/__stats") {
+				// 按别名统计: /k/{alias}/__stats 无需额外认证,知道 alias 即可查看
+				handleAliasStats(w, req, ks, stats, usageTracker)
+				return
+			}
 			// key 注入模式:/k/{alias}/https://目标
 			handleKeyRoute(w, req, ks, stats, usageTracker)
 			return
@@ -413,6 +419,149 @@ func handleKeyRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, stat
 	req.RequestURI = "/" + target
 	newProxyHandler(stats, ctx.HeadersToInject, ctx.StatLabel,
 		ctx.ImageFilter, ctx.TokenMultipliers).ServeHTTP(w, req)
+}
+
+// handleAliasStats 处理 /k/{alias}/__stats,返回该别名的用量统计和最近日志。
+// 不要求额外认证——知道 alias 就能看(和能用这个 alias 的范围一致)。
+func handleAliasStats(w http.ResponseWriter, r *http.Request, ks *keyStore, stats *statsCollector, us *usageStats) {
+	// 路径: /k/{alias}/__stats
+	path := strings.TrimPrefix(r.URL.Path, "/k/")
+	parts := strings.SplitN(path, "/", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] != "__stats" {
+		http.Error(w, "invalid stats path", http.StatusBadRequest)
+		return
+	}
+	alias := parts[0]
+
+	allCfg := ks.allConfigs()
+	if _, ok := allCfg[alias]; !ok {
+		http.Error(w, "unknown alias: "+alias, http.StatusNotFound)
+		return
+	}
+	expired := ks.isExpired(alias)
+	statKey := "key:" + alias
+
+	// Token 用量统计
+	usageSnap := us.snapshot()
+	var usageHTML string
+	if u, ok := usageSnap[alias]; ok {
+		usageHTML = buildUsageHTML(map[string]aliasUsageStats{alias: u}, nil)
+	}
+
+	// 请求统计(从 statsCollector 过滤出该别名的条目)
+	statsSnap := stats.snapshot()
+	var totalReqs int64
+	var ok2xx int64
+	ipSet := make(map[string]bool)
+	for ip, is := range statsSnap {
+		if ke, ok := is.Keys[statKey]; ok {
+			totalReqs += ke.Count
+			for code, c := range ke.StatusCounts {
+				if code >= 200 && code < 300 {
+					ok2xx += c
+				}
+			}
+			ipSet[ip] = true
+		}
+	}
+	var successRate float64
+	if totalReqs > 0 {
+		successRate = float64(ok2xx) / float64(totalReqs) * 100
+	}
+
+	// 最近日志(过滤出该别名的条目)
+	logs := globalLogRing.recent(200)
+	var aliasLogs []logEntry
+	for _, e := range logs {
+		if e.Key == statKey {
+			aliasLogs = append(aliasLogs, e)
+		}
+	}
+	if len(aliasLogs) > 50 {
+		aliasLogs = aliasLogs[:50]
+	}
+
+	// 渲染 HTML
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	fmt.Fprintf(w, `<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<title>%s - 别名统计 - llm-http-proxy</title>
+<style>
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;margin:20px;background:#f5f5f5;color:#333}
+h2{border-bottom:2px solid #4a90d9;padding-bottom:6px}
+table{border-collapse:collapse;width:auto;margin:8px 0;background:#fff;font-size:13px}
+th,td{border:1px solid #ddd;padding:6px 10px;text-align:center}
+th{background:#4a90d9;color:#fff;font-weight:600;white-space:nowrap}
+tr:nth-child(even){background:#f9f9f9}
+.summary{display:flex;gap:16px;margin:12px 0;flex-wrap:wrap}
+.card{background:#fff;border:1px solid #ddd;border-radius:6px;padding:14px 20px;min-width:140px;text-align:center;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+.card .num{font-size:24px;font-weight:700;color:#4a90d9}
+.card .label{font-size:12px;color:#888;margin-top:4px}
+.expired-badge{display:inline-block;background:#e74c3c;color:#fff;padding:2px 10px;border-radius:4px;font-size:12px;font-weight:700}
+.status-ok{color:#27ae60;font-weight:700}
+.status-err{color:#e74c3c}
+.log-table{font-size:12px}
+.log-table td{font-family:monospace;font-size:11px}
+a{color:#4a90d9;text-decoration:none}
+a:hover{text-decoration:underline}
+</style>
+</head><body>
+<h2>别名统计: %s %s</h2>
+`, alias, alias, alias)
+	if expired {
+		fmt.Fprintf(w, `<p><span class="expired-badge">已过期</span></p>`)
+	}
+
+	// 统计卡片
+	fmt.Fprintf(w, `<div class="summary">
+<div class="card"><div class="num">%d</div><div class="label">总请求</div></div>
+<div class="card"><div class="num">%d</div><div class="label">来源 IP</div></div>
+<div class="card"><div class="num">%s</div><div class="label">成功率</div></div>
+</div>`, totalReqs, len(ipSet), fmt.Sprintf("%.1f%%", successRate))
+
+	// Token 用量表
+	if usageHTML != "" {
+		fmt.Fprintf(w, `<h3>Token 用量</h3>%s`, usageHTML)
+	} else {
+		fmt.Fprintf(w, `<p>暂无 Token 用量数据。</p>`)
+	}
+
+	// 日志表
+	fmt.Fprintf(w, `<h3>最近 %d 条请求日志</h3>`, len(aliasLogs))
+	if len(aliasLogs) == 0 {
+		fmt.Fprintf(w, `<p>暂无日志。</p>`)
+	} else {
+		fmt.Fprintf(w, `<table class="log-table">
+<tr><th>时间</th><th>IP</th><th>Method</th><th>Host</th><th>Status</th><th>TTFB</th><th>耗时</th><th>流式</th><th>输入</th><th>缓存</th><th>输出</th><th>费用</th></tr>`)
+		for _, e := range aliasLogs {
+			statusClass := ""
+			if e.Status >= 400 {
+				statusClass = ` class="status-err"`
+			} else if e.Status >= 200 && e.Status < 300 {
+				statusClass = ` class="status-ok"`
+			}
+			streamMark := ""
+			if e.Stream {
+				streamMark = "⚡"
+			}
+			costStr := "-"
+			if e.CostCalculated && e.TotalCost > 0 {
+				costStr = fmt.Sprintf("%.4f", e.TotalCost)
+			}
+			fmt.Fprintf(w, `<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td%s>%d</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>`,
+				e.Time, e.IP, e.Method, e.Host, statusClass, e.Status,
+				e.TTFB, e.Duration, streamMark,
+				fmtTokens(e.Prompt), fmtTokens(e.Cached), fmtTokens(e.Completion),
+				costStr)
+		}
+		fmt.Fprintf(w, `</table>`)
+	}
+
+	fmt.Fprintf(w, `<p style="color:#888;font-size:12px;margin-top:20px">
+	<a href="/k/%[1]s/__stats">↻ 刷新</a> · 
+	<a href="/">使用指南</a></p>
+</body></html>`, alias)
 }
 
 // sharedTransport / sharedClient 是全局共享的连接池。
