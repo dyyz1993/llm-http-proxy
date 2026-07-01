@@ -459,7 +459,8 @@ func (us *usageStats) checkQuota(alias string, cfg KeyConfig) (ok bool, reason s
 	}
 
 	// 检查 token 用量上限
-	totalTokens := s.WindowPrompt + s.WindowCached + s.WindowCompletion
+	// prompt_tokens(OpenAI 格式)已包含 cached_tokens，只算 prompt + completion 避免重复。
+	totalTokens := s.WindowPrompt + s.WindowCompletion
 	if cfg.MaxTokens > 0 && totalTokens >= cfg.MaxTokens {
 		remain := window - time.Since(time.Unix(s.WindowStart, 0))
 		if remain < 0 {
