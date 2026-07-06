@@ -69,7 +69,7 @@ func BenchmarkProxy(b *testing.B) {
 	backend := benchBackend()
 	defer backend.Close()
 
-	proxy := httptest.NewServer(newProxyHandler(newStatsCollector(), nil, "", nil, nil))
+	proxy := httptest.NewServer(newProxyHandler(newStatsCollector(), nil, "", nil, nil, RetryConfig{}))
 	defer proxy.Close()
 
 	client := benchClient()
@@ -92,7 +92,7 @@ func BenchmarkProxyConcurrent(b *testing.B) {
 	backend := benchBackend()
 	defer backend.Close()
 
-	proxy := httptest.NewServer(newProxyHandler(newStatsCollector(), nil, "", nil, nil))
+	proxy := httptest.NewServer(newProxyHandler(newStatsCollector(), nil, "", nil, nil, RetryConfig{}))
 	defer proxy.Close()
 
 	client := benchClient()
@@ -120,7 +120,7 @@ func BenchmarkWebSocket(b *testing.B) {
 	}))
 	defer wsBackend.Close()
 
-	proxy := httptest.NewServer(newProxyHandler(newStatsCollector(), nil, "", nil, nil))
+	proxy := httptest.NewServer(newProxyHandler(newStatsCollector(), nil, "", nil, nil, RetryConfig{}))
 	defer proxy.Close()
 
 	proxyWS := "ws:" + strings.TrimPrefix(proxy.URL, "http:")

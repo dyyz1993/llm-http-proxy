@@ -53,6 +53,7 @@ type CheckContext struct {
 	HeadersToInject  http.Header
 	ImageFilter      []ImageFilterRule
 	TokenMultipliers []TokenMultiplierRule
+	RetryConfig      RetryConfig // 上游重试配置
 }
 
 // keyRouteChecks 是 key 注入模式(k/{alias}/...)的拦截器链。
@@ -178,6 +179,7 @@ func checkSetup(ctx *CheckContext) *CheckResult {
 	ctx.StatLabel = "key:" + ctx.Alias
 	ctx.ImageFilter = ctx.Store.getImageFilter()
 	ctx.TokenMultipliers = ctx.Store.getTokenMultipliers()
+	ctx.RetryConfig = ctx.Store.getRetryConfig()
 	return &CheckResult{}
 }
 
@@ -186,6 +188,7 @@ func checkSetupPassthrough(ctx *CheckContext) *CheckResult {
 	if ctx.Store != nil {
 		ctx.ImageFilter = ctx.Store.getImageFilter()
 		ctx.TokenMultipliers = ctx.Store.getTokenMultipliers()
+		ctx.RetryConfig = ctx.Store.getRetryConfig()
 	}
 	return &CheckResult{}
 }

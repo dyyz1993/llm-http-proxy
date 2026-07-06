@@ -102,6 +102,15 @@ myalias:
 #       end: "18:00"
 #
 # 详见 USAGE.md
+#
+# 上游重试(上游返回 5xx/429 或连接失败时自动重试):
+# retry:
+#   max_attempts: 3              # 最多尝试 3 次(含首次,1=不重试)
+#   retry_on_codes: [429,500,502,503]  # 上游返回这些码时重试
+#   retry_on_error: true         # 连接错误也重试
+#   backoff: 500ms               # 退避基准
+#   backoff_multiplier: 2        # 翻倍(500ms→1s→2s)
+#   fallback_status: 429         # 重试耗尽后返回给客户端的状态码
 
 # Image URL 过滤(自动替换/删除请求 body 中的 image_url 块):
 # 详见 USAGE.md

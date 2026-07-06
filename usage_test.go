@@ -545,7 +545,7 @@ func TestProxyNonStreamUsageCapture(t *testing.T) {
 
 	stats := newStatsCollector()
 	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		newProxyHandler(stats, nil, "", nil, nil).ServeHTTP(w, req)
+		newProxyHandler(stats, nil, "", nil, nil, RetryConfig{}).ServeHTTP(w, req)
 	}))
 	defer proxy.Close()
 

@@ -373,7 +373,7 @@ func TestProxyFilterImageBlocks(t *testing.T) {
 		{Domains: []string{backend.Listener.Addr().String()}, Action: "to_text"},
 	}
 
-	proxy := httptest.NewServer(newProxyHandler(newStatsCollector(), nil, "", rules, nil))
+	proxy := httptest.NewServer(newProxyHandler(newStatsCollector(), nil, "", rules, nil, RetryConfig{}))
 	defer proxy.Close()
 
 	body := `{"model":"deepseek-chat","messages":[{"role":"user","content":[{"type":"text","text":"hello"},{"type":"image_url","image_url":{"url":"data:..."}}]}]}`
@@ -396,7 +396,7 @@ func TestProxyPassthroughNoFilter(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	proxy := httptest.NewServer(newProxyHandler(newStatsCollector(), nil, "", nil, nil))
+	proxy := httptest.NewServer(newProxyHandler(newStatsCollector(), nil, "", nil, nil, RetryConfig{}))
 	defer proxy.Close()
 
 	body := `{"model":"gpt-4","messages":[{"role":"user","content":[{"type":"text","text":"hello"},{"type":"image_url","image_url":{"url":"data:..."}}]}]}`
@@ -436,7 +436,7 @@ func TestFilterImageBeforeAfter(t *testing.T) {
 
 	// ---- 测试 1: 无 filter → 应该 400 报错 ----
 	t.Run("无filter时image_url请求应报错", func(t *testing.T) {
-		proxy := httptest.NewServer(newProxyHandler(newStatsCollector(), nil, "", nil, nil))
+		proxy := httptest.NewServer(newProxyHandler(newStatsCollector(), nil, "", nil, nil, RetryConfig{}))
 		defer proxy.Close()
 
 		resp, err := http.Post(proxy.URL+"/"+backend.URL, "application/json", strings.NewReader(body))
@@ -459,7 +459,7 @@ func TestFilterImageBeforeAfter(t *testing.T) {
 		rules := []ImageFilterRule{
 			{Domains: []string{backend.Listener.Addr().String()}, Action: "to_text"},
 		}
-		proxy := httptest.NewServer(newProxyHandler(newStatsCollector(), nil, "", rules, nil))
+		proxy := httptest.NewServer(newProxyHandler(newStatsCollector(), nil, "", rules, nil, RetryConfig{}))
 		defer proxy.Close()
 
 		resp, err := http.Post(proxy.URL+"/"+backend.URL, "application/json", strings.NewReader(body))

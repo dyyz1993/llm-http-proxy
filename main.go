@@ -16,6 +16,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -218,7 +219,7 @@ func main() {
 				Store: ks,
 			}
 			runChecks(w, passthroughChecks, ctx)
-			newProxyHandler(stats, nil, "", ctx.ImageFilter, ctx.TokenMultipliers).ServeHTTP(w, req)
+			newProxyHandler(stats, nil, "", ctx.ImageFilter, ctx.TokenMultipliers, ctx.RetryConfig).ServeHTTP(w, req)
 		}
 	})
 
@@ -418,7 +419,7 @@ func handleKeyRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, stat
 	// 全部通过,转发
 	req.RequestURI = "/" + target
 	newProxyHandler(stats, ctx.HeadersToInject, ctx.StatLabel,
-		ctx.ImageFilter, ctx.TokenMultipliers).ServeHTTP(w, req)
+		ctx.ImageFilter, ctx.TokenMultipliers, ctx.RetryConfig).ServeHTTP(w, req)
 }
 
 // handleAliasStats 处理 /k/{alias}/__stats,返回该别名的用量统计和最近日志。
@@ -580,7 +581,8 @@ var sharedClient = &http.Client{Transport: sharedTransport}
 // statKeyLabel 用于统计里替代掩码 key 显示(如 key 注入模式显示 alias "glm")。
 // imageFilter 是 image_url 过滤规则,非空时在转发前过滤请求 body。
 // tokenMultipliers 是 Token 用量乘数规则,在提取 usage 后应用。
-func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLabel string, imageFilter []ImageFilterRule, tokenMultipliers []TokenMultiplierRule) http.Handler {
+// retryCfg 是上游重试配置(零值=不重试)。
+func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLabel string, imageFilter []ImageFilterRule, tokenMultipliers []TokenMultiplierRule, retryCfg RetryConfig) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		raw := strings.TrimPrefix(req.RequestURI, "/")
 		if raw == "" || !strings.Contains(raw, "://") {
@@ -646,25 +648,112 @@ func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLa
 		stripProxyHeaders(outReq.Header)     // 剥离上游网关注入的反代特征头,保持原始性
 		outReq.ContentLength = contentLength // 显式带上 body 长度,避免 body 不被发送
 
-		resp, err := sharedClient.Do(outReq)
-		if err != nil {
-			// 区分"客户端断连"和"真正的上游错误"。
-			// 客户端主动断连(超时/取消)→ req.Context() 被取消 → 499 Client Closed Request(nginx 约定)。
-			// 其他真正的转发失败(DNS/连接拒绝等)→ 502 Bad Gateway。
-			// 这样统计里 499 = 客户端走了,502 = 上游真有问题,一眼区分。
+		// 上游重试循环
+		// 先把 body buffer 出来,每次重试都用 buffered body 重建请求。
+		var bodyBuf []byte
+		if outReq.Body != nil {
+			bodyBuf, _ = io.ReadAll(outReq.Body)
+			outReq.Body.Close()
+		}
+		// 用 buffered body 创建初始请求(替代已消耗的 outReq)
+		if bodyBuf != nil {
+			bodyReader := io.NopCloser(bytes.NewReader(bodyBuf))
+			newReq, err := http.NewRequestWithContext(req.Context(), req.Method, raw, bodyReader)
+			if err == nil {
+				newReq.Header = outReq.Header.Clone()
+				newReq.ContentLength = outReq.ContentLength
+				outReq = newReq
+			}
+		}
+
+		maxAttempts := retryCfg.effective().MaxAttempts
+		if maxAttempts < 1 {
+			maxAttempts = 1
+		}
+		var resp *http.Response
+		var lastErr error
+		model := ""
+	retryLoop:
+		for attempt := 0; attempt < maxAttempts; attempt++ {
+			// 重试时重建请求(首次就在上面建好了)
+			if attempt > 0 {
+				bodyReader := io.NopCloser(bytes.NewReader(bodyBuf))
+				newReq, err := http.NewRequestWithContext(req.Context(), req.Method, raw, bodyReader)
+				if err != nil {
+					lastErr = err
+					break
+				}
+				newReq.Header = outReq.Header.Clone()
+				newReq.ContentLength = outReq.ContentLength
+				outReq = newReq
+			}
+
+			resp, lastErr = sharedClient.Do(outReq)
+			if lastErr != nil {
+				// 客户端断连 → 不重试
+				if errors.Is(lastErr, context.Canceled) {
+					break
+				}
+				// 连接错误且配置了重试 → 继续
+				if !retryCfg.effective().RetryOnError || attempt >= maxAttempts-1 {
+					break
+				}
+				logRetry(statKeyLabel, model, attempt, maxAttempts, 0, lastErr)
+				time.Sleep(retryCfg.effective().backoffDuration(attempt))
+				continue
+			}
+
+			// 成功拿到响应 → 检查状态码
+			if resp.StatusCode < 400 {
+				// 成功 → 跳出循环,正常处理
+				defer resp.Body.Close()
+				break retryLoop
+			}
+
+			// 5xx / 429 可重试
+			if retryCfg.effective().shouldRetryCode(resp.StatusCode) && attempt < maxAttempts-1 {
+				resp.Body.Close()
+				logRetry(statKeyLabel, model, attempt, maxAttempts, resp.StatusCode, nil)
+				time.Sleep(retryCfg.effective().backoffDuration(attempt))
+				continue
+			}
+
+			// 其他状态码 → 不重试,正常处理
+			defer resp.Body.Close()
+			break retryLoop
+		}
+
+		if lastErr != nil {
+			// 重试耗尽或不可重试的错误
 			status := http.StatusBadGateway
-			if errors.Is(err, context.Canceled) {
+			if errors.Is(lastErr, context.Canceled) {
 				status = 499 // Client Closed Request(非标准,nginx 惯例)
 				rec.status = status
 			}
-			http.Error(rec, "转发失败: "+err.Error(), status)
+			http.Error(rec, "转发失败: "+lastErr.Error(), status)
 			if stats != nil {
 				stats.record(ip, statKey, targetHost, rec.status)
 				logRequest(ip, statKey, req.Method, targetHost, rec.status, time.Since(start), 0, false, usageData{}, false)
 			}
 			return
 		}
-		defer resp.Body.Close()
+
+		// 重试耗尽但仍有响应 → 用后备码
+		if resp != nil && resp.StatusCode >= 400 && !retryCfg.effective().shouldRetryCode(resp.StatusCode) {
+			// 正常处理(非重试性状态码,如4xx)
+			defer resp.Body.Close()
+		} else if resp != nil && resp.StatusCode >= 400 {
+			// 重试耗尽 → 关闭响应,返回后备码
+			resp.Body.Close()
+			fallback := retryCfg.effective().FallbackStatus
+			rec.Header().Set("Retry-After", "60")
+			http.Error(rec, "上游服务暂时不可用,请稍后重试", fallback)
+			if stats != nil {
+				stats.record(ip, statKey, targetHost, rec.status)
+				logRequest(ip, statKey, req.Method, targetHost, rec.status, time.Since(start), 0, false, usageData{}, false)
+			}
+			return
+		}
 
 		dst := rec.Header()
 		for k, vs := range resp.Header {

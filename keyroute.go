@@ -280,6 +280,7 @@ type keyStore struct {
 	imageFilter         []ImageFilterRule             // 全局 image_url 过滤规则
 	tokenMultipliers    []TokenMultiplierRule         // 全局 Token 用量乘数规则
 	interceptorProfiles map[string]InterceptorProfile // 拦截器模板(interceptor_profiles 段)
+	retryConfig         RetryConfig                   // 上游请求重试配置
 }
 
 // newKeyStore 创建空的 key store。
@@ -306,6 +307,7 @@ func (ks *keyStore) load(path string) error {
 	var rules []ImageFilterRule
 	var multipliers []TokenMultiplierRule
 	var profiles map[string]InterceptorProfile
+	var retryCfg RetryConfig
 	var configs map[string]KeyConfig
 	{
 		var raw map[string]interface{}
@@ -330,10 +332,17 @@ func (ks *keyStore) load(path string) error {
 				log.Printf("解析 interceptor_profiles 配置失败: %v", err)
 			}
 		}
+		if retryRaw, ok := raw["retry"]; ok {
+			retryData, _ := yaml.Marshal(retryRaw)
+			if err := yaml.Unmarshal(retryData, &retryCfg); err != nil {
+				log.Printf("解析 retry 配置失败: %v", err)
+			}
+		}
 		// 去掉已知的全局字段，剩余部分作为 keys 解析
 		delete(raw, "image_filter")
 		delete(raw, "token_multipliers")
 		delete(raw, "interceptor_profiles")
+		delete(raw, "retry")
 		keysData, _ := yaml.Marshal(raw)
 		if err := yaml.Unmarshal(keysData, &configs); err != nil {
 			return err
@@ -346,6 +355,7 @@ func (ks *keyStore) load(path string) error {
 	ks.imageFilter = rules
 	ks.tokenMultipliers = multipliers
 	ks.interceptorProfiles = profiles
+	ks.retryConfig = retryCfg
 	ks.path = path
 	if fi, err := os.Stat(path); err == nil {
 		ks.lastMtime = fi.ModTime()
@@ -550,6 +560,13 @@ func (ks *keyStore) getInterceptorProfiles() map[string]InterceptorProfile {
 		cp[k] = v
 	}
 	return cp
+}
+
+// getRetryConfig 返回上游重试配置副本。
+func (ks *keyStore) getRetryConfig() RetryConfig {
+	ks.mu.RLock()
+	defer ks.mu.RUnlock()
+	return ks.retryConfig
 }
 
 // --- 管理用写方法(给 admin UI 用) ---
