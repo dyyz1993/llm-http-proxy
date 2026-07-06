@@ -258,7 +258,7 @@ func versionHandler(w http.ResponseWriter, req *http.Request) {
 // helpText 返回纯文本使用教程(分章节)。根路径 / 裸 alias 路径访问时展示。
 // 接收 alias 参数:为空时是通用教程,非空时在示例里用该 alias。
 func helpText(alias string) string {
-	aliasExample := "glm"
+	aliasExample := "your-alias" // 占位符,不暴露真实别名
 	if alias != "" {
 		aliasExample = alias
 	}
