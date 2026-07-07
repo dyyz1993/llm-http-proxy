@@ -673,6 +673,8 @@ func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLa
 		var resp *http.Response
 		var lastErr error
 		model := ""
+		// exhausted: 重试耗尽(最后一次响应仍是可重试码或连接错误)
+		exhausted := false
 	retryLoop:
 		for attempt := 0; attempt < maxAttempts; attempt++ {
 			// 重试时重建请求(首次就在上面建好了)
@@ -694,8 +696,13 @@ func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLa
 				if errors.Is(lastErr, context.Canceled) {
 					break
 				}
-				// 连接错误且配置了重试 → 继续
-				if !retryCfg.effective().RetryOnError || attempt >= maxAttempts-1 {
+				// 连接错误:已到最后一次 → 标记耗尽
+				if attempt >= maxAttempts-1 {
+					exhausted = true
+					break
+				}
+				// 配置了重试 → 继续
+				if !retryCfg.effective().RetryOnError {
 					break
 				}
 				logRetry(statKeyLabel, model, attempt, maxAttempts, 0, lastErr)
@@ -710,27 +717,34 @@ func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLa
 				break retryLoop
 			}
 
-			// 5xx / 429 可重试
-			if retryCfg.effective().shouldRetryCode(resp.StatusCode) && attempt < maxAttempts-1 {
+			// 可重试状态码
+			if retryCfg.effective().shouldRetryCode(resp.StatusCode) {
 				resp.Body.Close()
+				// 已到最后一次 → 标记耗尽
+				if attempt >= maxAttempts-1 {
+					exhausted = true
+					resp = nil
+					break
+				}
+				// 还有重试机会 → 退避后继续
 				logRetry(statKeyLabel, model, attempt, maxAttempts, resp.StatusCode, nil)
 				time.Sleep(retryCfg.effective().backoffDuration(attempt))
 				continue
 			}
 
-			// 其他状态码 → 不重试,正常处理
+			// 其他状态码(如 4xx) → 不重试,正常透传给客户端
 			defer resp.Body.Close()
 			break retryLoop
 		}
 
-		if lastErr != nil {
-			// 重试耗尽或不可重试的错误
-			status := http.StatusBadGateway
-			if errors.Is(lastErr, context.Canceled) {
-				status = 499 // Client Closed Request(非标准,nginx 惯例)
-				rec.status = status
+		// 处理重试耗尽:返回 fallback_status 给客户端
+		if exhausted {
+			fallback := retryCfg.effective().FallbackStatus
+			if fallback < 100 {
+				fallback = http.StatusTooManyRequests // 默认 429
 			}
-			http.Error(rec, "转发失败: "+lastErr.Error(), status)
+			rec.Header().Set("Retry-After", "60")
+			http.Error(rec, "上游服务暂时不可用,请稍后重试", fallback)
 			if stats != nil {
 				stats.record(ip, statKey, targetHost, rec.status)
 				logRequest(ip, statKey, req.Method, targetHost, rec.status, time.Since(start), 0, false, usageData{}, false)
@@ -738,16 +752,14 @@ func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLa
 			return
 		}
 
-		// 重试耗尽但仍有响应 → 用后备码
-		if resp != nil && resp.StatusCode >= 400 && !retryCfg.effective().shouldRetryCode(resp.StatusCode) {
-			// 正常处理(非重试性状态码,如4xx)
-			defer resp.Body.Close()
-		} else if resp != nil && resp.StatusCode >= 400 {
-			// 重试耗尽 → 关闭响应,返回后备码
-			resp.Body.Close()
-			fallback := retryCfg.effective().FallbackStatus
-			rec.Header().Set("Retry-After", "60")
-			http.Error(rec, "上游服务暂时不可用,请稍后重试", fallback)
+		// 处理连接错误(非耗尽,不可重试的错误)
+		if lastErr != nil {
+			status := http.StatusBadGateway
+			if errors.Is(lastErr, context.Canceled) {
+				status = 499 // Client Closed Request(非标准,nginx 惯例)
+				rec.status = status
+			}
+			http.Error(rec, "转发失败: "+lastErr.Error(), status)
 			if stats != nil {
 				stats.record(ip, statKey, targetHost, rec.status)
 				logRequest(ip, statKey, req.Method, targetHost, rec.status, time.Since(start), 0, false, usageData{}, false)
