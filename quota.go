@@ -394,3 +394,182 @@ func buildQuotaHTML(entries []cachedQuota) string {
 	}
 	return b.String()
 }
+
+// ---------- 直接查询原始 API Key ----------
+
+// fetchOneKey 直接调 api.z.ai 拉取单个 raw key 的配额数据,不依赖 quotaCache。
+func fetchOneKey(label, rawKey string) *cachedQuota {
+	req, err := http.NewRequest(http.MethodGet,
+		"https://api.z.ai/api/monitor/usage/quota/limit", nil)
+	if err != nil {
+		return nil
+	}
+	req.Header.Set("Authorization", rawKey)
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+
+	var qr quotaResponse
+	if err := json.NewDecoder(resp.Body).Decode(&qr); err != nil {
+		return nil
+	}
+	if !qr.Success || qr.Data == nil {
+		return nil
+	}
+
+	return &cachedQuota{
+		Alias:     label,
+		Level:     qr.Data.Level,
+		Limits:    qr.Data.Limits,
+		FetchedAt: time.Now(),
+	}
+}
+
+// ---------- 纯文本/ASCII 输出(按周额度排序) ----------
+
+// asciiBar 渲染纯 ASCII 进度条,宽 20 格。
+func asciiBar(pct int) string {
+	const barLen = 20
+	filled := pct * barLen / 100
+	if filled > barLen {
+		filled = barLen
+	}
+	return "[" + strings.Repeat("#", filled) + strings.Repeat("-", barLen-filled) + "]"
+}
+
+// weeklyQuotaPct 提取周额度(unit=6)的使用百分比,没有周额度返回 -1。
+func weeklyQuotaPct(e cachedQuota) int {
+	for _, lim := range e.Limits {
+		if lim.Unit == 6 {
+			return lim.Percentage
+		}
+	}
+	return -1
+}
+
+// weeklyQuotaRemaining 返回周额度剩余值(秒),没有周额度返回 -1。
+func weeklyQuotaRemaining(e cachedQuota) int {
+	for _, lim := range e.Limits {
+		if lim.Unit == 6 && lim.Remaining != nil {
+			return *lim.Remaining
+		}
+	}
+	return -1
+}
+
+// buildSortedQuotaText 以纯文本格式输出所有 key 的配额数据,
+// 按周额度使用率降序排列(用得最多的排最前),无周额度的排最后。
+// filterAliases 非空时只输出指定 alias。
+func buildSortedQuotaText(entries []cachedQuota, filterAliases ...string) string {
+	if len(entries) == 0 {
+		return "暂无配额数据\n"
+	}
+
+	// 按周额度百分比降序排序
+	sorted := make([]cachedQuota, 0, len(entries))
+	for _, e := range entries {
+		if len(filterAliases) > 0 {
+			matched := false
+			for _, a := range filterAliases {
+				if e.Alias == a {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				continue
+			}
+		}
+		sorted = append(sorted, e)
+	}
+	if len(sorted) == 0 {
+		return "没有匹配的 alias\n"
+	}
+
+	sort.SliceStable(sorted, func(i, j int) bool {
+		pi := weeklyQuotaPct(sorted[i])
+		pj := weeklyQuotaPct(sorted[j])
+		if pi != pj {
+			if pi == -1 {
+				return false // 无周额度的排最后
+			}
+			if pj == -1 {
+				return true
+			}
+			return pi > pj // 降序:用得多的排前面
+		}
+		return sorted[i].Alias < sorted[j].Alias
+	})
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "%-4s %-16s %-6s %7s  %-24s %s\n",
+		"排名", "Alias", "套餐", "周额度", "进度条", "重置时间")
+	b.WriteString(strings.Repeat("-", 75) + "\n")
+
+	for rank, e := range sorted {
+		levelTag := "PRO"
+		if e.Level == "max" {
+			levelTag = "MAX"
+		}
+		pct := weeklyQuotaPct(e)
+		bar := ""
+		resetStr := ""
+		if pct >= 0 {
+			bar = asciiBar(pct)
+			// 找周额度的重置时间
+			for _, lim := range e.Limits {
+				if lim.Unit == 6 {
+					resetStr = fmtResetTime(lim.NextResetMs)
+					break
+				}
+			}
+		} else {
+			bar = "(无周额度)"
+		}
+		pctStr := "-"
+		if pct >= 0 {
+			pctStr = fmt.Sprintf("%d%%", pct)
+		}
+		fmt.Fprintf(&b, "%-4d %-16s %-6s %7s  %-24s %s\n",
+			rank+1, e.Alias, levelTag, pctStr, bar, resetStr)
+
+		// 详细配额信息(缩进)
+		for _, lim := range e.Limits {
+			detailBar := asciiBar(lim.Percentage)
+			detailReset := fmtResetTime(lim.NextResetMs)
+			label := unitLabel(lim.Unit)
+			fmt.Fprintf(&b, "       %-8s %s %3d%%  %s\n",
+				label, detailBar, lim.Percentage, detailReset)
+
+			// 时长类显示已用/剩余
+			if lim.Usage != nil && lim.CurrentVal != nil {
+				remaining := 0
+				if lim.Remaining != nil {
+					remaining = *lim.Remaining
+				}
+				fmt.Fprintf(&b, "              已用 %d/%d  剩余 %d\n",
+					*lim.CurrentVal, *lim.Usage, remaining)
+			}
+
+			// 模型明细
+			if len(lim.Details) > 0 {
+				var parts []string
+				for _, d := range lim.Details {
+					if d.Usage > 0 {
+						parts = append(parts, fmt.Sprintf("%s:%d", d.ModelCode, d.Usage))
+					}
+				}
+				if len(parts) > 0 {
+					fmt.Fprintf(&b, "       模型:   %s\n", strings.Join(parts, "  "))
+				}
+			}
+		}
+		_ = levelTag
+	}
+	b.WriteString(strings.Repeat("-", 75) + "\n")
+	return b.String()
+}

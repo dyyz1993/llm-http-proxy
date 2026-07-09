@@ -200,6 +200,27 @@ func main() {
 			}
 			statsHandler(stats, admin.authCheck).ServeHTTP(w, req)
 			return
+		case req.URL.Path == "/__quota":
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			if req.Method == "POST" {
+				// POST: 从 body 读取 raw keys 直接查询
+				handleQuotaPost(w, req)
+				return
+			}
+			// GET: 从 keys.yaml 缓存查询
+			if quotaCacheInst == nil {
+				w.Write([]byte("配额缓存未启用（需要 key 注入模式）\n"))
+				return
+			}
+			// 可选 refresh=1 强制刷新
+			if req.URL.Query().Get("refresh") == "1" {
+				quotaCacheInst.fetchAll(ks.allConfigs())
+			}
+			entries := quotaCacheInst.getAll()
+			// 可选 alias=xxx 过滤
+			filters := req.URL.Query()["alias"]
+			w.Write([]byte(buildSortedQuotaText(entries, filters...)))
+			return
 		case req.URL.Path == "/" || req.URL.Path == "":
 			// 根路径返回使用指南(TXT)
 			serveHelp(w, "")
@@ -562,7 +583,56 @@ a:hover{text-decoration:underline}
 	fmt.Fprintf(w, `<p style="color:#888;font-size:12px;margin-top:20px">
 	<a href="/k/%[1]s/__stats">↻ 刷新</a> · 
 	<a href="/">使用指南</a></p>
-</body></html>`, alias)
+	</body></html>`, alias)
+}
+
+// handleQuotaPost 处理 POST /__quota,从请求体读取 raw keys 直接查询配额。
+// 请求体: {"keys":["key1","key2",...]} 或 ["key1","key2",...]
+func handleQuotaPost(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)) // 1MB
+	if err != nil {
+		w.Write([]byte("读取请求体失败\n"))
+		return
+	}
+
+	// 尝试解析为 {"keys": [...]}
+	var payload struct {
+		Keys []string `json:"keys"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil || len(payload.Keys) == 0 {
+		// 尝试解析为直接数组 ["key1", "key2", ...]
+		var arrKeys []string
+		if err := json.Unmarshal(body, &arrKeys); err != nil || len(arrKeys) == 0 {
+			w.Write([]byte("请求体格式错误: 需要 {\"keys\":[\"...\"]} 或 [\"...\"]\n"))
+			return
+		}
+		payload.Keys = arrKeys
+	}
+
+	if len(payload.Keys) > 50 {
+		w.Write([]byte("一次最多查询 50 个 key\n"))
+		return
+	}
+
+	// 逐个查询
+	var entries []cachedQuota
+	for i, rawKey := range payload.Keys {
+		rawKey = strings.TrimSpace(rawKey)
+		if rawKey == "" || strings.HasPrefix(rawKey, "sk-") || len(rawKey) < 20 {
+			continue
+		}
+		label := fmt.Sprintf("key-%d", i+1)
+		if e := fetchOneKey(label, rawKey); e != nil {
+			entries = append(entries, *e)
+		}
+	}
+
+	if len(entries) == 0 {
+		w.Write([]byte("所有 key 查询失败(检查 key 是否有效)\n"))
+		return
+	}
+
+	w.Write([]byte(buildSortedQuotaText(entries)))
 }
 
 // sharedTransport / sharedClient 是全局共享的连接池。
