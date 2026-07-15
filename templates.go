@@ -352,7 +352,7 @@ function copyURL(alias) {
 {{end}}
 </select>
 </td></tr>
-<tr><td>切换状态码</td><td><input name="on_status" style="width:200px" value="{{if .Editing}}{{join .EditCfg.OnStatus ", "}}{{else}}402, 429, 502, 503{{end}}" placeholder="402, 429, 502, 503"></td></tr>
+<tr><td>切换状态码</td><td><input name="on_status" style="width:200px" value="{{if .Editing}}{{joinInt .EditCfg.OnStatus ", "}}{{else}}402, 429, 502, 503{{end}}" placeholder="402, 429, 502, 503"></td></tr>
 <tr><td>冷却时间</td><td><input name="cooldown" style="width:100px" value="{{if .Editing}}{{.EditCfg.Cooldown}}{{else}}5m{{end}}" placeholder="5m"></td></tr>
 </table>
 <button type="submit">{{if .Editing}}保存修改{{else}}创建群组{{end}}</button>

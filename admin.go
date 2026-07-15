@@ -857,6 +857,7 @@ func renderTemplate(w http.ResponseWriter, name string, data interface{}) {
 		"mul":       func(a, b float64) float64 { return a * b },
 		"fmtTokens": func(n int64) string { return fmtTokens(n) },
 		"join":      strings.Join,
+		"joinInt":   func(slice []int, sep string) string { return joinInts(slice, sep) },
 		"maskKey":   func(k string) string { return maskKey(k) },
 		"contains":  func(slice []string, s string) bool { return sliceContains(slice, s) },
 	})
@@ -892,4 +893,13 @@ func sliceContains(slice []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// joinInts 把 []int 拼成字符串(模板用)。
+func joinInts(slice []int, sep string) string {
+	strs := make([]string, len(slice))
+	for i, v := range slice {
+		strs[i] = fmt.Sprintf("%d", v)
+	}
+	return strings.Join(strs, sep)
 }
