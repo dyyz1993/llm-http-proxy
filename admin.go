@@ -405,6 +405,7 @@ func (a *adminServer) handleGroups(w http.ResponseWriter, r *http.Request) {
 	}
 
 	groups := a.keys.getGroups()
+	aliases := a.keys.allConfigs()
 	memberStatus := make(map[string]memberStatusSnapshot)
 	gm := a.keys.getGroupManager()
 	if gm != nil {
@@ -415,6 +416,12 @@ func (a *adminServer) handleGroups(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+	}
+
+	// 用量快照(给模板展示用量/额度)
+	var usageSnap map[string]aliasUsageStats
+	if a.usage != nil {
+		usageSnap = a.usage.snapshot()
 	}
 
 	editName := r.URL.Query().Get("edit")
@@ -430,6 +437,8 @@ func (a *adminServer) handleGroups(w http.ResponseWriter, r *http.Request) {
 	renderTemplate(w, "groups", map[string]interface{}{
 		"Groups":       groups,
 		"MemberStatus": memberStatus,
+		"Aliases":      aliases,
+		"UsageSnap":    usageSnap,
 		"Editing":      editing,
 		"EditName":     editName,
 		"EditCfg":      editCfg,
@@ -452,9 +461,10 @@ func (a *adminServer) handleGroupNew(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	membersStr := r.FormValue("members")
+	// select multiple 会发送多个 members 参数
+	r.ParseForm()
 	var members []string
-	for _, m := range strings.Split(membersStr, ",") {
+	for _, m := range r.Form["members"] {
 		m = strings.TrimSpace(m)
 		if m != "" {
 			members = append(members, m)
@@ -847,6 +857,8 @@ func renderTemplate(w http.ResponseWriter, name string, data interface{}) {
 		"mul":       func(a, b float64) float64 { return a * b },
 		"fmtTokens": func(n int64) string { return fmtTokens(n) },
 		"join":      strings.Join,
+		"maskKey":   func(k string) string { return maskKey(k) },
+		"contains":  func(slice []string, s string) bool { return sliceContains(slice, s) },
 	})
 	// 先解析公共片段(head/nav),再解析页面模板
 	if _, err := tmpl.Parse(baseTemplates); err != nil {
@@ -870,4 +882,14 @@ func renderLogin(w http.ResponseWriter) {
 
 func renderMsg(w http.ResponseWriter, title, msg string) {
 	renderTemplate(w, "msg", struct{ Title, Msg string }{title, msg})
+}
+
+// sliceContains 检查字符串是否在切片中(模板用)。
+func sliceContains(slice []string, s string) bool {
+	for _, v := range slice {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }

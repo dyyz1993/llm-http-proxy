@@ -316,24 +316,25 @@ function copyURL(alias) {
 <div style="font-weight:bold;font-size:14px;margin-bottom:8px">
 	{{$name}}
 	<code style="font-size:12px;color:#888">/k/{{$name}}/</code>
+	<a href="/__admin/groups?edit={{$name}}"><button type="button" style="padding:2px 8px;font-size:12px">编辑</button></a>
 	<form method="post" action="/__admin/groups/delete?name={{$name}}" style="display:inline;float:right">
 	<button type="submit" onclick="return confirm('删除群组 {{$name}}?')" style="padding:2px 8px;font-size:12px">删除</button>
 	</form>
 </div>
-<table style="font-size:13px;width:100%">
-<tr><th>#</th><th>成员</th><th>状态</th><th>最后状态码</th><th>失败次数</th></tr>
+<div class="table-wrap"><table style="font-size:13px">
+<tr><th>#</th><th>成员</th><th>Key</th><th>Token用量</th><th>额度</th><th>状态</th><th>失败</th></tr>
 {{range $i, $m := $g.Members}}
-{{with index $.MemberStatus $m}}
 <tr>
 <td>{{$i}}</td>
 <td><b>{{$m}}</b></td>
-<td>{{if .IsCooling}}<span style="color:#e67e22">⏸ 冷却</span>{{else}}<span style="color:#27ae60">✅ 活跃</span>{{end}}</td>
-<td>{{if gt .LastStatus 0}}{{.LastStatus}}{{else}}-{{end}}</td>
-<td>{{if gt .FailCount 0}}<span style="color:red">{{.FailCount}}</span>{{else}}-{{end}}</td>
+{{with index $.Aliases $m}}<td><code style="font-size:11px;color:#888">{{maskKey .Key}}</code></td>{{else}}<td style="color:red">不存在</td>{{end}}
+{{with index $.UsageSnap $m}}<td>{{fmtTokens .WindowPrompt}} + {{fmtTokens .WindowCompletion}}</td>{{else}}<td>-</td>{{end}}
+{{with index $.Aliases $m}}<td>{{if .MaxTokens}}{{fmtTokens .MaxTokens}}{{else}}-{{end}}</td>{{else}}<td>-</td>{{end}}
+{{with index $.MemberStatus $m}}<td>{{if .IsCooling}}<span style="color:#e67e22">⏸ 冷却</span>{{else}}<span style="color:#27ae60">✅ 活跃</span>{{end}}</td>
+<td>{{if gt .FailCount 0}}<span style="color:red">{{.FailCount}}</span>{{else}}-{{end}}</td>{{else}}<td>-</td><td>-</td>{{end}}
 </tr>
 {{end}}
-{{end}}
-</table>
+</table></div>
 <div style="font-size:12px;color:#888;margin-top:4px">
 	切换条件: {{range $g.OnStatus}} {{.}}{{end}} | 冷却: {{$g.Cooldown}}
 </div>
@@ -344,7 +345,13 @@ function copyURL(alias) {
 <form method="post" action="/__admin/groups/new">
 <table>
 <tr><td>群组名</td><td>{{if .Editing}}<b>{{.EditName}}</b>（不可修改）<input type="hidden" name="name" value="{{.EditName}}">{{else}}<input name="name" placeholder="如 glm-pool" required>{{end}}</td></tr>
-<tr><td>成员(逗号分隔)</td><td><input name="members" style="width:400px" value="{{if .Editing}}{{join .EditCfg.Members ", "}}{{end}}" placeholder="glm, max-0, channel" required></td></tr>
+<tr><td>成员<br><span style="font-size:11px;color:#888">Ctrl/Cmd多选</span></td><td>
+<select name="members" multiple style="width:300px;height:150px" required>
+{{range $alias, $cfg := .Aliases}}
+<option value="{{$alias}}" {{if $.Editing}}{{if contains $.EditCfg.Members $alias}}selected{{end}}{{end}}>{{$alias}} ({{maskKey $cfg.Key}})</option>
+{{end}}
+</select>
+</td></tr>
 <tr><td>切换状态码</td><td><input name="on_status" style="width:200px" value="{{if .Editing}}{{join .EditCfg.OnStatus ", "}}{{else}}402, 429, 502, 503{{end}}" placeholder="402, 429, 502, 503"></td></tr>
 <tr><td>冷却时间</td><td><input name="cooldown" style="width:100px" value="{{if .Editing}}{{.EditCfg.Cooldown}}{{else}}5m{{end}}" placeholder="5m"></td></tr>
 </table>
