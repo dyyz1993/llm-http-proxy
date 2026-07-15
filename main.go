@@ -225,6 +225,14 @@ func main() {
 			// 根路径返回使用指南(TXT)
 			serveHelp(w, "")
 			return
+		case ks != nil && strings.HasPrefix(req.URL.Path, "/g/"):
+			// 群组模式: /g/{group}/https://目标
+			if strings.HasSuffix(req.URL.Path, "/__stats") {
+				handleAliasStats(w, req, ks, stats, usageTracker)
+				return
+			}
+			handleGroupRoutePrefix(w, req, ks, stats, usageTracker)
+			return
 		case ks != nil && strings.HasPrefix(req.URL.Path, "/k/"):
 			if strings.HasSuffix(req.URL.Path, "/__stats") {
 				// 按别名统计: /k/{alias}/__stats 无需额外认证,知道 alias 即可查看
@@ -446,6 +454,28 @@ func handleKeyRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, stat
 	req.RequestURI = "/" + target
 	newProxyHandler(stats, ctx.HeadersToInject, ctx.StatLabel,
 		ctx.ImageFilter, ctx.TokenMultipliers, ctx.RetryConfig).ServeHTTP(w, req)
+}
+
+// handleGroupRoutePrefix 解析 /g/{group}/https://target 并交给 handleGroupRoute。
+func handleGroupRoutePrefix(w http.ResponseWriter, req *http.Request, ks *keyStore, stats *statsCollector, us *usageStats) {
+	raw := strings.TrimPrefix(req.RequestURI, "/")
+	rest := strings.TrimPrefix(raw, "g/")
+	if rest == raw || rest == "" {
+		serveHelp(w, "")
+		return
+	}
+	slash := strings.IndexByte(rest, '/')
+	if slash < 0 {
+		serveHelp(w, rest)
+		return
+	}
+	groupName := rest[:slash]
+	target := rest[slash+1:]
+	if target == "" || !strings.Contains(target, "://") {
+		serveHelp(w, groupName)
+		return
+	}
+	handleGroupRoute(w, req, ks, stats, us, groupName, target)
 }
 
 // handleGroupRoute 处理 group 别名池请求。

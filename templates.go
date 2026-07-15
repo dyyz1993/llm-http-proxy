@@ -315,7 +315,7 @@ function copyURL(alias) {
 <div style="margin:12px 0;padding:12px;background:#fff;border-radius:6px;border:1px solid #ddd">
 <div style="font-weight:bold;font-size:14px;margin-bottom:8px">
 	{{$name}}
-	<code style="font-size:12px;color:#888">/k/{{$name}}/</code>
+	<code style="font-size:12px;color:#888">/g/{{$name}}/</code>
 	<a href="/__admin/groups?edit={{$name}}"><button type="button" style="padding:2px 8px;font-size:12px">编辑</button></a>
 	<form method="post" action="/__admin/groups/delete?name={{$name}}" style="display:inline;float:right">
 	<button type="submit" onclick="return confirm('删除群组 {{$name}}?')" style="padding:2px 8px;font-size:12px">删除</button>
