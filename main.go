@@ -495,7 +495,7 @@ func handleGroupRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, st
 			Settings: settingsMgr,
 		}
 
-		rec := &groupResponseWriter{ResponseWriter: w, status: 0, headerWritten: false}
+		rec := newBufferedWriter()
 		if !runChecks(rec, keyRouteChecks, ctx) {
 			// 拦截器拒绝了(402/403/429等) → 标记冷却,换下一个
 			gm.markCooldown(member, groupName, rec.status)
@@ -504,37 +504,36 @@ func handleGroupRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, st
 			continue
 		}
 
-		// 拦截器通过 → 转发请求
-		// 用 groupResponseWriter 拦截响应,如果状态码在 on_status 里则换人
+		// 拦截器通过 → 用 buffering writer 转发请求
+		// buffering writer 先把响应存到内存,判断状态码后再决定 flush 给客户端还是丢弃换人
 		req.RequestURI = "/" + target
 		newProxyHandler(stats, ctx.HeadersToInject, ctx.StatLabel,
 			ctx.ImageFilter, ctx.TokenMultipliers, ctx.RetryConfig).ServeHTTP(rec, req)
 
 		// 检查响应状态码
-		if rec.headerWritten && rec.status >= 200 && rec.status < 400 {
-			// 成功 → 标记成功,返回
+		if rec.status >= 200 && rec.status < 400 {
+			// 成功 → flush buffer 给客户端,返回
+			rec.flushTo(w)
 			gm.markSuccess(member, rec.status)
 			return
 		}
 
-		if rec.headerWritten && gm.shouldSwitchStatus(groupName, rec.status) {
-			// 上游返回了需要换人的状态码
-			// 注意:此时响应头已经写了出去(透传代理的特性),无法再换人
-			// 只有在 headerWritten=false 时才能换人(即上游连接错误,没拿到响应)
+		if gm.shouldSwitchStatus(groupName, rec.status) {
+			// 可换人状态码 → 丢弃 buffer,标记冷却,换下一个
 			gm.markCooldown(member, groupName, rec.status)
-			log.Printf("group 成员上游返回 %d: group=%s member=%s (响应已透传,无法换人)",
-				rec.status, groupName, member)
-			return
+			log.Printf("group 成员返回 %d → 换人: group=%s member=%s", rec.status, groupName, member)
+			continue
 		}
 
-		if !rec.headerWritten {
+		if rec.status == 0 {
 			// 没拿到响应(连接错误等) → 换人
 			gm.markCooldown(member, groupName, 502)
 			log.Printf("group 成员无响应: group=%s member=%s → 换人", groupName, member)
 			continue
 		}
 
-		// 其他情况(如 4xx 不在 on_status 里)→ 正常返回
+		// 其他状态码(不在 on_status 里)→ flush 给客户端,正常返回
+		rec.flushTo(w)
 		return
 	}
 
@@ -544,44 +543,49 @@ func handleGroupRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, st
 	http.Error(w, "所有上游成员暂时不可用,请稍后重试 (group: "+groupName+")\n", http.StatusServiceUnavailable)
 }
 
-// groupResponseWriter 包装 ResponseWriter,记录是否已写入响应头。
-// 在 headerWritten=false 时,group 路由可以决定换下一个成员。
-type groupResponseWriter struct {
-	http.ResponseWriter
-	status        int
-	headerWritten bool
+// bufferedWriter 先把响应存到内存,判断状态码后再决定是否 flush 给客户端。
+// 用于 group 路由:成员返回可换人状态码时丢弃 buffer,换下一个成员重试。
+type bufferedWriter struct {
+	header  http.Header
+	status  int
+	body    []byte
+	written bool // 是否已 flush(防止重复)
 }
 
-func (g *groupResponseWriter) WriteHeader(code int) {
-	if g.headerWritten {
-		return // 只写一次
-	}
-	g.headerWritten = true
-	g.status = code
-	g.ResponseWriter.WriteHeader(code)
+func newBufferedWriter() *bufferedWriter {
+	return &bufferedWriter{header: make(http.Header)}
 }
 
-func (g *groupResponseWriter) Write(b []byte) (int, error) {
-	if !g.headerWritten {
-		g.headerWritten = true
-		g.status = 200
-	}
-	return g.ResponseWriter.Write(b)
+func (b *bufferedWriter) Header() http.Header {
+	return b.header
 }
 
-func (g *groupResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
-	hj, ok := g.ResponseWriter.(http.Hijacker)
-	if !ok {
-		return nil, nil, fmt.Errorf("ResponseWriter 不支持 Hijack")
+func (b *bufferedWriter) WriteHeader(code int) {
+	if b.status == 0 {
+		b.status = code
 	}
-	g.headerWritten = true
-	return hj.Hijack()
 }
 
-func (g *groupResponseWriter) Flush() {
-	if f, ok := g.ResponseWriter.(http.Flusher); ok {
-		f.Flush()
+func (b *bufferedWriter) Write(p []byte) (int, error) {
+	if b.status == 0 {
+		b.status = 200 // 隐式 200
 	}
+	b.body = append(b.body, p...)
+	return len(p), nil
+}
+
+// flushTo 把缓冲的响应写入真正的 ResponseWriter。
+func (b *bufferedWriter) flushTo(w http.ResponseWriter) {
+	if b.written {
+		return
+	}
+	b.written = true
+	dst := w.Header()
+	for k, vs := range b.header {
+		dst[k] = vs
+	}
+	w.WriteHeader(b.status)
+	w.Write(b.body)
 }
 
 // handleAliasStats 处理 /k/{alias}/__stats,返回该别名的用量统计和最近日志。
