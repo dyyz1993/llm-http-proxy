@@ -698,6 +698,9 @@ func buildDailyHTML(snap map[string]aliasUsageStats) string {
 // fmtTokens 把 token 数量格式化成易读的形式。
 // <1000 → 原样; >=1000 → 1.2K; >=1000000 → 1.2M。
 func fmtTokens(n int64) string {
+	if n >= 1000000000 {
+		return fmt.Sprintf("%.2fG", float64(n)/1000000000)
+	}
 	if n >= 1000000 {
 		return fmt.Sprintf("%.1fM", float64(n)/1000000)
 	}
