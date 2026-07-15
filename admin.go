@@ -461,10 +461,10 @@ func (a *adminServer) handleGroupNew(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// select multiple 会发送多个 members 参数
-	r.ParseForm()
+	// members 是逗号分隔的隐藏字段(JS syncMembers 写入)
+	membersStr := r.FormValue("members")
 	var members []string
-	for _, m := range r.Form["members"] {
+	for _, m := range strings.Split(membersStr, ",") {
 		m = strings.TrimSpace(m)
 		if m != "" {
 			members = append(members, m)

@@ -342,22 +342,124 @@ function copyURL(alias) {
 {{end}}
 
 <h3>{{if .Editing}}编辑 {{.EditName}}{{else}}新增群组{{end}}</h3>
-<form method="post" action="/__admin/groups/new">
+<form method="post" action="/__admin/groups/new" id="groupForm">
 <table>
 <tr><td>群组名</td><td>{{if .Editing}}<b>{{.EditName}}</b>（不可修改）<input type="hidden" name="name" value="{{.EditName}}">{{else}}<input name="name" placeholder="如 glm-pool" required>{{end}}</td></tr>
-<tr><td>成员<br><span style="font-size:11px;color:#888">Ctrl/Cmd多选</span></td><td>
-<select name="members" multiple style="width:300px;height:150px" required>
+<tr><td>成员排序<br><span style="font-size:11px;color:#888">上面优先消耗</span></td><td>
+<div id="memberList" style="min-height:40px;border:1px solid #ccc;border-radius:4px;padding:4px;width:350px">
+{{if .Editing}}{{range $i, $m := .EditCfg.Members}}
+<div class="member-item" data-alias="{{$m}}" style="display:flex;align-items:center;gap:6px;padding:4px 6px;margin:2px 0;background:#f5f5f5;border-radius:4px;cursor:move">
+<span style="color:#888;cursor:pointer" onclick="moveUp(this)">▲</span>
+<span style="color:#888;cursor:pointer" onclick="moveDown(this)">▼</span>
+<b>{{$m}}</b>
+<span style="font-size:11px;color:#888">{{with index $.Aliases $m}}{{maskKey .Key}}{{end}}</span>
+<span style="color:#e74c3c;cursor:pointer;margin-left:auto" onclick="removeMember(this)">✕</span>
+</div>
+{{end}}{{else}}
+<div style="color:#999;padding:8px">从下方添加成员</div>
+{{end}}
+</div>
+<div style="margin-top:4px;display:flex;gap:4px">
+<select id="memberSelect" style="width:200px">
+<option value="">选择别名...</option>
 {{range $alias, $cfg := .Aliases}}
-<option value="{{$alias}}" {{if $.Editing}}{{if contains $.EditCfg.Members $alias}}selected{{end}}{{end}}>{{$alias}} ({{maskKey $cfg.Key}})</option>
+<option value="{{$alias}}">{{$alias}} ({{maskKey $cfg.Key}})</option>
 {{end}}
 </select>
+<button type="button" onclick="addMember()">添加成员</button>
+</div>
+<input type="hidden" name="members" id="membersInput">
 </td></tr>
 <tr><td>切换状态码</td><td><input name="on_status" style="width:200px" value="{{if .Editing}}{{joinInt .EditCfg.OnStatus ", "}}{{else}}402, 429, 502, 503{{end}}" placeholder="402, 429, 502, 503"></td></tr>
 <tr><td>冷却时间</td><td><input name="cooldown" style="width:100px" value="{{if .Editing}}{{.EditCfg.Cooldown}}{{else}}5m{{end}}" placeholder="5m"></td></tr>
 </table>
-<button type="submit">{{if .Editing}}保存修改{{else}}创建群组{{end}}</button>
+<button type="submit" onclick="syncMembers()">{{if .Editing}}保存修改{{else}}创建群组{{end}}</button>
 {{if .Editing}}<a href="/__admin/groups"><button type="button">取消</button></a>{{end}}
 </form>
+<script>
+function syncMembers() {
+	var items = document.querySelectorAll('#memberList .member-item');
+	var names = [];
+	for (var i = 0; i < items.length; i++) {
+		names.push(items[i].getAttribute('data-alias'));
+	}
+	document.getElementById('membersInput').value = names.join(',');
+}
+function addMember() {
+	var sel = document.getElementById('memberSelect');
+	if (!sel.value) return;
+	var alias = sel.value;
+	// 检查是否已存在
+	var existing = document.querySelectorAll('#memberList .member-item[data-alias="' + alias + '"]');
+	if (existing.length > 0) { alert('已存在该成员'); return; }
+	var list = document.getElementById('memberList');
+	// 清除空提示
+	var empty = list.querySelector('div[style*="color:#999"]');
+	if (empty) empty.remove();
+	var div = document.createElement('div');
+	div.className = 'member-item';
+	div.setAttribute('data-alias', alias);
+	div.style.cssText = 'display:flex;align-items:center;gap:6px;padding:4px 6px;margin:2px 0;background:#f5f5f5;border-radius:4px;cursor:move';
+	div.innerHTML = '<span style="color:#888;cursor:pointer" onclick="moveUp(this)">▲</span>' +
+		'<span style="color:#888;cursor:pointer" onclick="moveDown(this)">▼</span>' +
+		'<b>' + alias + '</b>' +
+		'<span style="font-size:11px;color:#888">' + sel.options[sel.selectedIndex].textContent.split('(')[1].replace(')','') + '</span>' +
+		'<span style="color:#e74c3c;cursor:pointer;margin-left:auto" onclick="removeMember(this)">✕</span>';
+	list.appendChild(div);
+	sel.selectedIndex = 0;
+}
+function removeMember(el) {
+	el.closest('.member-item').remove();
+	var list = document.getElementById('memberList');
+	if (list.children.length === 0) {
+		list.innerHTML = '<div style="color:#999;padding:8px">从下方添加成员</div>';
+	}
+}
+function moveUp(el) {
+	var item = el.closest('.member-item');
+	var prev = item.previousElementSibling;
+	if (prev && prev.classList.contains('member-item')) {
+		item.parentNode.insertBefore(item, prev);
+	}
+}
+function moveDown(el) {
+	var item = el.closest('.member-item');
+	var next = item.nextElementSibling;
+	if (next && next.classList.contains('member-item')) {
+		item.parentNode.insertBefore(next, item);
+	}
+}
+// 拖拽排序
+document.addEventListener('DOMContentLoaded', function() {
+	var list = document.getElementById('memberList');
+	var dragSrc = null;
+	list.addEventListener('dragstart', function(e) {
+		if (e.target.classList.contains('member-item')) {
+			dragSrc = e.target;
+			e.dataTransfer.effectAllowed = 'move';
+		}
+	});
+	list.addEventListener('dragover', function(e) {
+		e.preventDefault();
+		e.dataTransfer.dropEffect = 'move';
+	});
+	list.addEventListener('drop', function(e) {
+		e.preventDefault();
+		if (!dragSrc) return;
+		var target = e.target.closest('.member-item');
+		if (target && target !== dragSrc) {
+			var rect = target.getBoundingClientRect();
+			var after = e.clientY > rect.top + rect.height / 2;
+			if (after) {
+				target.parentNode.insertBefore(dragSrc, target.nextElementSibling);
+			} else {
+				target.parentNode.insertBefore(dragSrc, target);
+			}
+		}
+		dragSrc = null;
+	});
+});
+</script>
 </body></html>`,
 }
 
