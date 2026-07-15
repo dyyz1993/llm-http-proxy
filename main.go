@@ -588,6 +588,9 @@ func (b *bufferedWriter) flushTo(w http.ResponseWriter) {
 	w.Write(b.body)
 }
 
+// Flush 实现 http.Flusher 接口(buffering 模式下是 no-op,最终统一 flushTo)。
+func (b *bufferedWriter) Flush() {}
+
 // handleAliasStats 处理 /k/{alias}/__stats,返回该别名的用量统计和最近日志。
 // 不要求额外认证——知道 alias 就能看(和能用这个 alias 的范围一致)。
 func handleAliasStats(w http.ResponseWriter, r *http.Request, ks *keyStore, stats *statsCollector, us *usageStats) {
