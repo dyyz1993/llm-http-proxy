@@ -466,7 +466,20 @@ func handleGroupRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, st
 
 	log.Printf("group 请求: group=%s members=%v target=%s", groupName, cfg.Members, target[:min(60, len(target))])
 
+	// 预读请求 body(POST 可重放):第一次尝试后 body 被消耗,后续成员需要重建。
+	var bodyBuf []byte
+	if req.Body != nil {
+		bodyBuf, _ = io.ReadAll(req.Body)
+		req.Body.Close()
+	}
+
 	for _, member := range cfg.Members {
+		// 每次迭代重建 req.Body(上一次尝试可能已消耗)
+		if bodyBuf != nil {
+			req.Body = io.NopCloser(bytes.NewReader(bodyBuf))
+			req.ContentLength = int64(len(bodyBuf))
+		}
+
 		// 跳过冷却中的成员
 		st := gm.memberStatus(member)
 		if st.IsCooling {
