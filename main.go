@@ -408,6 +408,11 @@ func handleKeyRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, stat
 	// 查 alias 配置(lookup 内含过期检查)
 	cfg, ok := ks.lookup(alias)
 	if !ok {
+		// 检查是否是 group
+		if ks.isGroup(alias) {
+			handleGroupRoute(w, req, ks, stats, us, alias, target)
+			return
+		}
 		// 区分"不存在"和"已过期"
 		if ks.isExpired(alias) {
 			http.Error(w, "此 key 标识已过期: "+alias+"\n", http.StatusGone)
@@ -441,6 +446,142 @@ func handleKeyRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, stat
 	req.RequestURI = "/" + target
 	newProxyHandler(stats, ctx.HeadersToInject, ctx.StatLabel,
 		ctx.ImageFilter, ctx.TokenMultipliers, ctx.RetryConfig).ServeHTTP(w, req)
+}
+
+// handleGroupRoute 处理 group 别名池请求。
+// 按成员优先级依次尝试,失败(拦截器拒绝或上游返回 on_status 码)则换下一个成员。
+func handleGroupRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, stats *statsCollector, us *usageStats, groupName, target string) {
+	gm := ks.getGroupManager()
+	if gm == nil {
+		http.Error(w, "group 功能未启用\n", http.StatusInternalServerError)
+		return
+	}
+
+	groups := ks.getGroups()
+	cfg, ok := groups[groupName]
+	if !ok {
+		http.Error(w, "未知的 group: "+groupName+"\n", http.StatusNotFound)
+		return
+	}
+
+	log.Printf("group 请求: group=%s members=%v target=%s", groupName, cfg.Members, target[:min(60, len(target))])
+
+	for _, member := range cfg.Members {
+		// 跳过冷却中的成员
+		st := gm.memberStatus(member)
+		if st.IsCooling {
+			log.Printf("group 跳过冷却成员: group=%s member=%s 冷却剩余=%v",
+				groupName, member, time.Until(st.CoolUntil).Round(time.Second))
+			continue
+		}
+
+		// 查成员配置
+		memberCfg, ok := ks.lookup(member)
+		if !ok {
+			log.Printf("group 成员不存在或已过期: group=%s member=%s", groupName, member)
+			continue
+		}
+		memberCfg = resolveConfig(memberCfg, ks.getInterceptorProfiles(), "default")
+
+		// 拦截器链检查(禁止时段/限额/限流/白名单)
+		ctx := &CheckContext{
+			Alias:    member,
+			Target:   target,
+			Domain:   extractDomain(target),
+			Config:   memberCfg,
+			Request:  req,
+			Store:    ks,
+			Usage:    us,
+			Settings: settingsMgr,
+		}
+
+		rec := &groupResponseWriter{ResponseWriter: w, status: 0, headerWritten: false}
+		if !runChecks(rec, keyRouteChecks, ctx) {
+			// 拦截器拒绝了(402/403/429等) → 标记冷却,换下一个
+			gm.markCooldown(member, groupName, rec.status)
+			log.Printf("group 成员被拦截器拒绝: group=%s member=%s status=%d",
+				groupName, member, rec.status)
+			continue
+		}
+
+		// 拦截器通过 → 转发请求
+		// 用 groupResponseWriter 拦截响应,如果状态码在 on_status 里则换人
+		req.RequestURI = "/" + target
+		newProxyHandler(stats, ctx.HeadersToInject, ctx.StatLabel,
+			ctx.ImageFilter, ctx.TokenMultipliers, ctx.RetryConfig).ServeHTTP(rec, req)
+
+		// 检查响应状态码
+		if rec.headerWritten && rec.status >= 200 && rec.status < 400 {
+			// 成功 → 标记成功,返回
+			gm.markSuccess(member)
+			return
+		}
+
+		if rec.headerWritten && gm.shouldSwitchStatus(groupName, rec.status) {
+			// 上游返回了需要换人的状态码
+			// 注意:此时响应头已经写了出去(透传代理的特性),无法再换人
+			// 只有在 headerWritten=false 时才能换人(即上游连接错误,没拿到响应)
+			gm.markCooldown(member, groupName, rec.status)
+			log.Printf("group 成员上游返回 %d: group=%s member=%s (响应已透传,无法换人)",
+				rec.status, groupName, member)
+			return
+		}
+
+		if !rec.headerWritten {
+			// 没拿到响应(连接错误等) → 换人
+			gm.markCooldown(member, groupName, 502)
+			log.Printf("group 成员无响应: group=%s member=%s → 换人", groupName, member)
+			continue
+		}
+
+		// 其他情况(如 4xx 不在 on_status 里)→ 正常返回
+		return
+	}
+
+	// 全部成员都失败了
+	log.Printf("group 全部成员不可用: group=%s", groupName)
+	w.Header().Set("Retry-After", "60")
+	http.Error(w, "所有上游成员暂时不可用,请稍后重试 (group: "+groupName+")\n", http.StatusServiceUnavailable)
+}
+
+// groupResponseWriter 包装 ResponseWriter,记录是否已写入响应头。
+// 在 headerWritten=false 时,group 路由可以决定换下一个成员。
+type groupResponseWriter struct {
+	http.ResponseWriter
+	status        int
+	headerWritten bool
+}
+
+func (g *groupResponseWriter) WriteHeader(code int) {
+	if g.headerWritten {
+		return // 只写一次
+	}
+	g.headerWritten = true
+	g.status = code
+	g.ResponseWriter.WriteHeader(code)
+}
+
+func (g *groupResponseWriter) Write(b []byte) (int, error) {
+	if !g.headerWritten {
+		g.headerWritten = true
+		g.status = 200
+	}
+	return g.ResponseWriter.Write(b)
+}
+
+func (g *groupResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hj, ok := g.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("ResponseWriter 不支持 Hijack")
+	}
+	g.headerWritten = true
+	return hj.Hijack()
+}
+
+func (g *groupResponseWriter) Flush() {
+	if f, ok := g.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 // handleAliasStats 处理 /k/{alias}/__stats,返回该别名的用量统计和最近日志。
@@ -736,7 +877,9 @@ func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLa
 			}
 		}
 
-		maxAttempts := retryCfg.effective().MaxAttempts
+		// 预计算 effective 配置(避免重复调用 effective() 导致 double-fill)
+		eff := retryCfg.effective()
+		maxAttempts := eff.MaxAttempts
 		if maxAttempts < 1 {
 			maxAttempts = 1
 		}
@@ -766,17 +909,21 @@ func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLa
 				if errors.Is(lastErr, context.Canceled) {
 					break
 				}
+				// 只有一次尝试(未配置重试)→ 直接走 502 路径
+				if maxAttempts <= 1 {
+					break
+				}
 				// 连接错误:已到最后一次 → 标记耗尽
 				if attempt >= maxAttempts-1 {
 					exhausted = true
 					break
 				}
 				// 配置了重试 → 继续
-				if !retryCfg.effective().RetryOnError {
+				if !eff.RetryOnError {
 					break
 				}
 				logRetry(statKeyLabel, model, attempt, maxAttempts, 0, lastErr)
-				time.Sleep(retryCfg.effective().backoffDuration(attempt))
+				time.Sleep(eff.backoffDuration(attempt))
 				continue
 			}
 
@@ -788,7 +935,7 @@ func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLa
 			}
 
 			// 可重试状态码
-			if retryCfg.effective().shouldRetryCode(resp.StatusCode) {
+			if eff.shouldRetryCode(resp.StatusCode) {
 				resp.Body.Close()
 				// 已到最后一次 → 标记耗尽
 				if attempt >= maxAttempts-1 {
@@ -798,7 +945,7 @@ func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLa
 				}
 				// 还有重试机会 → 退避后继续
 				logRetry(statKeyLabel, model, attempt, maxAttempts, resp.StatusCode, nil)
-				time.Sleep(retryCfg.effective().backoffDuration(attempt))
+				time.Sleep(eff.backoffDuration(attempt))
 				continue
 			}
 
@@ -809,7 +956,7 @@ func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLa
 
 		// 处理重试耗尽:返回 fallback_status 给客户端
 		if exhausted {
-			fallback := retryCfg.effective().FallbackStatus
+			fallback := eff.FallbackStatus
 			if fallback < 100 {
 				fallback = http.StatusTooManyRequests // 默认 429
 			}

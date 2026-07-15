@@ -2401,10 +2401,10 @@ func TestHelpText(t *testing.T) {
 	if !strings.Contains(txt2, "/k/mymax/") {
 		t.Error("helpText(\"mymax\") 示例里应使用 mymax 别名")
 	}
-	// 默认(无别名)应使用 glm
+	// 默认(无别名)应使用 your-alias 占位符(不暴露真实别名)
 	txt3 := helpText("")
-	if !strings.Contains(txt3, "/k/glm/") {
-		t.Error("helpText(\"\") 示例应使用默认 glm 别名")
+	if !strings.Contains(txt3, "/k/your-alias/") {
+		t.Error("helpText(\"\") 示例应使用 your-alias 占位符")
 	}
 }
 
@@ -2419,8 +2419,8 @@ func TestServeHelpRootAndBareAlias(t *testing.T) {
 		path      string
 		wantAlias string // 教程里应出现的别名
 	}{
-		{"/", "glm"},           // 根路径 → 通用教程(默认 glm)
-		{"/k/", "glm"},         // 裸 /k/ → 通用教程
+		{"/", "your-alias"},   // 根路径 → 通用教程(占位符)
+		{"/k/", "your-alias"}, // 裸 /k/ → 通用教程
 		{"/k/mymax", "mymax"},  // 裸 alias → 带 alias 教程
 		{"/k/mymax/", "mymax"}, // 裸 alias + 斜杠 → 带 alias 教程
 	}

@@ -159,6 +159,9 @@ func (a *adminServer) handler() http.Handler {
 	mux.HandleFunc("/__admin/profiles", a.requireAuth(a.handleProfiles))
 	mux.HandleFunc("/__admin/profiles/new", a.requireAuth(a.handleProfileNew))
 	mux.HandleFunc("/__admin/profiles/delete", a.requireAuth(a.handleProfileDelete))
+	mux.HandleFunc("/__admin/groups", a.requireAuth(a.handleGroups))
+	mux.HandleFunc("/__admin/groups/new", a.requireAuth(a.handleGroupNew))
+	mux.HandleFunc("/__admin/groups/delete", a.requireAuth(a.handleGroupDelete))
 	mux.HandleFunc("/__admin/quota/refresh", a.requireAuth(a.handleQuotaRefresh))
 	return mux
 }
@@ -391,6 +394,132 @@ func (a *adminServer) handleProfileDelete(w http.ResponseWriter, r *http.Request
 		return
 	}
 	http.Redirect(w, r, "/__admin/profiles", http.StatusSeeOther)
+}
+
+// --- Group 管理 ---
+
+func (a *adminServer) handleGroups(w http.ResponseWriter, r *http.Request) {
+	if a.keys == nil {
+		renderMsg(w, "未启用", "key 模式未启用,无法管理群组")
+		return
+	}
+
+	groups := a.keys.getGroups()
+	memberStatus := make(map[string]memberStatusSnapshot)
+	gm := a.keys.getGroupManager()
+	if gm != nil {
+		for _, cfg := range groups {
+			for _, m := range cfg.Members {
+				if _, ok := memberStatus[m]; !ok {
+					memberStatus[m] = gm.memberStatus(m)
+				}
+			}
+		}
+	}
+
+	editName := r.URL.Query().Get("edit")
+	var editCfg GroupConfig
+	editing := false
+	if editName != "" {
+		if g, ok := groups[editName]; ok {
+			editCfg = g
+			editing = true
+		}
+	}
+
+	renderTemplate(w, "groups", map[string]interface{}{
+		"Groups":       groups,
+		"MemberStatus": memberStatus,
+		"Editing":      editing,
+		"EditName":     editName,
+		"EditCfg":      editCfg,
+	})
+}
+
+func (a *adminServer) handleGroupNew(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if a.keys == nil {
+		http.Error(w, "key 模式未启用", http.StatusBadRequest)
+		return
+	}
+
+	name := strings.TrimSpace(r.FormValue("name"))
+	if name == "" {
+		renderMsg(w, "参数错误", "群组名不能为空")
+		return
+	}
+
+	membersStr := r.FormValue("members")
+	var members []string
+	for _, m := range strings.Split(membersStr, ",") {
+		m = strings.TrimSpace(m)
+		if m != "" {
+			members = append(members, m)
+		}
+	}
+	if len(members) == 0 {
+		renderMsg(w, "参数错误", "成员列表不能为空")
+		return
+	}
+
+	onStatusStr := r.FormValue("on_status")
+	var onStatus []int
+	for _, s := range strings.Split(onStatusStr, ",") {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		var code int
+		fmt.Sscanf(s, "%d", &code)
+		if code > 0 {
+			onStatus = append(onStatus, code)
+		}
+	}
+
+	cooldown := strings.TrimSpace(r.FormValue("cooldown"))
+	if cooldown == "" {
+		cooldown = "5m"
+	}
+
+	cfg := GroupConfig{
+		Members:  members,
+		OnStatus: onStatus,
+		Cooldown: cooldown,
+	}
+
+	if err := a.keys.setGroup(name, cfg); err != nil {
+		renderMsg(w, "保存失败", err.Error())
+		return
+	}
+
+	http.Redirect(w, r, "/__admin/groups", http.StatusSeeOther)
+}
+
+func (a *adminServer) handleGroupDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if a.keys == nil {
+		http.Error(w, "key 模式未启用", http.StatusBadRequest)
+		return
+	}
+
+	name := r.URL.Query().Get("name")
+	if name == "" {
+		http.Error(w, "缺少 name", http.StatusBadRequest)
+		return
+	}
+
+	if err := a.keys.deleteGroup(name); err != nil {
+		renderMsg(w, "删除失败", err.Error())
+		return
+	}
+
+	http.Redirect(w, r, "/__admin/groups", http.StatusSeeOther)
 }
 
 // --- Keys 管理 ---
@@ -717,6 +846,7 @@ func renderTemplate(w http.ResponseWriter, name string, data interface{}) {
 		},
 		"mul":       func(a, b float64) float64 { return a * b },
 		"fmtTokens": func(n int64) string { return fmtTokens(n) },
+		"join":      strings.Join,
 	})
 	// 先解析公共片段(head/nav),再解析页面模板
 	if _, err := tmpl.Parse(baseTemplates); err != nil {

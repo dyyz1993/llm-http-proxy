@@ -304,6 +304,54 @@ function copyURL(alias) {
 	{{if or .Editing .Copying}}<a href="/__admin/profiles"><button type="button">取消</button></a>{{end}}
 	</form>
 	</body></html>`,
+
+	"groups": `<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>群组 - llm-http-proxy</title>
+{{template "head"}}</head>
+<body>{{template "nav"}}
+<h2>群组配置 ({{len .Groups}})</h2>
+{{if not .Groups}}<p>暂无群组。在下方添加。</p>{{end}}
+{{range $name, $g := .Groups}}
+<div style="margin:12px 0;padding:12px;background:#fff;border-radius:6px;border:1px solid #ddd">
+<div style="font-weight:bold;font-size:14px;margin-bottom:8px">
+	{{$name}}
+	<code style="font-size:12px;color:#888">/k/{{$name}}/</code>
+	<form method="post" action="/__admin/groups/delete?name={{$name}}" style="display:inline;float:right">
+	<button type="submit" onclick="return confirm('删除群组 {{$name}}?')" style="padding:2px 8px;font-size:12px">删除</button>
+	</form>
+</div>
+<table style="font-size:13px;width:100%">
+<tr><th>#</th><th>成员</th><th>状态</th><th>最后状态码</th><th>失败次数</th></tr>
+{{range $i, $m := $g.Members}}
+{{with index $.MemberStatus $m}}
+<tr>
+<td>{{$i}}</td>
+<td><b>{{$m}}</b></td>
+<td>{{if .IsCooling}}<span style="color:#e67e22">⏸ 冷却</span>{{else}}<span style="color:#27ae60">✅ 活跃</span>{{end}}</td>
+<td>{{if gt .LastStatus 0}}{{.LastStatus}}{{else}}-{{end}}</td>
+<td>{{if gt .FailCount 0}}<span style="color:red">{{.FailCount}}</span>{{else}}-{{end}}</td>
+</tr>
+{{end}}
+{{end}}
+</table>
+<div style="font-size:12px;color:#888;margin-top:4px">
+	切换条件: {{range $g.OnStatus}} {{.}}{{end}} | 冷却: {{$g.Cooldown}}
+</div>
+</div>
+{{end}}
+
+<h3>{{if .Editing}}编辑 {{.EditName}}{{else}}新增群组{{end}}</h3>
+<form method="post" action="/__admin/groups/new">
+<table>
+<tr><td>群组名</td><td>{{if .Editing}}<b>{{.EditName}}</b>（不可修改）<input type="hidden" name="name" value="{{.EditName}}">{{else}}<input name="name" placeholder="如 glm-pool" required>{{end}}</td></tr>
+<tr><td>成员(逗号分隔)</td><td><input name="members" style="width:400px" value="{{if .Editing}}{{join .EditCfg.Members ", "}}{{end}}" placeholder="glm, max-0, channel" required></td></tr>
+<tr><td>切换状态码</td><td><input name="on_status" style="width:200px" value="{{if .Editing}}{{join .EditCfg.OnStatus ", "}}{{else}}402, 429, 502, 503{{end}}" placeholder="402, 429, 502, 503"></td></tr>
+<tr><td>冷却时间</td><td><input name="cooldown" style="width:100px" value="{{if .Editing}}{{.EditCfg.Cooldown}}{{else}}5m{{end}}" placeholder="5m"></td></tr>
+</table>
+<button type="submit">{{if .Editing}}保存修改{{else}}创建群组{{end}}</button>
+{{if .Editing}}<a href="/__admin/groups"><button type="button">取消</button></a>{{end}}
+</form>
+</body></html>`,
 }
 
 // head 是公共 <head> + CSS,所有页面用 {{template "head"}} 引用。
@@ -338,6 +386,7 @@ h2{margin-top:0}
 <span class="title">llm-http-proxy</span>
 <a href="/__admin">Dashboard</a>
 <a href="/__admin/keys">Keys</a>
+<a href="/__admin/groups">群组</a>
 	<a href="/__admin/stats">Stats</a>
 	<a href="/__admin/daily">每日</a>
 	<a href="/__admin/logs">Logs</a>

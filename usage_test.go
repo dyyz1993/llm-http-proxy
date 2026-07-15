@@ -1066,18 +1066,20 @@ func TestMultiplierPlusQuota(t *testing.T) {
 	t.Logf("第一次 checkQuota: 通过")
 
 	// 记录大量请求验证配额追踪
+	// 注意: checkQuota 只算 prompt + completion (cached 已包含在 prompt 中)
+	tokensPerReq := u.Prompt + u.Completion // 300 + 150 = 450
 	for i := 0; i < 50000; i++ {
 		us.record("mult-test", u)
 	}
 	ok, reason, _ = us.checkQuota("mult-test", cfg)
 	if !ok {
-		t.Fatalf("50000 次后不应超限(%d万 << 1亿): %s",
-			(510*50001)/10000, reason)
+		t.Fatalf("50000 次后不应超限(%d << 1亿): %s",
+			tokensPerReq*50001, reason)
 	}
-	t.Logf("50000 次后: 通过(累计约 %dM)", (510*50001)/1000000)
+	t.Logf("50000 次后: 通过(累计约 %dM)", (tokensPerReq*50001)/1000000)
 
-	// 再填 150000 次 → 超过 1 亿
-	for i := 0; i < 150000; i++ {
+	// 再填 250000 次 → 超过 1 亿 (450 * 300001 ≈ 135M)
+	for i := 0; i < 250000; i++ {
 		us.record("mult-test", u)
 	}
 	ok, reason, retryAfter := us.checkQuota("mult-test", cfg)

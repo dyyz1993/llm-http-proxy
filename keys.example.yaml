@@ -103,14 +103,14 @@ myalias:
 #
 # 详见 USAGE.md
 #
-# 上游重试(上游返回 5xx/429 或连接失败时自动重试):
-# retry:
-#   max_attempts: 3              # 最多尝试 3 次(含首次,1=不重试)
-#   retry_on_codes: [429,500,502,503]  # 上游返回这些码时重试
-#   retry_on_error: true         # 连接错误也重试
-#   backoff: 500ms               # 退避基准
-#   backoff_multiplier: 2        # 翻倍(500ms→1s→2s)
-#   fallback_status: 429         # 重试耗尽后返回给客户端的状态码
+# 别名池 Group(多别名自动切换):
+# 成员按顺序尝试,失败(402/429/502等)自动换下一个,客户端无感知。
+# groups:
+#   glm-pool:
+#     members: [glm, max-0, channel]    # 按优先级试
+#     on_status: [402, 429, 502, 503]   # 这些码触发换人
+#     cooldown: 5m                      # 失败成员冷却时间
+# 调用: /k/glm-pool/https://...(和普通别名一样)
 
 # Image URL 过滤(自动替换/删除请求 body 中的 image_url 块):
 # 详见 USAGE.md

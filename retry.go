@@ -66,10 +66,8 @@ func (r RetryConfig) effective() RetryConfig {
 }
 
 // shouldRetryCode 检查是否应该重试给定的 HTTP 状态码。
-// 只在非重试尝试(attempt > 0)时才返回 true。
 func (r RetryConfig) shouldRetryCode(code int) bool {
-	cfg := r.effective()
-	for _, c := range cfg.RetryOnCodes {
+	for _, c := range r.RetryOnCodes {
 		if code == c {
 			return true
 		}

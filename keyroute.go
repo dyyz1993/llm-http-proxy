@@ -281,6 +281,8 @@ type keyStore struct {
 	tokenMultipliers    []TokenMultiplierRule         // 全局 Token 用量乘数规则
 	interceptorProfiles map[string]InterceptorProfile // 拦截器模板(interceptor_profiles 段)
 	retryConfig         RetryConfig                   // 上游请求重试配置
+	groups              map[string]GroupConfig        // 别名池配置(groups 段)
+	groupMgr            *groupManager                 // group 成员状态管理器
 }
 
 // newKeyStore 创建空的 key store。
@@ -288,6 +290,7 @@ func newKeyStore() *keyStore {
 	return &keyStore{
 		configs:  make(map[string]KeyConfig),
 		limiters: make(map[string]*rateLimiter),
+		groupMgr: newGroupManager(),
 	}
 }
 
@@ -308,6 +311,7 @@ func (ks *keyStore) load(path string) error {
 	var multipliers []TokenMultiplierRule
 	var profiles map[string]InterceptorProfile
 	var retryCfg RetryConfig
+	var groups map[string]GroupConfig
 	var configs map[string]KeyConfig
 	{
 		var raw map[string]interface{}
@@ -338,11 +342,18 @@ func (ks *keyStore) load(path string) error {
 				log.Printf("解析 retry 配置失败: %v", err)
 			}
 		}
+		if groupsRaw, ok := raw["groups"]; ok {
+			groupsData, _ := yaml.Marshal(groupsRaw)
+			if err := yaml.Unmarshal(groupsData, &groups); err != nil {
+				log.Printf("解析 groups 配置失败: %v", err)
+			}
+		}
 		// 去掉已知的全局字段，剩余部分作为 keys 解析
 		delete(raw, "image_filter")
 		delete(raw, "token_multipliers")
 		delete(raw, "interceptor_profiles")
 		delete(raw, "retry")
+		delete(raw, "groups")
 		keysData, _ := yaml.Marshal(raw)
 		if err := yaml.Unmarshal(keysData, &configs); err != nil {
 			return err
@@ -356,6 +367,10 @@ func (ks *keyStore) load(path string) error {
 	ks.tokenMultipliers = multipliers
 	ks.interceptorProfiles = profiles
 	ks.retryConfig = retryCfg
+	ks.groups = groups
+	if ks.groupMgr != nil && groups != nil {
+		ks.groupMgr.updateGroups(groups)
+	}
 	ks.path = path
 	if fi, err := os.Stat(path); err == nil {
 		ks.lastMtime = fi.ModTime()
@@ -367,8 +382,8 @@ func (ks *keyStore) load(path string) error {
 			ks.getOrCreateLimiter(alias, resolved)
 		}
 	}
-	log.Printf("已加载 %d 个 key 配置, %d 条 image_filter 规则, %d 条 token_multipliers 规则, %d 个拦截器模板",
-		len(configs), len(rules), len(multipliers), len(profiles))
+	log.Printf("已加载 %d 个 key 配置, %d 条 image_filter 规则, %d 条 token_multipliers 规则, %d 个拦截器模板, %d 个 group",
+		len(configs), len(rules), len(multipliers), len(profiles), len(groups))
 	return nil
 }
 
@@ -569,6 +584,38 @@ func (ks *keyStore) getRetryConfig() RetryConfig {
 	return ks.retryConfig
 }
 
+// getGroupManager 返回 group 管理器(用于成员状态查询和冷却管理)。
+func (ks *keyStore) getGroupManager() *groupManager {
+	ks.mu.RLock()
+	defer ks.mu.RUnlock()
+	return ks.groupMgr
+}
+
+// getGroups 返回所有 group 配置的快照。
+func (ks *keyStore) getGroups() map[string]GroupConfig {
+	ks.mu.RLock()
+	defer ks.mu.RUnlock()
+	if ks.groups == nil {
+		return nil
+	}
+	cp := make(map[string]GroupConfig, len(ks.groups))
+	for k, v := range ks.groups {
+		cp[k] = v
+	}
+	return cp
+}
+
+// isGroup 检查 name 是否是一个已配置的 group。
+func (ks *keyStore) isGroup(name string) bool {
+	ks.mu.RLock()
+	defer ks.mu.RUnlock()
+	if ks.groupMgr != nil {
+		return ks.groupMgr.isGroup(name)
+	}
+	_, ok := ks.groups[name]
+	return ok
+}
+
 // --- 管理用写方法(给 admin UI 用) ---
 
 // allConfigs 返回所有 alias 配置的快照(深拷贝)。
@@ -604,10 +651,15 @@ func (ks *keyStore) saveYAMLAll() error {
 	// 替换 interceptor_profiles 段
 	full["interceptor_profiles"] = ks.interceptorProfiles
 
+	// 替换 groups 段
+	if ks.groups != nil {
+		full["groups"] = ks.groups
+	}
+
 	// 替换 alias 配置段(先把 alias 从 full 里去重,再填充 configs)
 	for k := range full {
 		// 跳过已知全局段
-		if k == "image_filter" || k == "token_multipliers" || k == "interceptor_profiles" {
+		if k == "image_filter" || k == "token_multipliers" || k == "interceptor_profiles" || k == "groups" {
 			continue
 		}
 		// 如果不是 configs 里的 alias,保留;否则让 configs 覆盖
@@ -685,4 +737,28 @@ func (ks *keyStore) deleteProfile(name string) error {
 // allProfiles 返回所有拦截器模板的快照(深拷贝)。
 func (ks *keyStore) allProfiles() map[string]InterceptorProfile {
 	return ks.getInterceptorProfiles()
+}
+
+// setGroup 设置/更新一个 group 配置,并持久化。
+func (ks *keyStore) setGroup(name string, cfg GroupConfig) error {
+	ks.mu.Lock()
+	defer ks.mu.Unlock()
+	if ks.groups == nil {
+		ks.groups = make(map[string]GroupConfig)
+	}
+	ks.groups[name] = cfg
+	if ks.groupMgr != nil {
+		gm := newGroupManager()
+		gm.updateGroups(ks.groups)
+		ks.groupMgr = gm
+	}
+	return ks.saveYAMLAll()
+}
+
+// deleteGroup 删除一个 group 配置,并持久化。
+func (ks *keyStore) deleteGroup(name string) error {
+	ks.mu.Lock()
+	defer ks.mu.Unlock()
+	delete(ks.groups, name)
+	return ks.saveYAMLAll()
 }
