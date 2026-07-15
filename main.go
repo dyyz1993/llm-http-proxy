@@ -513,7 +513,7 @@ func handleGroupRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, st
 		// 检查响应状态码
 		if rec.headerWritten && rec.status >= 200 && rec.status < 400 {
 			// 成功 → 标记成功,返回
-			gm.markSuccess(member)
+			gm.markSuccess(member, rec.status)
 			return
 		}
 

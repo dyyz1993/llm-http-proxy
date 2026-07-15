@@ -29,21 +29,25 @@ type GroupConfig struct {
 
 // memberState 记录单个成员的实时状态(内存,不持久化)。
 type memberState struct {
-	calias     string    // 成员 alias
-	coolUntil  time.Time // 冷却截止时间(零值=未冷却)
-	lastStatus int       // 最后一次上游返回的状态码
-	lastFail   time.Time // 最后一次失败时间
-	failCount  int       // 连续失败次数
+	calias       string        // 成员 alias
+	coolUntil    time.Time     // 冷却截止时间(零值=未冷却)
+	lastStatus   int           // 最后一次上游返回的状态码
+	lastFail     time.Time     // 最后一次失败时间
+	failCount    int           // 连续失败次数
+	statusCounts map[int]int64 // 各状态码累计计数(只统计 group 路由)
+	totalReqs    int64         // group 路由总请求数(含成功和失败)
 }
 
 // memberStatusSnapshot 是给 UI 展示用的只读快照。
 type memberStatusSnapshot struct {
-	Alias      string
-	CoolUntil  time.Time
-	IsCooling  bool
-	LastStatus int
-	LastFail   time.Time
-	FailCount  int
+	Alias        string
+	CoolUntil    time.Time
+	IsCooling    bool
+	LastStatus   int
+	LastFail     time.Time
+	FailCount    int
+	TotalReqs    int64
+	StatusCounts map[int]int64
 }
 
 // groupStatusSnapshot 是整个 group 的状态快照。
@@ -133,7 +137,7 @@ func (gm *groupManager) shouldSwitchStatus(groupName string, statusCode int) boo
 	return false
 }
 
-// markCooldown 标记成员冷却。
+// markCooldown 标记成员冷却,并记录状态码。
 func (gm *groupManager) markCooldown(alias string, groupName string, statusCode int) {
 	gm.mu.Lock()
 	defer gm.mu.Unlock()
@@ -142,24 +146,38 @@ func (gm *groupManager) markCooldown(alias string, groupName string, statusCode 
 
 	st, ok := gm.states[alias]
 	if !ok {
-		st = &memberState{calias: alias}
+		st = &memberState{calias: alias, statusCounts: make(map[int]int64)}
 		gm.states[alias] = st
+	}
+	if st.statusCounts == nil {
+		st.statusCounts = make(map[int]int64)
 	}
 	st.coolUntil = time.Now().Add(cooldown)
 	st.lastStatus = statusCode
 	st.lastFail = time.Now()
 	st.failCount++
+	st.totalReqs++
+	st.statusCounts[statusCode]++
 }
 
-// markSuccess 标记成员成功(清除冷却和失败计数)。
-func (gm *groupManager) markSuccess(alias string) {
+// markSuccess 标记成员成功(清除冷却和失败计数,记录 2xx)。
+func (gm *groupManager) markSuccess(alias string, statusCode int) {
 	gm.mu.Lock()
 	defer gm.mu.Unlock()
 
-	if st, ok := gm.states[alias]; ok {
-		st.coolUntil = time.Time{}
-		st.failCount = 0
+	st, ok := gm.states[alias]
+	if !ok {
+		st = &memberState{calias: alias, statusCounts: make(map[int]int64)}
+		gm.states[alias] = st
 	}
+	if st.statusCounts == nil {
+		st.statusCounts = make(map[int]int64)
+	}
+	st.coolUntil = time.Time{}
+	st.failCount = 0
+	st.lastStatus = statusCode
+	st.totalReqs++
+	st.statusCounts[statusCode]++
 }
 
 // parseCooldown 解析 group 的冷却时长(内部方法,调用方持锁)。
@@ -175,6 +193,27 @@ func (gm *groupManager) parseCooldown(groupName string) time.Duration {
 	return d
 }
 
+// snapshotFromState 从 memberState 构建快照(内部方法,调用方持读锁)。
+func snapshotFromState(alias string, st *memberState) memberStatusSnapshot {
+	now := time.Now()
+	snap := memberStatusSnapshot{
+		Alias:      alias,
+		CoolUntil:  st.coolUntil,
+		IsCooling:  st.coolUntil.After(now),
+		LastStatus: st.lastStatus,
+		LastFail:   st.lastFail,
+		FailCount:  st.failCount,
+		TotalReqs:  st.totalReqs,
+	}
+	if st.statusCounts != nil {
+		snap.StatusCounts = make(map[int]int64, len(st.statusCounts))
+		for k, v := range st.statusCounts {
+			snap.StatusCounts[k] = v
+		}
+	}
+	return snap
+}
+
 // memberStatus 返回成员的当前状态快照。
 func (gm *groupManager) memberStatus(alias string) memberStatusSnapshot {
 	gm.mu.RLock()
@@ -184,15 +223,7 @@ func (gm *groupManager) memberStatus(alias string) memberStatusSnapshot {
 	if !ok {
 		return memberStatusSnapshot{Alias: alias}
 	}
-	now := time.Now()
-	return memberStatusSnapshot{
-		Alias:      alias,
-		CoolUntil:  st.coolUntil,
-		IsCooling:  st.coolUntil.After(now),
-		LastStatus: st.lastStatus,
-		LastFail:   st.lastFail,
-		FailCount:  st.failCount,
-	}
+	return snapshotFromState(alias, st)
 }
 
 // groupStatus 返回整个 group 的状态快照。
@@ -205,7 +236,6 @@ func (gm *groupManager) groupStatus(groupName string) groupStatusSnapshot {
 		return groupStatusSnapshot{Name: groupName}
 	}
 
-	now := time.Now()
 	members := make([]memberStatusSnapshot, 0, len(cfg.Members))
 	for _, m := range cfg.Members {
 		st, exists := gm.states[m]
@@ -213,14 +243,7 @@ func (gm *groupManager) groupStatus(groupName string) groupStatusSnapshot {
 			members = append(members, memberStatusSnapshot{Alias: m})
 			continue
 		}
-		members = append(members, memberStatusSnapshot{
-			Alias:      m,
-			CoolUntil:  st.coolUntil,
-			IsCooling:  st.coolUntil.After(now),
-			LastStatus: st.lastStatus,
-			LastFail:   st.lastFail,
-			FailCount:  st.failCount,
-		})
+		members = append(members, snapshotFromState(m, st))
 	}
 
 	return groupStatusSnapshot{
@@ -237,7 +260,6 @@ func (gm *groupManager) allGroupStatus() []groupStatusSnapshot {
 
 	result := make([]groupStatusSnapshot, 0, len(gm.groups))
 	for name, cfg := range gm.groups {
-		now := time.Now()
 		members := make([]memberStatusSnapshot, 0, len(cfg.Members))
 		for _, m := range cfg.Members {
 			st, exists := gm.states[m]
@@ -245,14 +267,7 @@ func (gm *groupManager) allGroupStatus() []groupStatusSnapshot {
 				members = append(members, memberStatusSnapshot{Alias: m})
 				continue
 			}
-			members = append(members, memberStatusSnapshot{
-				Alias:      m,
-				CoolUntil:  st.coolUntil,
-				IsCooling:  st.coolUntil.After(now),
-				LastStatus: st.lastStatus,
-				LastFail:   st.lastFail,
-				FailCount:  st.failCount,
-			})
+			members = append(members, snapshotFromState(m, st))
 		}
 		result = append(result, groupStatusSnapshot{
 			Name:    name,

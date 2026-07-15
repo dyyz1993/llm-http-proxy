@@ -322,7 +322,7 @@ function copyURL(alias) {
 	</form>
 </div>
 <div class="table-wrap"><table style="font-size:13px">
-<tr><th>#</th><th>成员</th><th>Key</th><th>Token用量</th><th>额度</th><th>状态</th><th>失败</th></tr>
+<tr><th>#</th><th>成员</th><th>Key</th><th>Token用量</th><th>额度</th><th>状态</th><th>请求</th><th>错误分布</th></tr>
 {{range $i, $m := $g.Members}}
 <tr>
 <td>{{$i}}</td>
@@ -331,7 +331,9 @@ function copyURL(alias) {
 {{with index $.UsageSnap $m}}<td>{{fmtTokens .WindowPrompt}} + {{fmtTokens .WindowCompletion}}</td>{{else}}<td>-</td>{{end}}
 {{with index $.Aliases $m}}<td>{{if .MaxTokens}}{{fmtTokens .MaxTokens}}{{else}}-{{end}}</td>{{else}}<td>-</td>{{end}}
 {{with index $.MemberStatus $m}}<td>{{if .IsCooling}}<span style="color:#e67e22">⏸ 冷却</span>{{else}}<span style="color:#27ae60">✅ 活跃</span>{{end}}</td>
-<td>{{if gt .FailCount 0}}<span style="color:red">{{.FailCount}}</span>{{else}}-{{end}}</td>{{else}}<td>-</td><td>-</td>{{end}}
+<td>{{if gt .TotalReqs 0}}{{.TotalReqs}}{{else}}-{{end}}</td>
+<td style="font-size:12px">{{if .StatusCounts}}{{range $code, $cnt := .StatusCounts}}{{if gt $code 399}}<span style="color:{{if eq $code 401}}#e74c3c{{else if eq $code 429}}#e67e22{{else if ge $code 500}}#e74c3c{{else}}#888{{end}}">{{$code}}×{{$cnt}}</span> {{end}}{{end}}{{else}}-{{end}}</td>
+{{else}}<td>-</td><td>-</td>{{end}}
 </tr>
 {{end}}
 </table></div>

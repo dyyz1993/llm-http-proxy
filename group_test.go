@@ -103,7 +103,7 @@ func TestGroupManager_MarkSuccess(t *testing.T) {
 	}
 
 	// 标记成功 → 清除冷却
-	gm.markSuccess("a")
+	gm.markSuccess("a", 200)
 	st = gm.memberStatus("a")
 	if st.IsCooling {
 		t.Error("a 应该不再冷却")
