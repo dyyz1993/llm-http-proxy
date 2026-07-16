@@ -330,10 +330,9 @@ function copyURL(alias) {
 {{with index $.Aliases $m}}<td><code style="font-size:11px;color:#888">{{maskKey .Key}}</code></td>{{else}}<td style="color:red">不存在</td>{{end}}
 {{with index $.UsageSnap $m}}<td>{{fmtTokens .WindowPrompt}} + {{fmtTokens .WindowCompletion}}</td>{{else}}<td>-</td>{{end}}
 {{with index $.Aliases $m}}<td>{{if .MaxTokens}}{{fmtTokens .MaxTokens}}{{else}}-{{end}}</td>{{else}}<td>-</td>{{end}}
-{{with index $.MemberStatus $m}}<td>{{if .IsCooling}}<span style="color:#e67e22">⏸ 冷却</span>{{else}}<span style="color:#27ae60">✅ 活跃</span>{{end}}</td>
-<td>{{if gt .TotalReqs 0}}{{.TotalReqs}}{{else}}-{{end}}</td>
-<td style="font-size:12px">{{if .StatusCounts}}{{range $code, $cnt := .StatusCounts}}{{if gt $code 399}}<span style="color:{{if eq $code 401}}#e74c3c{{else if eq $code 429}}#e67e22{{else if ge $code 500}}#e74c3c{{else}}#888{{end}}">{{$code}}×{{$cnt}}</span> {{end}}{{end}}{{else}}-{{end}}</td>
-{{else}}<td>-</td><td>-</td>{{end}}
+<td>{{if eq (index $.MemberHealth $m) "expired"}}<span style="color:#95a5a6">🔒 已过期</span>{{else if eq (index $.MemberHealth $m) "quota_full"}}<span style="color:#e74c3c">🚫 限额已满</span>{{else if eq (index $.MemberHealth $m) "time_block"}}<span style="color:#95a5a6">⏰ 禁止时段</span>{{else}}{{with index $.MemberStatus $m}}{{if .IsCooling}}<span style="color:#e67e22">⏸ 冷却</span>{{else}}<span style="color:#27ae60">✅ 活跃</span>{{end}}{{else}}<span style="color:#27ae60">✅ 活跃</span>{{end}}{{end}}</td>
+<td>{{with index $.MemberStatus $m}}{{if gt .TotalReqs 0}}{{.TotalReqs}}{{else}}-{{end}}{{else}}-{{end}}</td>
+<td style="font-size:12px">{{with index $.MemberStatus $m}}{{if .StatusCounts}}{{range $code, $cnt := .StatusCounts}}{{if gt $code 399}}<span style="color:{{if eq $code 401}}#e74c3c{{else if eq $code 429}}#e67e22{{else if ge $code 500}}#e74c3c{{else}}#888{{end}}">{{$code}}×{{$cnt}}</span> {{end}}{{end}}{{else}}-{{end}}{{else}}-{{end}}</td>
 </tr>
 {{end}}
 </table></div>

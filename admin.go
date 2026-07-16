@@ -424,6 +424,17 @@ func (a *adminServer) handleGroups(w http.ResponseWriter, r *http.Request) {
 		usageSnap = a.usage.snapshot()
 	}
 
+	// 计算每个成员的健康标签(已过期/限额已满/禁止时段/正常)
+	memberHealth := make(map[string]string)
+	for _, cfg := range groups {
+		for _, m := range cfg.Members {
+			if _, computed := memberHealth[m]; computed {
+				continue
+			}
+			memberHealth[m] = computeMemberHealth(a.keys, a.usage, m)
+		}
+	}
+
 	editName := r.URL.Query().Get("edit")
 	var editCfg GroupConfig
 	editing := false
@@ -437,6 +448,7 @@ func (a *adminServer) handleGroups(w http.ResponseWriter, r *http.Request) {
 	renderTemplate(w, "groups", map[string]interface{}{
 		"Groups":       groups,
 		"MemberStatus": memberStatus,
+		"MemberHealth": memberHealth,
 		"Aliases":      aliases,
 		"UsageSnap":    usageSnap,
 		"Editing":      editing,
@@ -893,6 +905,31 @@ func sliceContains(slice []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// computeMemberHealth 计算成员的健康标签。
+// 返回值: "expired"(已过期) / "quota_full"(限额已满) / "time_block"(禁止时段) / "ok"(正常)
+func computeMemberHealth(ks *keyStore, us *usageStats, alias string) string {
+	cfg, ok := ks.lookup(alias)
+	if !ok {
+		return "expired"
+	}
+	cfg = resolveConfig(cfg, ks.getInterceptorProfiles(), "default")
+
+	// 检查限额
+	if cfg.HasQuota() && us != nil {
+		ok, _, _ := us.checkQuota(alias, cfg)
+		if !ok {
+			return "quota_full"
+		}
+	}
+
+	// 检查禁止时段
+	if cfg.TimeBlock != nil && cfg.TimeBlock.IsBlocked(time.Now()) {
+		return "time_block"
+	}
+
+	return "ok"
 }
 
 // joinInts 把 []int 拼成字符串(模板用)。
