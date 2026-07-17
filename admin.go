@@ -19,8 +19,10 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"html/template"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -150,6 +152,7 @@ func (a *adminServer) handler() http.Handler {
 	mux.HandleFunc("/__admin/logout", a.handleLogout)
 	mux.HandleFunc("/__admin/keys", a.requireAuth(a.handleKeys))
 	mux.HandleFunc("/__admin/keys/new", a.requireAuth(a.handleKeyNew))
+	mux.HandleFunc("/__admin/keys/quickadd", a.handleKeyQuickAdd) // JSON+CORS，独立鉴权
 	mux.HandleFunc("/__admin/keys/delete", a.requireAuth(a.handleKeyDelete))
 	mux.HandleFunc("/__admin/stats", a.requireAuth(a.handleStats))
 	mux.HandleFunc("/__admin/daily", a.requireAuth(a.handleDaily))
@@ -674,6 +677,118 @@ func (a *adminServer) handleKeyDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Redirect(w, r, "/__admin/keys", http.StatusSeeOther)
+}
+
+// handleKeyQuickAdd 是 JSON 版快速创建 alias 的端点，给外部工具(如时间轴页面)调用。
+// 与 handleKeyNew 的区别:
+//   - 接收 JSON 而非 form data
+//   - 带 CORS 头(允许跨域)
+//   - 用 X-Admin-Password header 认证(而非 cookie，因为跨域 cookie 带不上)
+//   - 返回 JSON 而非重定向
+//
+// 请求: POST /__admin/keys/quickadd
+//
+//	Header: X-Admin-Password: <密码>
+//	Body:   {"alias":"蒋志杰", "key":"xxx.yyy", "expires":"2026-07-17 17:59"}
+func (a *adminServer) handleKeyQuickAdd(w http.ResponseWriter, r *http.Request) {
+	// CORS: 只对这个端点开放，允许任意来源跨域调用
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Admin-Password")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+
+	// 预检请求直接放行
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if r.Method != http.MethodPost {
+		jsonQuickErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if a.keys == nil {
+		jsonQuickErr(w, http.StatusBadRequest, "key 模式未启用")
+		return
+	}
+
+	// token 鉴权:用 X-Admin-Password header
+	pw := r.Header.Get("X-Admin-Password")
+	if subtle.ConstantTimeCompare([]byte(pw), []byte(a.password)) != 1 {
+		jsonQuickErr(w, http.StatusUnauthorized, "认证失败")
+		return
+	}
+
+	// 解析 JSON body
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)) // 1MB
+	if err != nil {
+		jsonQuickErr(w, http.StatusBadRequest, "读取请求体失败")
+		return
+	}
+	var req struct {
+		Alias   string `json:"alias"`
+		Key     string `json:"key"`
+		Expires string `json:"expires"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		jsonQuickErr(w, http.StatusBadRequest, "JSON 解析失败: "+err.Error())
+		return
+	}
+	req.Alias = strings.TrimSpace(req.Alias)
+	req.Key = strings.TrimSpace(req.Key)
+	req.Expires = strings.TrimSpace(req.Expires)
+
+	if req.Alias == "" {
+		jsonQuickErr(w, http.StatusBadRequest, "alias 不能为空")
+		return
+	}
+	if req.Key == "" {
+		jsonQuickErr(w, http.StatusBadRequest, "key 不能为空")
+		return
+	}
+	// 校验 expires 格式(空=永久)
+	if req.Expires != "" {
+		normalized := normalizeExpires(req.Expires)
+		if normalized == "" {
+			jsonQuickErr(w, http.StatusBadRequest, `expires 格式错误，请用 "YYYY-MM-DD HH:MM" 格式`)
+			return
+		}
+		if _, ok := parseExpires(normalized); !ok {
+			jsonQuickErr(w, http.StatusBadRequest, "expires 无效")
+			return
+		}
+		req.Expires = normalized
+	}
+
+	// header 留空=自动检测(推荐),rate/burst=0(不限流)
+	cfg := KeyConfig{Key: req.Key, Expires: req.Expires}
+	if err := a.keys.setConfig(req.Alias, cfg); err != nil {
+		jsonQuickErr(w, http.StatusInternalServerError, "保存失败: "+err.Error())
+		return
+	}
+
+	log.Printf("quickadd: alias=%s expires=%s", req.Alias, req.Expires)
+	jsonQuickOK(w, map[string]interface{}{
+		"alias":   req.Alias,
+		"expires": req.Expires,
+	})
+}
+
+// jsonQuickOK 返回成功 JSON 响应。
+func jsonQuickOK(w http.ResponseWriter, data map[string]interface{}) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	resp := map[string]interface{}{"ok": true}
+	for k, v := range data {
+		resp[k] = v
+	}
+	json.NewEncoder(w).Encode(resp)
+}
+
+// jsonQuickErr 返回错误 JSON 响应。
+func jsonQuickErr(w http.ResponseWriter, status int, msg string) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(map[string]interface{}{"ok": false, "error": msg})
 }
 
 // --- Daily 用量 ---
