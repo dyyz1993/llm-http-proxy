@@ -496,6 +496,12 @@ func handleGroupRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, st
 
 	log.Printf("group 请求: group=%s members=%v target=%s", groupName, cfg.Members, target[:min(60, len(target))])
 
+	// WebSocket 不参与换人(无法 buffer/重放),直接流式转发到第一个可用成员。
+	if isWebSocketUpgrade(req) {
+		handleGroupWebSocket(w, req, ks, stats, us, gm, cfg, groupName, target)
+		return
+	}
+
 	// 预读请求 body(POST 可重放):第一次尝试后 body 被消耗,后续成员需要重建。
 	var bodyBuf []byte
 	if req.Body != nil {
@@ -538,46 +544,46 @@ func handleGroupRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, st
 			Settings: settingsMgr,
 		}
 
-		rec := newBufferedWriter()
+		// groupWriter:延迟 commit,SSE/WebSocket 流式透传,命中 on_status 或
+		// 拦截器拒绝时丢弃响应换下一个成员(不影响底层 w)。
+		rec := newGroupWriter(w, cfg.OnStatus)
 		if !runChecks(rec, keyRouteChecks, ctx) {
-			// 拦截器拒绝了(402/403/429等) → 标记冷却,换下一个
+			// 拦截器拒绝了(402/403/429等):runChecks 内部的 http.Error 已经写了
+			// rec.WriteHeader + body,但 rec 还没 commit 到底层 w,所以客户端看不到。
+			// 标记强制拦截(防御性,防后续误用)+ 标记冷却,换下一个。
+			rec.forceIntercept = true
 			gm.markCooldown(member, groupName, rec.status)
 			log.Printf("group 成员被拦截器拒绝: group=%s member=%s status=%d",
 				groupName, member, rec.status)
 			continue
 		}
 
-		// 拦截器通过 → 用 buffering writer 转发请求
-		// buffering writer 先把响应存到内存,判断状态码后再决定 flush 给客户端还是丢弃换人
+		// 拦截器通过 → 转发请求。rec 是流式 writer,SSE 边收边 flush。
 		req.RequestURI = "/" + target
 		newProxyHandler(stats, ctx.HeadersToInject, ctx.StatLabel,
 			ctx.ImageFilter, ctx.TokenMultipliers, ctx.RetryConfig).ServeHTTP(rec, req)
 
-		// 检查响应状态码
-		if rec.status >= 200 && rec.status < 400 {
-			// 成功 → flush buffer 给客户端,返回
-			rec.flushTo(w)
-			gm.markSuccess(member, rec.status)
-			return
-		}
-
-		if gm.shouldSwitchStatus(groupName, rec.status) {
-			// 可换人状态码 → 丢弃 buffer,标记冷却,换下一个
-			gm.markCooldown(member, groupName, rec.status)
-			log.Printf("group 成员返回 %d → 换人: group=%s member=%s", rec.status, groupName, member)
-			continue
-		}
-
-		if rec.status == 0 {
-			// 没拿到响应(连接错误等) → 换人
+		// 响应已转发完。判定最终结果:
+		switch {
+		case rec.status == 0:
+			// 没拿到响应(连接错误等,没写任何 body) → 换人
 			gm.markCooldown(member, groupName, 502)
 			log.Printf("group 成员无响应: group=%s member=%s → 换人", groupName, member)
 			continue
+		case rec.intercepted:
+			// 命中 on_status(上游返回换人码) → 已丢弃,换下一个
+			gm.markCooldown(member, groupName, rec.status)
+			log.Printf("group 成员返回 %d → 换人: group=%s member=%s", rec.status, groupName, member)
+			continue
+		case rec.status >= 200 && rec.status < 400:
+			// 成功 → 已流式透传给客户端
+			gm.markSuccess(member, rec.status)
+			return
+		default:
+			// 非 on_status 的 4xx/5xx(如 404/413) → 已流式透传给客户端,正常返回
+			// (不 markSuccess 也不 markCooldown,保持原行为:这种状态码不参与换人统计)
+			return
 		}
-
-		// 其他状态码(不在 on_status 里)→ flush 给客户端,正常返回
-		rec.flushTo(w)
-		return
 	}
 
 	// 全部成员都失败了
@@ -586,53 +592,160 @@ func handleGroupRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, st
 	http.Error(w, "所有上游成员暂时不可用,请稍后重试 (group: "+groupName+")\n", http.StatusServiceUnavailable)
 }
 
-// bufferedWriter 先把响应存到内存,判断状态码后再决定是否 flush 给客户端。
-// 用于 group 路由:成员返回可换人状态码时丢弃 buffer,换下一个成员重试。
-type bufferedWriter struct {
-	header  http.Header
-	status  int
-	body    []byte
-	written bool // 是否已 flush(防止重复)
-}
+// handleGroupWebSocket 处理 group 路径下的 WebSocket 请求。
+// WebSocket 无法 buffer/重放,不参与成员换人——直接选第一个可用成员流式转发。
+func handleGroupWebSocket(w http.ResponseWriter, req *http.Request, ks *keyStore, stats *statsCollector, us *usageStats, gm *groupManager, cfg GroupConfig, groupName, target string) {
+	for _, member := range cfg.Members {
+		st := gm.memberStatus(member)
+		if st.IsCooling {
+			continue
+		}
+		memberCfg, ok := ks.lookup(member)
+		if !ok {
+			log.Printf("group 成员不存在或已过期: group=%s member=%s", groupName, member)
+			continue
+		}
+		memberCfg = resolveConfig(memberCfg, ks.getInterceptorProfiles(), "default")
 
-func newBufferedWriter() *bufferedWriter {
-	return &bufferedWriter{header: make(http.Header)}
-}
+		ctx := &CheckContext{
+			Alias:    member,
+			Target:   target,
+			Domain:   extractDomain(target),
+			Config:   memberCfg,
+			Request:  req,
+			Store:    ks,
+			Usage:    us,
+			Settings: settingsMgr,
+		}
 
-func (b *bufferedWriter) Header() http.Header {
-	return b.header
-}
+		if !runChecks(w, keyRouteChecks, ctx) {
+			// 拦截器拒绝 → 标记冷却,换下一个。注意 http.Error 已经写到 w 了,
+			// WS 握手失败,客户端会看到错误响应——这是合理的(拦截器拒绝本就该拒绝)。
+			gm.markCooldown(member, groupName, http.StatusForbidden)
+			continue
+		}
 
-func (b *bufferedWriter) WriteHeader(code int) {
-	if b.status == 0 {
-		b.status = code
-	}
-}
-
-func (b *bufferedWriter) Write(p []byte) (int, error) {
-	if b.status == 0 {
-		b.status = 200 // 隐式 200
-	}
-	b.body = append(b.body, p...)
-	return len(p), nil
-}
-
-// flushTo 把缓冲的响应写入真正的 ResponseWriter。
-func (b *bufferedWriter) flushTo(w http.ResponseWriter) {
-	if b.written {
+		// 直接传真实 w(不包 groupWriter),WS 握手 + 双向隧道需要原始 conn。
+		req.RequestURI = "/" + target
+		newProxyHandler(stats, ctx.HeadersToInject, ctx.StatLabel,
+			ctx.ImageFilter, ctx.TokenMultipliers, ctx.RetryConfig).ServeHTTP(w, req)
 		return
 	}
-	b.written = true
-	dst := w.Header()
-	for k, vs := range b.header {
-		dst[k] = vs
-	}
-	w.WriteHeader(b.status)
-	w.Write(b.body)
+
+	// 全部冷却/拦截
+	http.Error(w, "所有上游成员暂时不可用 (WS)\n", http.StatusServiceUnavailable)
 }
 
-// Flush 实现 http.Flusher 接口(buffering 模式下是 no-op,最终统一 flushTo)。
-func (b *bufferedWriter) Flush() {}
+// groupWriter 是 group 路由专用的 ResponseWriter。
+//
+// 设计目标:既支持"成员返回可换人状态码时丢弃响应换下一个成员重试",
+// 又保留 SSE/WebSocket 的流式语义(bufferedWriter 把整个响应攒到内存再 flush,
+// 会让 SSE 的 tool_call delta 失去时序——所有 chunk 在响应结束时一起到达客户端)。
+//
+// 核心思路:**延迟 commit**。
+//   - WriteHeader 只记录 status,不立即写到底层 w。
+//   - 第一次 Write body 时才决定 commit 还是拦截:
+//   - forceIntercept=true(runChecks 失败,拦截器拒绝) 或 status 命中 on_status
+//     → 拦截,所有后续 Write 丢弃,group 换下一个成员重试。
+//   - 否则 → 把 header 拷到底层 w + WriteHeader(status),然后流式 Write。
+//   - Flush 在 committed 后透传给底层 w(SSE 边收边 flush);未 committed 时 no-op。
+//   - Hijack 透传(WebSocket)。
+//
+// 因为 WriteHeader 不立即 commit,拦截器拒绝(runChecks 内的 http.Error)也不会
+// 污染底层 w 的响应头/body——和原 bufferedWriter 的隔离效果一致,
+// 但 body 阶段是流式而非全量 buffer。
+type groupWriter struct {
+	w              http.ResponseWriter // 真实的客户端 ResponseWriter
+	switchStatuses []int               // group 的 on_status 列表
+	header         http.Header         // 自己持有一份(拦截时不污染底层 w)
+	status         int                 // WriteHeader 记录的状态码
+	forceIntercept bool                // runChecks 失败时置 true,强制拦截
+	committed      bool                // 是否已向底层 w 提交 header
+	intercepted    bool                // 是否进入拦截模式(后续 Write 全丢弃)
+}
+
+func newGroupWriter(w http.ResponseWriter, switchStatuses []int) *groupWriter {
+	return &groupWriter{
+		w:              w,
+		switchStatuses: switchStatuses,
+		header:         make(http.Header),
+	}
+}
+
+func (g *groupWriter) Header() http.Header {
+	return g.header
+}
+
+func (g *groupWriter) WriteHeader(code int) {
+	if g.status == 0 {
+		g.status = code
+	}
+	// 不立即 commit:由第一次 Write 决定。
+}
+
+// shouldIntercept 判断当前 status 是否应进入拦截模式(换人)。
+func (g *groupWriter) shouldIntercept() bool {
+	if g.forceIntercept {
+		return true
+	}
+	for _, s := range g.switchStatuses {
+		if s == g.status {
+			return true
+		}
+	}
+	return false
+}
+
+// commit 把缓存的 header + status 真正写到底层 w(只发生一次)。
+func (g *groupWriter) commit() {
+	if g.committed {
+		return
+	}
+	g.committed = true
+	dst := g.w.Header()
+	for k, vs := range g.header {
+		dst[k] = vs
+	}
+	status := g.status
+	if status == 0 {
+		status = http.StatusOK // 隐式 200
+	}
+	g.w.WriteHeader(status)
+}
+
+func (g *groupWriter) Write(p []byte) (int, error) {
+	if !g.committed {
+		// 第一次 Write:决定 commit 还是拦截
+		if g.shouldIntercept() {
+			g.intercepted = true
+			return len(p), nil // 丢弃
+		}
+		g.commit()
+	}
+	if g.intercepted {
+		return len(p), nil // 丢弃
+	}
+	return g.w.Write(p) // 流式透传
+}
+
+// Flush 实现 http.Flusher。committed 后透传给底层 w,保证 SSE 边收边 flush。
+// 未 committed / 已 intercepted 时 no-op(没东西要冲)。
+func (g *groupWriter) Flush() {
+	if g.intercepted || !g.committed {
+		return
+	}
+	if f, ok := g.w.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Hijack 实现 http.Hijacker,转发给底层 w(WebSocket 用)。
+func (g *groupWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if h, ok := g.w.(http.Hijacker); ok {
+		return h.Hijack()
+	}
+	return nil, nil, errors.New("groupWriter: underlying ResponseWriter 不支持 Hijack")
+}
 
 // handleAliasStats 处理 /k/{alias}/__stats,返回该别名的用量统计和最近日志。
 // 不要求额外认证——知道 alias 就能看(和能用这个 alias 的范围一致)。
