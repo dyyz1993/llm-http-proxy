@@ -106,8 +106,14 @@ func (qc *quotaCache) fetchAll(configs map[string]KeyConfig) {
 // probeAndRefresh 在额度重置点触发后端结算,然后刷新配额。
 // 两种 probe 都走自己的代理(/k/{alias}/),密钥服务端注入,代码里不碰 key。
 // 按 key 去重:多个 alias 用同一个 key 时,只 probe 第一个,避免重复请求。
+// 只 probe 没有周额度的 key(有周额度兜底的不需要提前抢占)。
 func (qc *quotaCache) probeAndRefresh(ks *keyStore) {
 	configs := ks.allConfigs()
+	entries := qc.getAll()
+	entriesByAlias := make(map[string]cachedQuota)
+	for _, e := range entries {
+		entriesByAlias[e.Alias] = e
+	}
 
 	// 按 key 去重:同一 key 只保留第一个遇到的 alias
 	seen := make(map[string]bool) // rawKey → 已 probe
@@ -120,6 +126,14 @@ func (qc *quotaCache) probeAndRefresh(ks *keyStore) {
 		if seen[rawKey] {
 			continue // 同一个 key 已经 probe 过,跳过
 		}
+
+		// 只 probe 没有周额度的 key(有周额度兜底的不需要)
+		if entry, ok := entriesByAlias[alias]; ok {
+			if hasWeeklyQuota(entry) {
+				continue
+			}
+		}
+
 		seen[rawKey] = true
 
 		// 1. 调配额接口(0 token):走代理,触发后端结算
@@ -130,6 +144,17 @@ func (qc *quotaCache) probeAndRefresh(ks *keyStore) {
 
 	// probe 完再拉一次配额(此时后端已结算,数字准确)
 	qc.fetchAll(configs)
+}
+
+// hasWeeklyQuota 检查 key 是否有周额度(unit=6)。
+// 有周额度的 key 不需要提前 probe(周期额度到期了还有周额度兜底)。
+func hasWeeklyQuota(entry cachedQuota) bool {
+	for _, lim := range entry.Limits {
+		if lim.Unit == 6 {
+			return true
+		}
+	}
+	return false
 }
 
 // probeViaProxy 通过自己的代理 /k/{alias}/{target} 发 GET 请求。
