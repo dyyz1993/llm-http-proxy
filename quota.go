@@ -219,10 +219,10 @@ func (qc *quotaCache) refreshNow(ks *keyStore) int {
 }
 
 // startLoop 后台刷新配额缓存。
-// 两种触发:
+// 三种触发:
 //  1. 固定 5 分钟轮询(保底,确保数据不会太旧)
-//  2. 重置点定时器:算出所有 limit 里最近的一次 nextResetTime,
-//     到点立即刷新——这样额度恢复的瞬间就能反映出来,不用等下一轮 ticker。
+//  2. 提前抢占:重置点前 1 分钟发 probe,主动触发窗口滚动
+//  3. 重置点定时器:重置点 +5s 再次 probe + 刷新(确认数字准确)
 func (qc *quotaCache) startLoop(ks *keyStore) {
 	go func() {
 		// 启动后立即拉一次
@@ -232,31 +232,50 @@ func (qc *quotaCache) startLoop(ks *keyStore) {
 		ticker := time.NewTicker(qc.interval)
 		defer ticker.Stop()
 
+		// 提前抢占定时器(重置点前 1 分钟)
+		var preemptTimer *time.Timer
 		// 重置点定时器(动态计算最近的重置时刻)
 		var resetTimer *time.Timer
-		scheduleNextReset := func() {
-			if t := qc.nextResetTime(); !t.IsZero() {
-				d := time.Until(t)
-				// 重置时刻已过或太近(< 30s)的不单独调度,交给 ticker
-				if d > 30*time.Second {
-					// 重置点 +5s:给上游留时间结算,然后 probe 触发 + 刷新配额
-					resetTimer = time.AfterFunc(d+5*time.Second, func() {
-						qc.probeAndRefresh(ks)
-					})
-				}
+
+		scheduleResetTimers := func() {
+			t := qc.nextResetTime()
+			if t.IsZero() {
+				return
+			}
+			d := time.Until(t)
+
+			// 停掉旧的定时器
+			if preemptTimer != nil {
+				preemptTimer.Stop()
+			}
+			if resetTimer != nil {
+				resetTimer.Stop()
+			}
+
+			// 提前抢占:重置点前 1 分钟发 probe,主动触发窗口滚动
+			preemptD := d - time.Minute
+			if preemptD > 30*time.Second {
+				preemptTimer = time.AfterFunc(preemptD, func() {
+					log.Printf("提前抢占: 重置点前 1 分钟,触发 probe")
+					qc.probeAndRefresh(ks)
+				})
+			}
+
+			// 重置点 +5s:确认数字准确
+			if d > 0 {
+				resetTimer = time.AfterFunc(d+5*time.Second, func() {
+					log.Printf("重置点到达,触发 probe + 刷新")
+					qc.probeAndRefresh(ks)
+				})
 			}
 		}
 
-		// 主循环:ticker 和 resetTimer 任一触发都刷新 + 重新调度
+		// 主循环:ticker 触发后刷新 + 重新调度
 		for {
 			select {
 			case <-ticker.C:
 				qc.fetchAll(ks.allConfigs())
-				// 每轮 ticker 后也重新调度重置定时器(因为 fetchAll 更新了 nextResetTime)
-				if resetTimer != nil {
-					resetTimer.Stop()
-				}
-				scheduleNextReset()
+				scheduleResetTimers()
 			}
 		}
 	}()
