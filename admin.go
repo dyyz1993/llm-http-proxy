@@ -248,13 +248,15 @@ func (a *adminServer) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 	if a.quota != nil {
 		entries := a.quota.getAll()
-		if html := buildQuotaHTML(entries); html != "" {
+		spotlight := a.keys.getSpotlight()
+		if html := buildQuotaHTML(entries, spotlight); html != "" {
 			data.QuotaHTML = template.HTML(html)
 		}
 	}
 	if a.usage != nil {
-		keysCfg := a.keys.allConfigs() // 传 key 配置可展示限额列
-		if html := buildUsageHTML(a.usage.snapshot(), keysCfg); html != "" {
+		keysCfg := a.keys.allConfigs()
+		spotlight := a.keys.getSpotlight()
+		if html := buildUsageHTML(a.usage.snapshot(), keysCfg, spotlight); html != "" {
 			data.UsageHTML = template.HTML(html)
 		}
 	}

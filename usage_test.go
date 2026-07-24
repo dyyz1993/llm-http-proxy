@@ -203,10 +203,10 @@ func TestBuildUsageHTMLHighCache(t *testing.T) {
 	}
 	// 不应 panic
 	assertNotPanic(t, func() {
-		_ = buildUsageHTML(snap, nil)
+		_ = buildUsageHTML(snap, nil, nil)
 	})
 
-	html := buildUsageHTML(snap, nil)
+	html := buildUsageHTML(snap, nil, nil)
 	if !strings.Contains(html, "max-0") {
 		t.Error("应包含 max-0 alias")
 	}

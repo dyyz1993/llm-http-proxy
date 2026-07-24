@@ -789,7 +789,7 @@ func handleAliasStats(w http.ResponseWriter, r *http.Request, ks *keyStore, stat
 	usageSnap := us.snapshot()
 	var usageHTML string
 	if u, ok := usageSnap[alias]; ok {
-		usageHTML = buildUsageHTML(map[string]aliasUsageStats{alias: u}, nil)
+		usageHTML = buildUsageHTML(map[string]aliasUsageStats{alias: u}, nil, nil)
 	}
 
 	// 请求统计(从 statsCollector 过滤出该别名的条目)

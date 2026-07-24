@@ -2269,11 +2269,11 @@ func TestUnitLabel(t *testing.T) {
 
 func TestBuildQuotaHTML_Empty(t *testing.T) {
 	// 空条目应返回"暂无"提示
-	html := buildQuotaHTML(nil)
+	html := buildQuotaHTML(nil, nil)
 	if !strings.Contains(html, "暂无配额数据") {
 		t.Error("空条目应显示'暂无配额数据'")
 	}
-	html = buildQuotaHTML([]cachedQuota{})
+	html = buildQuotaHTML([]cachedQuota{}, nil)
 	if !strings.Contains(html, "暂无配额数据") {
 		t.Error("空切片应显示'暂无配额数据'")
 	}
@@ -2293,7 +2293,7 @@ func TestBuildQuotaHTML_Render(t *testing.T) {
 			FetchedAt: time.Now(),
 		},
 	}
-	html := buildQuotaHTML(entries)
+	html := buildQuotaHTML(entries, nil)
 	for _, want := range []string{"testkey", "pro", "50%", "12%", "周期额度", "月度时长"} {
 		if !strings.Contains(html, want) {
 			t.Errorf("配额 HTML 缺少 %q", want)

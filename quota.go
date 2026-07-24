@@ -452,62 +452,73 @@ func fmtResetTime(ms int64) string {
 }
 
 // buildQuotaHTML 构建配额展示的 HTML 片段,供 dashboard 模板嵌入。
-func buildQuotaHTML(entries []cachedQuota) string {
+// spotlight 非空时,这些 alias 优先显示在最前面。
+func buildQuotaHTML(entries []cachedQuota, spotlight []string) string {
 	if len(entries) == 0 {
 		return `<p style="color:#999">暂无配额数据(需在 keys.yaml 中配置有效的 API key)</p>`
 	}
 
 	var b strings.Builder
+	// 先排 spotlight 中的,再按字母序排剩下的
+	seen := make(map[string]bool)
+	for _, alias := range spotlight {
+		for _, e := range entries {
+			if e.Alias == alias && !seen[alias] {
+				seen[alias] = true
+				writeQuotaCard(&b, e)
+			}
+		}
+	}
 	for _, e := range entries {
-		levelIcon := "🅿️"
-		if e.Level == "max" {
-			levelIcon = "🅼"
+		if !seen[e.Alias] {
+			writeQuotaCard(&b, e)
 		}
-
-		fmt.Fprintf(&b, `<div style="margin:12px 0;padding:10px;background:#fff;border-radius:6px;border:1px solid #ddd">`)
-		fmt.Fprintf(&b, `<div style="font-weight:bold;margin-bottom:6px">%s %s %s</div>`,
-			e.Alias, levelIcon, e.Level)
-
-		for _, lim := range e.Limits {
-			bar := progressBar(lim.Percentage)
-			resetStr := fmtResetTime(lim.NextResetMs)
-			label := unitLabel(lim.Unit)
-
-			fmt.Fprintf(&b,
-				`<div style="font-size:13px;margin:4px 0;display:flex;align-items:center;gap:8px">`+
-					`<span style="width:70px;flex-shrink:0">%s</span>`+
-					`<span style="font-family:monospace;font-size:12px">%s</span>`+
-					`<span style="width:40px;text-align:right">%d%%</span>`+
-					`<span style="color:#888;font-size:12px">%s</span>`,
-				label, bar, lim.Percentage, resetStr)
-
-			// TIME_LIMIT 有配额明细时也展示
-			if lim.Usage != nil && lim.CurrentVal != nil {
-				fmt.Fprintf(&b, `<span style="color:#999;font-size:11px">(%d/%d秒)</span>`,
-					*lim.CurrentVal, *lim.Usage)
-			}
-			b.WriteString(`</div>`)
-
-			// 模型明细(Time 维度有按模型拆分)
-			if len(lim.Details) > 0 {
-				var parts []string
-				for _, d := range lim.Details {
-					if d.Usage > 0 {
-						parts = append(parts, fmt.Sprintf("%s:%d", d.ModelCode, d.Usage))
-					}
-				}
-				if len(parts) > 0 {
-					fmt.Fprintf(&b, `<div style="font-size:11px;color:#999;margin-left:78px">模型: %s</div>`,
-						strings.Join(parts, "  "))
-				}
-			}
-		}
-
-		fmt.Fprintf(&b, `<div style="font-size:11px;color:#bbb;margin-top:4px">更新于 %s</div>`,
-			e.FetchedAt.In(beijing).Format("15:04:05"))
-		b.WriteString(`</div>`)
 	}
 	return b.String()
+}
+
+func writeQuotaCard(b *strings.Builder, e cachedQuota) {
+	levelIcon := "🅿️"
+	if e.Level == "max" {
+		levelIcon = "🅼"
+	}
+
+	fmt.Fprintf(b, `<div style="margin:12px 0;padding:10px;background:#fff;border-radius:6px;border:1px solid #ddd">`)
+	fmt.Fprintf(b, `<div style="font-weight:bold;margin-bottom:6px">%s %s %s</div>`,
+		e.Alias, levelIcon, e.Level)
+
+	for _, lim := range e.Limits {
+		bar := progressBar(lim.Percentage)
+		resetStr := fmtResetTime(lim.NextResetMs)
+		label := unitLabel(lim.Unit)
+		fmt.Fprintf(b, `<div style="font-size:13px;margin:4px 0;display:flex;align-items:center;gap:8px">`+
+			`<span style="width:70px;flex-shrink:0">%s</span>`+
+			`<span style="font-family:monospace;font-size:12px">%s</span>`+
+			`<span style="width:40px;text-align:right">%d%%</span>`+
+			`<span style="color:#888;font-size:12px">%s</span>`,
+			label, bar, lim.Percentage, resetStr)
+		if lim.Usage != nil && lim.CurrentVal != nil {
+			fmt.Fprintf(b, `<span style="color:#999;font-size:11px">(%d/%d秒)</span>`,
+				*lim.CurrentVal, *lim.Usage)
+		}
+		b.WriteString(`</div>`)
+		if len(lim.Details) > 0 {
+			var parts []string
+			for _, d := range lim.Details {
+				if d.Usage > 0 {
+					parts = append(parts, fmt.Sprintf("%s:%d", d.ModelCode, d.Usage))
+				}
+			}
+			if len(parts) > 0 {
+				fmt.Fprintf(b, `<div style="font-size:11px;color:#999;margin-left:78px">模型: %s</div>`,
+					strings.Join(parts, "  "))
+			}
+		}
+	}
+
+	fmt.Fprintf(b, `<div style="font-size:11px;color:#bbb;margin-top:4px">更新于 %s</div>`,
+		e.FetchedAt.In(beijing).Format("15:04:05"))
+	b.WriteString(`</div>`)
 }
 
 // ---------- 直接查询原始 API Key ----------

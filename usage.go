@@ -519,17 +519,30 @@ func (us *usageStats) snapshot() map[string]aliasUsageStats {
 // buildUsageHTML 构建按 alias 聚合的 token 用量展示 HTML。
 // 展示:每个 alias 的累计输入/缓存/输出 token + 平均缓存命中率 + 用量限额。
 // keysConfig 可选,传 nil 时不显示限额列。
-func buildUsageHTML(snap map[string]aliasUsageStats, keysConfig map[string]KeyConfig) string {
+// spotlight 非空时,这些 alias 优先显示在最前面。
+func buildUsageHTML(snap map[string]aliasUsageStats, keysConfig map[string]KeyConfig, spotlight []string) string {
 	if len(snap) == 0 {
 		return ""
 	}
 
-	// 按 alias 排序
+	// 按 alias 排序(spotlight 优先)
 	aliases := make([]string, 0, len(snap))
 	for a := range snap {
 		aliases = append(aliases, a)
 	}
-	sort.Strings(aliases)
+	sort.Slice(aliases, func(i, j int) bool {
+		// 检查是否在 spotlight 中
+		_, is := containsStrList(spotlight, aliases[i])
+		_, js := containsStrList(spotlight, aliases[j])
+		if is != js {
+			return is // spotlight 中的排在前面
+		}
+		if is {
+			// 都在 spotlight 中,按 spotlight 顺序
+			return findIndex(spotlight, aliases[i]) < findIndex(spotlight, aliases[j])
+		}
+		return aliases[i] < aliases[j] // 字母序
+	})
 
 	// 检查是否有任何 alias 配置了限额(决定是否展示限额列)
 	hasQuota := false
@@ -773,4 +786,24 @@ func (us *usageStats) startPersistLoop(path string, interval time.Duration) {
 			}
 		}
 	}()
+}
+
+// containsStrList 检查字符串是否在列表中,返回索引。
+func containsStrList(list []string, s string) (int, bool) {
+	for i, v := range list {
+		if v == s {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+// findIndex 返回字符串在列表中的位置(不在列表中返回 len(list))。
+func findIndex(list []string, s string) int {
+	for i, v := range list {
+		if v == s {
+			return i
+		}
+	}
+	return len(list)
 }

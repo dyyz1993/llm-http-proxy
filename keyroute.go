@@ -283,6 +283,7 @@ type keyStore struct {
 	retryConfig         RetryConfig                   // 上游请求重试配置
 	groups              map[string]GroupConfig        // 别名池配置(groups 段)
 	groupMgr            *groupManager                 // group 成员状态管理器
+	spotlight           []string                      // Dashboard 置顶别名列表
 }
 
 // newKeyStore 创建空的 key store。
@@ -312,6 +313,7 @@ func (ks *keyStore) load(path string) error {
 	var profiles map[string]InterceptorProfile
 	var retryCfg RetryConfig
 	var groups map[string]GroupConfig
+	var spotlight []string
 	var configs map[string]KeyConfig
 	{
 		var raw map[string]interface{}
@@ -348,12 +350,19 @@ func (ks *keyStore) load(path string) error {
 				log.Printf("解析 groups 配置失败: %v", err)
 			}
 		}
+		if spotlightRaw, ok := raw["spotlight"]; ok {
+			spotlightData, _ := yaml.Marshal(spotlightRaw)
+			if err := yaml.Unmarshal(spotlightData, &spotlight); err != nil {
+				log.Printf("解析 spotlight 配置失败: %v", err)
+			}
+		}
 		// 去掉已知的全局字段，剩余部分作为 keys 解析
 		delete(raw, "image_filter")
 		delete(raw, "token_multipliers")
 		delete(raw, "interceptor_profiles")
 		delete(raw, "retry")
 		delete(raw, "groups")
+		delete(raw, "spotlight")
 		keysData, _ := yaml.Marshal(raw)
 		if err := yaml.Unmarshal(keysData, &configs); err != nil {
 			return err
@@ -368,6 +377,7 @@ func (ks *keyStore) load(path string) error {
 	ks.interceptorProfiles = profiles
 	ks.retryConfig = retryCfg
 	ks.groups = groups
+	ks.spotlight = spotlight
 	if ks.groupMgr != nil && groups != nil {
 		ks.groupMgr.updateGroups(groups)
 	}
@@ -616,6 +626,18 @@ func (ks *keyStore) isGroup(name string) bool {
 	return ok
 }
 
+// getSpotlight 返回 Dashboard 置顶别名列表。
+func (ks *keyStore) getSpotlight() []string {
+	ks.mu.RLock()
+	defer ks.mu.RUnlock()
+	if len(ks.spotlight) == 0 {
+		return nil
+	}
+	cp := make([]string, len(ks.spotlight))
+	copy(cp, ks.spotlight)
+	return cp
+}
+
 // --- 管理用写方法(给 admin UI 用) ---
 
 // allConfigs 返回所有 alias 配置的快照(深拷贝)。
@@ -659,7 +681,7 @@ func (ks *keyStore) saveYAMLAll() error {
 	// 替换 alias 配置段(先把 alias 从 full 里去重,再填充 configs)
 	for k := range full {
 		// 跳过已知全局段
-		if k == "image_filter" || k == "token_multipliers" || k == "interceptor_profiles" || k == "groups" {
+		if k == "image_filter" || k == "token_multipliers" || k == "interceptor_profiles" || k == "groups" || k == "spotlight" {
 			continue
 		}
 		// 如果不是 configs 里的 alias,保留;否则让 configs 覆盖
