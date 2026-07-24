@@ -559,31 +559,49 @@ func handleGroupRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, st
 		}
 
 		// 拦截器通过 → 转发请求。rec 是流式 writer,SSE 边收边 flush。
-		req.RequestURI = "/" + target
-		newProxyHandler(stats, ctx.HeadersToInject, ctx.StatLabel,
-			ctx.ImageFilter, ctx.TokenMultipliers, ctx.RetryConfig).ServeHTTP(rec, req)
+		// 对非 429/401 的可换人状态码(如 502/500),先重试一次再冷却。
+		// 429(额度满)和 401(key 失效)是确定性的,不重试。
+		maxTriesForMember := 1
+		for tryNum := 0; tryNum < maxTriesForMember; tryNum++ {
+			// 每次重试重建 body
+			if tryNum > 0 && bodyBuf != nil {
+				req.Body = io.NopCloser(bytes.NewReader(bodyBuf))
+				req.ContentLength = int64(len(bodyBuf))
+			}
+			req.RequestURI = "/" + target
+			rec := newGroupWriter(w, cfg.OnStatus)
+			newProxyHandler(stats, ctx.HeadersToInject, ctx.StatLabel,
+				ctx.ImageFilter, ctx.TokenMultipliers, ctx.RetryConfig).ServeHTTP(rec, req)
 
-		// 响应已转发完。判定最终结果:
-		switch {
-		case rec.status == 0:
-			// 没拿到响应(连接错误等,没写任何 body) → 换人
-			gm.markCooldown(member, groupName, 502)
-			log.Printf("group 成员无响应: group=%s member=%s → 换人", groupName, member)
-			continue
-		case rec.intercepted:
-			// 命中 on_status(上游返回换人码) → 已丢弃,换下一个
-			gm.markCooldown(member, groupName, rec.status)
-			log.Printf("group 成员返回 %d → 换人: group=%s member=%s", rec.status, groupName, member)
-			continue
-		case rec.status >= 200 && rec.status < 400:
-			// 成功 → 已流式透传给客户端
-			gm.markSuccess(member, rec.status)
-			return
-		default:
-			// 非 on_status 的 4xx/5xx(如 404/413) → 已流式透传给客户端,正常返回
-			// (不 markSuccess 也不 markCooldown,保持原行为:这种状态码不参与换人统计)
-			return
+			// 判定结果
+			switch {
+			case rec.status == 0:
+				// 没拿到响应(连接错误等) → 换人
+				gm.markCooldown(member, groupName, 502)
+				log.Printf("group 成员无响应: group=%s member=%s → 换人", groupName, member)
+				goto nextMember
+			case rec.intercepted:
+				// 命中 on_status → 判断是否应该重试
+				if rec.status != 429 && rec.status != 401 && tryNum == 0 {
+					// 非确定性错误(502/500/503等)→ 重试一次同一个成员
+					log.Printf("group 成员返回 %d,重试: group=%s member=%s", rec.status, groupName, member)
+					maxTriesForMember = 2
+					continue
+				}
+				// 429/401 或重试后仍失败 → 冷却换人
+				gm.markCooldown(member, groupName, rec.status)
+				log.Printf("group 成员返回 %d → 换人: group=%s member=%s", rec.status, groupName, member)
+				goto nextMember
+			case rec.status >= 200 && rec.status < 400:
+				// 成功 → 已流式透传给客户端
+				gm.markSuccess(member, rec.status)
+				return
+			default:
+				// 非 on_status 的 4xx/5xx → 已流式透传,正常返回
+				return
+			}
 		}
+	nextMember:
 	}
 
 	// 全部成员都失败了
