@@ -29,6 +29,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -77,6 +78,9 @@ var (
 	// usageTracker 按 alias 聚合 token 用量统计(prompt/cached/completion)。
 	// 在 proxy handler 里异步解析响应里的 usage 字段后记录,不影响转发延迟。
 	usageTracker *usageStats
+
+	// quotaCacheInst 上游配额缓存,handleGroupRoute 用于动态排序成员。
+	quotaCacheInst *quotaCache
 )
 
 func main() {
@@ -162,7 +166,6 @@ func main() {
 	}
 
 	// 配额缓存(只在 key 注入模式下启用,后台定时轮询 api.z.ai)
-	var quotaCacheInst *quotaCache
 	if ks != nil {
 		quotaCacheInst = newQuotaCache(*addr)
 		quotaCacheInst.startLoop(ks)
@@ -509,7 +512,9 @@ func handleGroupRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, st
 		req.Body.Close()
 	}
 
-	for _, member := range cfg.Members {
+	sortedMembers := sortGroupMembersDynamic(cfg.Members, quotaCacheInst)
+
+	for _, member := range sortedMembers {
 		// 每次迭代重建 req.Body(上一次尝试可能已消耗)
 		if bodyBuf != nil {
 			req.Body = io.NopCloser(bytes.NewReader(bodyBuf))
@@ -608,6 +613,58 @@ func handleGroupRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, st
 	log.Printf("group 全部成员不可用: group=%s", groupName)
 	w.Header().Set("Retry-After", "60")
 	http.Error(w, "所有上游成员暂时不可用,请稍后重试 (group: "+groupName+")\n", http.StatusServiceUnavailable)
+}
+
+// sortGroupMembersDynamic 对 group 成员进行动态排序。
+// 没有周额度的成员按 5h 窗口到期时间升序排列(先到先用,主动消耗使其滚动)。
+// 有周额度和没有配额数据的成员保持原顺序排在后面。
+func sortGroupMembersDynamic(members []string, qc *quotaCache) []string {
+	if qc == nil {
+		return members
+	}
+
+	entries := qc.getAll()
+	entryByAlias := make(map[string]cachedQuota)
+	for _, e := range entries {
+		entryByAlias[e.Alias] = e
+	}
+
+	type memberScore struct {
+		alias     string
+		resetTime int64
+		hasWeekly bool
+	}
+
+	scores := make([]memberScore, 0, len(members))
+	var deferred []string
+	for _, m := range members {
+		ms := memberScore{alias: m}
+		if entry, ok := entryByAlias[m]; ok {
+			ms.hasWeekly = hasWeeklyQuota(entry)
+			for _, lim := range entry.Limits {
+				if lim.Unit == 3 && lim.NextResetMs > 0 {
+					ms.resetTime = lim.NextResetMs
+				}
+			}
+		}
+		if !ms.hasWeekly && ms.resetTime > 0 {
+			scores = append(scores, ms)
+		} else {
+			deferred = append(deferred, m)
+		}
+	}
+
+	// 按到期时间升序(先到期先用)
+	sort.Slice(scores, func(i, j int) bool {
+		return scores[i].resetTime < scores[j].resetTime
+	})
+
+	result := make([]string, 0, len(members))
+	for _, s := range scores {
+		result = append(result, s.alias)
+	}
+	result = append(result, deferred...)
+	return result
 }
 
 // handleGroupWebSocket 处理 group 路径下的 WebSocket 请求。
