@@ -581,8 +581,8 @@ func handleGroupRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, st
 			// 判定结果
 			switch {
 			case rec.status == 0:
-				// 没拿到响应(连接错误等) → 换人
-				gm.markCooldown(member, groupName, 502)
+				// 没拿到响应(连接错误等)→ 瞬时错误,短冷却 30 秒
+				gm.markCooldownWithDuration(member, groupName, 502, 30*time.Second)
 				log.Printf("group 成员无响应: group=%s member=%s → 换人", groupName, member)
 				goto nextMember
 			case rec.intercepted:
@@ -593,8 +593,13 @@ func handleGroupRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, st
 					maxTriesForMember = 2
 					continue
 				}
-				// 429/401 或重试后仍失败 → 冷却换人
-				gm.markCooldown(member, groupName, rec.status)
+				// 确定性错误(429/401)→ 长冷却(配置值)
+				// 瞬时错误(502/连接失败)→ 短冷却 30 秒
+				if rec.status == 429 || rec.status == 401 {
+					gm.markCooldown(member, groupName, rec.status)
+				} else {
+					gm.markCooldownWithDuration(member, groupName, rec.status, 30*time.Second)
+				}
 				log.Printf("group 成员返回 %d → 换人: group=%s member=%s", rec.status, groupName, member)
 				goto nextMember
 			case rec.status >= 200 && rec.status < 400:

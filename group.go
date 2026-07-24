@@ -139,10 +139,18 @@ func (gm *groupManager) shouldSwitchStatus(groupName string, statusCode int) boo
 
 // markCooldown 标记成员冷却,并记录状态码。
 func (gm *groupManager) markCooldown(alias string, groupName string, statusCode int) {
+	gm.markCooldownWithDuration(alias, groupName, statusCode, 0)
+}
+
+// markCooldownWithDuration 标记成员冷却(自定义时长,0=用 group 配置)。
+func (gm *groupManager) markCooldownWithDuration(alias string, groupName string, statusCode int, duration time.Duration) {
 	gm.mu.Lock()
 	defer gm.mu.Unlock()
 
-	cooldown := gm.parseCooldown(groupName)
+	cooldown := duration
+	if cooldown <= 0 {
+		cooldown = gm.parseCooldown(groupName)
+	}
 
 	st, ok := gm.states[alias]
 	if !ok {
