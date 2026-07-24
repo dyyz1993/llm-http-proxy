@@ -172,9 +172,10 @@ func (qc *quotaCache) probeViaProxy(alias, targetURL string) {
 }
 
 // probeModelViaProxy 通过代理发一个最小模型请求(走 /k/{alias}/)。
-// 密钥服务端注入。消耗 ~1 token,确保 key 可用且触发后端结算。
+// 密钥服务端注入。消耗 ~1 token,确保 key 可用且触发结算。
+// 走 coding 接口(coding 套餐 key 兼容)。
 func (qc *quotaCache) probeModelViaProxy(alias, model string) {
-	url := fmt.Sprintf("http://127.0.0.1%s/k/%s/https://api.z.ai/api/paas/v4/chat/completions",
+	url := fmt.Sprintf("http://127.0.0.1%s/k/%s/https://api.z.ai/api/coding/paas/v4/chat/completions",
 		qc.localAddr, alias)
 	body := strings.NewReader(`{"model":"` + model + `","messages":[{"role":"user","content":"1"}],"max_tokens":1}`)
 	client := &http.Client{Timeout: 15 * time.Second}
@@ -244,10 +245,11 @@ func (qc *quotaCache) refreshNow(ks *keyStore) int {
 }
 
 // startLoop 后台刷新配额缓存。
-// 三种触发:
+// 四种触发:
 //  1. 固定 5 分钟轮询(保底,确保数据不会太旧)
 //  2. 提前抢占:重置点前 1 分钟发 probe,主动触发窗口滚动
 //  3. 重置点定时器:重置点 +5s 再次 probe + 刷新(确认数字准确)
+//  4. 窗口激活:对周期额度"无重置时间"的 key 定期发 probe,主动启动 5h 窗口
 func (qc *quotaCache) startLoop(ks *keyStore) {
 	go func() {
 		// 启动后立即拉一次
@@ -256,6 +258,10 @@ func (qc *quotaCache) startLoop(ks *keyStore) {
 		// 5 分钟保底轮询
 		ticker := time.NewTicker(qc.interval)
 		defer ticker.Stop()
+
+		// 窗口激活定时器(每 4 小时对没窗口的 pro key 发 probe)
+		activateTicker := time.NewTicker(4 * time.Hour)
+		defer activateTicker.Stop()
 
 		// 提前抢占定时器(重置点前 1 分钟)
 		var preemptTimer *time.Timer
@@ -295,15 +301,80 @@ func (qc *quotaCache) startLoop(ks *keyStore) {
 			}
 		}
 
-		// 主循环:ticker 触发后刷新 + 重新调度
+		// 主循环
 		for {
 			select {
 			case <-ticker.C:
 				qc.fetchAll(ks.allConfigs())
 				scheduleResetTimers()
+			case <-activateTicker.C:
+				// 窗口激活:对周期额度"无重置时间"的 pro key 发 probe
+				qc.activateDormantWindows(ks)
 			}
 		}
 	}()
+}
+
+// activateDormantWindows 对周期额度"无重置时间"的 key 发 probe 模型请求,
+// 主动启动 5h 滚动窗口。只对没有周额度的 key 生效(有周额度兜底的不需要)。
+func (qc *quotaCache) activateDormantWindows(ks *keyStore) {
+	entries := qc.getAll()
+	configs := ks.allConfigs()
+
+	// 建索引:alias → 配额缓存
+	entriesByAlias := make(map[string]cachedQuota)
+	for _, e := range entries {
+		entriesByAlias[e.Alias] = e
+	}
+
+	// 按 key 去重
+	seen := make(map[string]bool)
+	activated := 0
+	for alias, cfg := range configs {
+		rawKey := cfg.Key
+		if strings.HasPrefix(rawKey, "sk-") || len(rawKey) < 20 {
+			continue
+		}
+		if seen[rawKey] {
+			continue
+		}
+		seen[rawKey] = true
+
+		entry, ok := entriesByAlias[alias]
+		if !ok {
+			continue
+		}
+
+		// 有周额度的不需要激活
+		if hasWeeklyQuota(entry) {
+			continue
+		}
+
+		// 检查周期额度(unit=3)是否有重置时间
+		// 无重置时间 = 窗口未启动,需要发 probe 激活
+		needsActivation := false
+		for _, lim := range entry.Limits {
+			if lim.Unit == 3 && lim.NextResetMs <= 0 {
+				needsActivation = true
+				break
+			}
+		}
+
+		if !needsActivation {
+			continue
+		}
+
+		log.Printf("窗口激活: %s 周期额度无重置时间,发 probe 激活 5h 窗口", alias)
+		// 发一个最小模型请求触发窗口启动
+		qc.probeModelViaProxy(alias, "glm-4-flash")
+		activated++
+	}
+
+	if activated > 0 {
+		log.Printf("窗口激活完成: 激活了 %d 个 key", activated)
+		// 激活后刷新一次配额
+		qc.fetchAll(configs)
+	}
 }
 
 // nextResetTime 返回缓存里所有 limit 中最近的一次重置时刻(已排除过期的)。
