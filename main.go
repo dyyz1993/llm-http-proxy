@@ -512,7 +512,7 @@ func handleGroupRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, st
 		req.Body.Close()
 	}
 
-	sortedMembers := sortGroupMembersDynamic(cfg.Members, quotaCacheInst)
+	sortedMembers := sortGroupMembersDynamic(cfg.Members, quotaCacheInst, gm.nextOffset())
 
 	for _, member := range sortedMembers {
 		// 每次迭代重建 req.Body(上一次尝试可能已消耗)
@@ -623,7 +623,8 @@ func handleGroupRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, st
 // sortGroupMembersDynamic 对 group 成员进行动态排序。
 // 没有周额度的成员按 5h 窗口到期时间升序排列(先到先用,主动消耗使其滚动)。
 // 有周额度和没有配额数据的成员保持原顺序排在后面。
-func sortGroupMembersDynamic(members []string, qc *quotaCache) []string {
+// offset 用于轮询偏移,使每次请求从不同位置开始,避免排在后面的成员一直轮不到。
+func sortGroupMembersDynamic(members []string, qc *quotaCache, offset int64) []string {
 	if qc == nil {
 		return members
 	}
@@ -669,6 +670,12 @@ func sortGroupMembersDynamic(members []string, qc *quotaCache) []string {
 		result = append(result, s.alias)
 	}
 	result = append(result, deferred...)
+
+	// 轮询偏移:按 offset 旋转,使每次请求起始位置不同,避免成员饿死
+	if offset > 0 && len(result) > 1 {
+		start := int(offset % int64(len(result)))
+		result = append(result[start:], result[:start]...)
+	}
 	return result
 }
 

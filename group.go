@@ -59,9 +59,18 @@ type groupStatusSnapshot struct {
 
 // groupManager 管理所有 group 的配置和成员冷却状态。
 type groupManager struct {
-	mu     sync.RWMutex
-	groups map[string]GroupConfig  // group 名 → 配置
-	states map[string]*memberState // alias → 状态(所有 group 共享一份)
+	mu             sync.RWMutex
+	groups         map[string]GroupConfig  // group 名 → 配置
+	states         map[string]*memberState // alias → 状态(所有 group 共享一份)
+	requestCounter int64                   // 全局请求计数器,用于轮询偏移
+}
+
+// nextOffset 返回当前偏移值并递增计数器。
+func (gm *groupManager) nextOffset() int64 {
+	gm.mu.Lock()
+	defer gm.mu.Unlock()
+	gm.requestCounter++
+	return gm.requestCounter
 }
 
 // newGroupManager 创建空的 group 管理器。
