@@ -992,6 +992,8 @@ func renderTemplate(w http.ResponseWriter, name string, data interface{}) {
 		"joinInt":   func(slice []int, sep string) string { return joinInts(slice, sep) },
 		"maskKey":   func(k string) string { return maskKey(k) },
 		"contains":  func(slice []string, s string) bool { return sliceContains(slice, s) },
+		"add":       func(a, b int64) int64 { return a + b },
+		"addf":      func(a, b float64) float64 { return a + b },
 	})
 	// 先解析公共片段(head/nav),再解析页面模板
 	if _, err := tmpl.Parse(baseTemplates); err != nil {
