@@ -678,6 +678,11 @@ func (ks *keyStore) saveYAMLAll() error {
 		full["groups"] = ks.groups
 	}
 
+	// 替换 spotlight 段
+	if ks.spotlight != nil {
+		full["spotlight"] = ks.spotlight
+	}
+
 	// 替换 alias 配置段(先把 alias 从 full 里去重,再填充 configs)
 	for k := range full {
 		// 跳过已知全局段
