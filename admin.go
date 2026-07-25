@@ -964,6 +964,9 @@ func validateYAML(data []byte) error {
 	delete(raw, "image_filter")
 	delete(raw, "token_multipliers")
 	delete(raw, "interceptor_profiles")
+	delete(raw, "retry")
+	delete(raw, "groups")
+	delete(raw, "spotlight")
 	keysData, _ := yaml.Marshal(raw)
 	var configs map[string]KeyConfig
 	if err := yaml.Unmarshal(keysData, &configs); err != nil {
