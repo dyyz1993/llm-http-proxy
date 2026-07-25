@@ -512,7 +512,7 @@ func handleGroupRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, st
 		req.Body.Close()
 	}
 
-	sortedMembers := sortGroupMembersDynamic(cfg.Members, quotaCacheInst, gm.nextOffset())
+	sortedMembers := sortGroupMembersDynamic(cfg.Members, quotaCacheInst, 0)
 
 	for _, member := range sortedMembers {
 		// 每次迭代重建 req.Body(上一次尝试可能已消耗)
