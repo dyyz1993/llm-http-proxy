@@ -2130,10 +2130,10 @@ func TestPickHeader(t *testing.T) {
 		t.Errorf("自动(both) Authorization: got %q", h.Get("Authorization"))
 	}
 
-	// 5. 自动模式:都没带 → 不注入(返回空)
+	// 5. 自动模式:都没带 → 默认注入 Authorization: Bearer
 	h = pickHeader(KeyConfig{Key: "sk-1"}, http.Header{})
-	if len(h) != 0 {
-		t.Errorf("都没带应不注入, got %d headers", len(h))
+	if h.Get("Authorization") != "Bearer sk-1" {
+		t.Errorf("都没带应默认注入 Authorization, got %q", h.Get("Authorization"))
 	}
 }
 
@@ -2213,15 +2213,15 @@ func TestKeyRouteAutoHeader(t *testing.T) {
 		t.Errorf("客户端带 Authorization 应注入 Bearer 真实 key, body: %s", string(body)[:min(200, len(string(body)))])
 	}
 
-	// 3. 客户端什么都不带 → 不注入(透传,header 里没有 key)
+	// 3. 客户端什么都不带 → 默认注入(probe 等无 header 请求也能用)
 	resp, err = http.Get(proxy.URL + "/k/glm/" + backend.URL + "/any/path")
 	if err != nil {
 		t.Fatal(err)
 	}
 	body, _ = io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if strings.Contains(string(body), "sk-secret") {
-		t.Errorf("客户端没带 header 不应注入 key, body: %s", string(body)[:min(200, len(string(body)))])
+	if !strings.Contains(string(body), `"Authorization":"Bearer sk-secret"`) {
+		t.Errorf("客户端没带 header 应默认注入 key, body: %s", string(body)[:min(200, len(string(body)))])
 	}
 }
 

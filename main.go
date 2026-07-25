@@ -1466,7 +1466,7 @@ func pickHeader(cfg KeyConfig, clientHeaders http.Header) http.Header {
 		return h
 	}
 
-	// 自动模式:客户端带了什么就替换什么
+	// 自动模式:客户端带了什么就替换什么;都没带就默认注入 Authorization
 	inject := http.Header{}
 	if clientHeaders.Get("X-Api-Key") != "" {
 		inject.Set("x-api-key", cfg.Key) // x-api-key 不需要 Bearer 前缀
@@ -1474,10 +1474,13 @@ func pickHeader(cfg KeyConfig, clientHeaders http.Header) http.Header {
 	if clientHeaders.Get("Authorization") != "" {
 		inject.Set("Authorization", "Bearer "+cfg.Key)
 	}
-	return inject // 可能为空(都没带 → 不注入)
+	// 都没带 → 默认注入 Authorization: Bearer key(probe 等无 header 请求)
+	if len(inject) == 0 {
+		inject.Set("Authorization", "Bearer "+cfg.Key)
+	}
+	return inject
 }
 
-// stripProxyHeaders 剥离上游反向代理/网关可能注入的"指纹"头,
 // 让转发出去的请求保持客户端原始样貌,避免被目标 API 发现经过了中间层。
 // 剥离范围: X-Forwarded-* / Via / X-Real-IP / X-Request-ID / X-Forwarded-Proto 等。
 func stripProxyHeaders(h http.Header) {
