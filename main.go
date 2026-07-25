@@ -665,18 +665,21 @@ func sortGroupMembersDynamic(members []string, qc *quotaCache, offset int64) []s
 		return scores[i].resetTime < scores[j].resetTime
 	})
 
+	// 只对没周额度的成员做轮询偏移,有周额度的固定排最后
+	if offset > 0 && len(scores) > 1 {
+		start := int(offset % int64(len(scores)))
+		rotated := make([]string, 0, len(scores))
+		for i := 0; i < len(scores); i++ {
+			rotated = append(rotated, scores[(i+start)%len(scores)].alias)
+		}
+		return append(rotated, deferred...)
+	}
+
 	result := make([]string, 0, len(members))
 	for _, s := range scores {
 		result = append(result, s.alias)
 	}
-	result = append(result, deferred...)
-
-	// 轮询偏移:按 offset 旋转,使每次请求起始位置不同,避免成员饿死
-	if offset > 0 && len(result) > 1 {
-		start := int(offset % int64(len(result)))
-		result = append(result[start:], result[:start]...)
-	}
-	return result
+	return append(result, deferred...)
 }
 
 // handleGroupWebSocket 处理 group 路径下的 WebSocket 请求。
