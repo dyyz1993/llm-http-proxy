@@ -992,7 +992,7 @@ func renderTemplate(w http.ResponseWriter, name string, data interface{}) {
 		"joinInt":   func(slice []int, sep string) string { return joinInts(slice, sep) },
 		"maskKey":   func(k string) string { return maskKey(k) },
 		"contains":  func(slice []string, s string) bool { return sliceContains(slice, s) },
-		"add":       func(a, b int64) int64 { return a + b },
+		"add":       func(a, b interface{}) int64 { return toInt64(a) + toInt64(b) },
 		"addf":      func(a, b float64) float64 { return a + b },
 	})
 	// 先解析公共片段(head/nav),再解析页面模板
@@ -1027,6 +1027,19 @@ func sliceContains(slice []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// toInt64 把 interface{} 转成 int64(模板 add 用)。
+func toInt64(v interface{}) int64 {
+	switch n := v.(type) {
+	case int:
+		return int64(n)
+	case int64:
+		return n
+	case float64:
+		return int64(n)
+	}
+	return 0
 }
 
 // computeMemberHealth 计算成员的健康标签。
