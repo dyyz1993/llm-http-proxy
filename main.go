@@ -593,7 +593,15 @@ func handleGroupRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, st
 					maxTriesForMember = 2
 					continue
 				}
-				// 确定性错误(429/401)→ 长冷却(配置值)
+				// 检查是否是并发限制(code:1302)→ 换人但不冷却
+				isConcurrencyLimit := rec.status == 429 && bytes.Contains(rec.interceptBody, []byte("1302"))
+				if isConcurrencyLimit {
+					// 并发限制:只记录统计,不冷却,换下一个
+					gm.markCooldownWithDuration(member, groupName, rec.status, 3*time.Second)
+					log.Printf("group 成员并发限制(1302)→ 短冷却 3s: group=%s member=%s", groupName, member)
+					goto nextMember
+				}
+				// 确定性错误(429额度满/401key失效)→ 长冷却(配置值)
 				// 瞬时错误(502/连接失败)→ 短冷却 30 秒
 				if rec.status == 429 || rec.status == 401 {
 					gm.markCooldown(member, groupName, rec.status)
@@ -752,6 +760,7 @@ type groupWriter struct {
 	forceIntercept bool                // runChecks 失败时置 true,强制拦截
 	committed      bool                // 是否已向底层 w 提交 header
 	intercepted    bool                // 是否进入拦截模式(后续 Write 全丢弃)
+	interceptBody  []byte              // 拦截时记录的前 256 字节(用于判断错误类型)
 }
 
 func newGroupWriter(w http.ResponseWriter, switchStatuses []int) *groupWriter {
@@ -808,6 +817,10 @@ func (g *groupWriter) Write(p []byte) (int, error) {
 		// 第一次 Write:决定 commit 还是拦截
 		if g.shouldIntercept() {
 			g.intercepted = true
+			// 记录前 256 字节用于判断错误类型(并发限制 vs 额度满)
+			if len(g.interceptBody) < 256 {
+				g.interceptBody = append(g.interceptBody, p[:min(256, len(p))]...)
+			}
 			return len(p), nil // 丢弃
 		}
 		g.commit()
