@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -512,7 +513,7 @@ func handleGroupRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, st
 		req.Body.Close()
 	}
 
-	sortedMembers := sortGroupMembersDynamic(cfg.Members, quotaCacheInst, 0)
+	sortedMembers := sortGroupMembersDynamic(cfg.Members, quotaCacheInst, gm.nextOffset())
 
 	for _, member := range sortedMembers {
 		// 每次迭代重建 req.Body(上一次尝试可能已消耗)
@@ -629,8 +630,10 @@ func handleGroupRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, st
 }
 
 // sortGroupMembersDynamic 对 group 成员进行动态排序。
-// 没有周额度的成员按 5h 窗口到期时间升序排列(先到先用,主动消耗使其滚动)。
-// 有周额度和没有配额数据的成员保持原顺序排在后面。
+// 没有周额度的成员按 5h 窗口到期时间升序排列(先到先用,主动消耗使其滚动);
+// 窗口未启动(resetTime==0)的成员合成 MaxInt64 排最后,但仍参与轮询——
+// 让真实流量偶尔导给它,激活 z.ai 的 5h 窗口。
+// 有周额度的成员保持原顺序排在后面(兜底资源)。
 // offset 用于轮询偏移,使每次请求从不同位置开始,避免排在后面的成员一直轮不到。
 func sortGroupMembersDynamic(members []string, qc *quotaCache, offset int64) []string {
 	if qc == nil {
@@ -661,7 +664,13 @@ func sortGroupMembersDynamic(members []string, qc *quotaCache, offset int64) []s
 				}
 			}
 		}
-		if !ms.hasWeekly && ms.resetTime > 0 {
+		if !ms.hasWeekly {
+			// 无周额度的成员都进轮询池(含窗口未启动的)。
+			// 未启动的 resetTime==0,排序时合成 MaxInt64 排最后,但仍参与轮询——
+			// 让真实流量偶尔导给它,激活 z.ai 的 5h 窗口。
+			if ms.resetTime == 0 {
+				ms.resetTime = math.MaxInt64
+			}
 			scores = append(scores, ms)
 		} else {
 			deferred = append(deferred, m)
