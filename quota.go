@@ -447,7 +447,12 @@ func progressBar(pct int) string {
 }
 
 // fmtResetTime 把毫秒时间戳格式化成北京时间。
+// ms==0 表示该额度窗口未启动(z.ai 未返回 nextResetTime 字段),显示"未启动";
+// ms 已过期(小于现在)显示"已到期";否则按今天/明天/日期格式化。
 func fmtResetTime(ms int64) string {
+	if ms == 0 {
+		return "未启动"
+	}
 	t := time.Unix(ms/1000, 0).In(beijing)
 	now := time.Now().In(beijing)
 	diff := t.Sub(now)
@@ -501,11 +506,6 @@ func writeQuotaCard(b *strings.Builder, e cachedQuota) {
 		e.Alias, levelIcon, e.Level)
 
 	for _, lim := range e.Limits {
-		// 跳过占位字段:z.ai 对部分套餐(如 pro)返回的 unit=3 无 nextResetTime 且 percentage=0,
-		// 这个窗口根本未启用,显示出来只会误导成"已到期"。
-		if lim.NextResetMs == 0 && lim.Percentage == 0 {
-			continue
-		}
 		bar := progressBar(lim.Percentage)
 		resetStr := fmtResetTime(lim.NextResetMs)
 		label := unitLabel(lim.Unit)
@@ -683,10 +683,6 @@ func buildSortedQuotaText(entries []cachedQuota, filterAliases ...string) string
 
 		// 详细配额信息(缩进)
 		for _, lim := range e.Limits {
-			// 跳过占位字段(同 writeQuotaCard):无 nextResetTime 且未用 = z.ai 未启用此窗口
-			if lim.NextResetMs == 0 && lim.Percentage == 0 {
-				continue
-			}
 			detailBar := asciiBar(lim.Percentage)
 			detailReset := fmtResetTime(lim.NextResetMs)
 			label := unitLabel(lim.Unit)

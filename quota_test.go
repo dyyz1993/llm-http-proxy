@@ -84,59 +84,57 @@ func TestHasMonthlyQuota(t *testing.T) {
 	}
 }
 
-// TestBuildQuotaHTML_SkipPlaceholder 验证占位行(NextResetMs==0 && Percentage==0)被跳过。
-// pro 套餐的 unit=3 是 z.ai 返回的占位字段:永远无 nextResetTime、永远 0%,
-// 渲染出来会误导成"已到期"。改后这类行不应出现在 HTML 里。
-func TestBuildQuotaHTML_SkipPlaceholder(t *testing.T) {
-	entries := []cachedQuota{
-		{
-			Alias: "old0115pro",
-			Level: "pro",
-			Limits: []quotaLimit{
-				// 占位行:无重置时间 + 0% → 应被跳过,不显示
-				{Type: "TOKENS_LIMIT", Unit: 3, Percentage: 0, NextResetMs: 0},
-				// 真实行:月度时长,有数据 → 应显示
-				{Type: "TIME_LIMIT", Unit: 5, Percentage: 9, NextResetMs: 1786589520980,
-					Usage: intPtr(1000), CurrentVal: intPtr(96)},
-			},
-			FetchedAt: time.Now(),
-		},
+// TestFmtResetTime 验证 fmtResetTime 对 ms==0 的处理。
+// ms==0 = z.ai 未返回 nextResetTime 字段(额度窗口未启动),应显示"未启动"而非"已到期"。
+func TestFmtResetTime(t *testing.T) {
+	cases := []struct {
+		name   string
+		ms     int64
+		expect string
+	}{
+		{"ms=0(未启动)", 0, "未启动"},
+		{"ms=1(1970年,真过期)", 1, "已到期"},
+		{"未来24h内", time.Now().Add(2 * time.Hour).UnixMilli(), "今天"}, // 含"今天"
 	}
-	html := buildQuotaHTML(entries, nil)
-
-	// 占位的 5h额度 不应出现(它被跳过了)
-	if strings.Contains(html, "5h额度") {
-		t.Errorf("占位的 5h额度 行不应渲染,但 HTML 包含它:\n%s", html)
-	}
-	// 月度时长 应正常显示
-	if !strings.Contains(html, "月度时长") {
-		t.Errorf("月度时长 行应正常渲染,但 HTML 缺失:\n%s", html)
-	}
-	// "已到期" 不应出现(这是旧行为的误导文案)
-	if strings.Contains(html, "已到期") {
-		t.Errorf("不应显示'已到期'(占位行已跳过),但 HTML 包含它:\n%s", html)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := fmtResetTime(c.ms)
+			if !strings.Contains(got, c.expect) {
+				t.Errorf("fmtResetTime(%d) = %q, 应包含 %q", c.ms, got, c.expect)
+			}
+		})
 	}
 }
 
-// TestBuildQuotaHTML_KeepActiveWindow 验证:NextResetMs==0 但 Percentage>0 的行保留。
-// 边界场景:窗口刚激活、第一次查询时可能短暂无重置时间但有用量,不能误删。
-func TestBuildQuotaHTML_KeepActiveWindow(t *testing.T) {
+// TestBuildQuotaHTML_ShowUnstarted 验证:额度窗口未启动(NextResetMs==0)的行保留显示,
+// 且文案是"未启动"而非"已到期"。
+// 场景:pro/max 套餐的 unit=3 有时返回 0% + 无 nextResetTime(窗口未启动),
+// 这种应显示出来(每个套餐该有的额度类型都显示),不能隐藏,文案不能误导成"已到期"。
+func TestBuildQuotaHTML_ShowUnstarted(t *testing.T) {
 	entries := []cachedQuota{
 		{
-			Alias: "edgecase",
-			Level: "lite",
+			Alias: "glm",
+			Level: "max",
 			Limits: []quotaLimit{
-				// 无重置时间但有用量 → 应保留(不是占位)
-				{Type: "TOKENS_LIMIT", Unit: 3, Percentage: 30, NextResetMs: 0},
+				// 5h额度:窗口未启动(0% + 无重置时间)
+				{Type: "TOKENS_LIMIT", Unit: 3, Percentage: 0, NextResetMs: 0},
+				// 周额度:正常
+				{Type: "TOKENS_LIMIT", Unit: 6, Percentage: 1, NextResetMs: 1785587454984},
 			},
 			FetchedAt: time.Now(),
 		},
 	}
 	html := buildQuotaHTML(entries, nil)
+
+	// 5h额度 行应保留显示(不能隐藏)
 	if !strings.Contains(html, "5h额度") {
-		t.Errorf("有用量(30%%)的 5h额度 行应保留,但 HTML 缺失:\n%s", html)
+		t.Errorf("未启动的 5h额度 行应保留显示,但 HTML 缺失:\n%s", html)
 	}
-	if !strings.Contains(html, "30%") {
-		t.Errorf("30%% 用量应显示,但 HTML 缺失:\n%s", html)
+	// 应显示"未启动",不是"已到期"
+	if !strings.Contains(html, "未启动") {
+		t.Errorf("未启动的额度应显示'未启动',但 HTML 缺失:\n%s", html)
+	}
+	if strings.Contains(html, "已到期") {
+		t.Errorf("未启动的额度不应显示'已到期'(误导),但 HTML 包含它:\n%s", html)
 	}
 }
