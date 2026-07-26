@@ -1593,7 +1593,7 @@ func TestAdminKeyEditKeepKeyOnBlank(t *testing.T) {
 
 	// 编辑:alias=glm, key 留空,只改 expires
 	resp, err := client.PostForm(proxy.URL+"/__admin/keys/new",
-		url.Values{"alias": {"glm"}, "key": {""}, "header": {"Authorization"}, "prefix": {"Bearer "}, "expires": {"2026-06-30"}})
+		url.Values{"alias": {"glm"}, "key": {""}, "header": {"Authorization"}, "prefix": {"Bearer "}, "expires": {"2099-12-31"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1606,7 +1606,7 @@ func TestAdminKeyEditKeepKeyOnBlank(t *testing.T) {
 	if cfg.Key != "sk-orig" {
 		t.Errorf("编辑留空 key 未保留原值: got %q, want sk-orig", cfg.Key)
 	}
-	if cfg.Expires != "2026-06-30" {
+	if cfg.Expires != "2099-12-31" {
 		t.Errorf("编辑 expires 未更新: got %q", cfg.Expires)
 	}
 }
@@ -2255,7 +2255,7 @@ func TestProgressBar(t *testing.T) {
 
 func TestUnitLabel(t *testing.T) {
 	cases := map[int]string{
-		3: "周期额度",
+		3: "5h额度",
 		5: "月度时长",
 		6: "周额度",
 		7: "额度(7)", // 未知 unit, fallback
@@ -2294,7 +2294,7 @@ func TestBuildQuotaHTML_Render(t *testing.T) {
 		},
 	}
 	html := buildQuotaHTML(entries, nil)
-	for _, want := range []string{"testkey", "pro", "50%", "12%", "周期额度", "月度时长"} {
+	for _, want := range []string{"testkey", "pro", "50%", "12%", "5h额度", "月度时长"} {
 		if !strings.Contains(html, want) {
 			t.Errorf("配额 HTML 缺少 %q", want)
 		}
@@ -2419,8 +2419,8 @@ func TestServeHelpRootAndBareAlias(t *testing.T) {
 		path      string
 		wantAlias string // 教程里应出现的别名
 	}{
-		{"/", "your-alias"},   // 根路径 → 通用教程(占位符)
-		{"/k/", "your-alias"}, // 裸 /k/ → 通用教程
+		{"/", "your-alias"},    // 根路径 → 通用教程(占位符)
+		{"/k/", "your-alias"},  // 裸 /k/ → 通用教程
 		{"/k/mymax", "mymax"},  // 裸 alias → 带 alias 教程
 		{"/k/mymax/", "mymax"}, // 裸 alias + 斜杠 → 带 alias 教程
 	}

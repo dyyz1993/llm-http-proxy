@@ -127,9 +127,9 @@ func (qc *quotaCache) probeAndRefresh(ks *keyStore) {
 			continue // 同一个 key 已经 probe 过,跳过
 		}
 
-		// 只 probe 没有周额度的 key(有周额度兜底的不需要)
+		// 只 probe 没有周额度/月额度的 key(有高阶兜底的不需要抢占 5h 窗口)
 		if entry, ok := entriesByAlias[alias]; ok {
-			if hasWeeklyQuota(entry) {
+			if hasWeeklyQuota(entry) || hasMonthlyQuota(entry) {
 				continue
 			}
 		}
@@ -151,6 +151,19 @@ func (qc *quotaCache) probeAndRefresh(ks *keyStore) {
 func hasWeeklyQuota(entry cachedQuota) bool {
 	for _, lim := range entry.Limits {
 		if lim.Unit == 6 {
+			return true
+		}
+	}
+	return false
+}
+
+// hasMonthlyQuota 检查 key 是否有月度时长(unit=5)。
+// 有月度的 key(pro 套餐)不需要激活 5h 窗口——
+// z.ai 不对 pro 强制 5h 窗口,unit=3 是占位字段(永不出现 nextResetTime),
+// 对它们发 probe 只会白白消耗月度额度,却激活不了 5h 窗口。
+func hasMonthlyQuota(entry cachedQuota) bool {
+	for _, lim := range entry.Limits {
+		if lim.Unit == 5 {
 			return true
 		}
 	}
@@ -345,8 +358,8 @@ func (qc *quotaCache) activateDormantWindows(ks *keyStore) {
 			continue
 		}
 
-		// 有周额度的不需要激活
-		if hasWeeklyQuota(entry) {
+		// 有周额度或月额度的不需要激活(高阶兜底:pro 的 unit=3 是占位字段)
+		if hasWeeklyQuota(entry) || hasMonthlyQuota(entry) {
 			continue
 		}
 
@@ -412,7 +425,7 @@ func (qc *quotaCache) nextResetTime() time.Time {
 func unitLabel(unit int) string {
 	switch unit {
 	case 3:
-		return "周期额度"
+		return "5h额度"
 	case 5:
 		return "月度时长"
 	case 6:
@@ -488,6 +501,11 @@ func writeQuotaCard(b *strings.Builder, e cachedQuota) {
 		e.Alias, levelIcon, e.Level)
 
 	for _, lim := range e.Limits {
+		// 跳过占位字段:z.ai 对部分套餐(如 pro)返回的 unit=3 无 nextResetTime 且 percentage=0,
+		// 这个窗口根本未启用,显示出来只会误导成"已到期"。
+		if lim.NextResetMs == 0 && lim.Percentage == 0 {
+			continue
+		}
 		bar := progressBar(lim.Percentage)
 		resetStr := fmtResetTime(lim.NextResetMs)
 		label := unitLabel(lim.Unit)
@@ -665,6 +683,10 @@ func buildSortedQuotaText(entries []cachedQuota, filterAliases ...string) string
 
 		// 详细配额信息(缩进)
 		for _, lim := range e.Limits {
+			// 跳过占位字段(同 writeQuotaCard):无 nextResetTime 且未用 = z.ai 未启用此窗口
+			if lim.NextResetMs == 0 && lim.Percentage == 0 {
+				continue
+			}
 			detailBar := asciiBar(lim.Percentage)
 			detailReset := fmtResetTime(lim.NextResetMs)
 			label := unitLabel(lim.Unit)
