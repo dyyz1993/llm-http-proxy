@@ -127,7 +127,9 @@ func (qc *quotaCache) probeAndRefresh(ks *keyStore) {
 			continue // 同一个 key 已经 probe 过,跳过
 		}
 
-		// 只 probe 没有周额度/月额度的 key(有高阶兜底的不需要抢占 5h 窗口)
+		// 重置点 probe 只针对「无任何兜底」的 key(无周额度且无月度)。
+		// 老会员(无周额度但有月度)的重置点滚动交给 group 路由的真实流量,
+		// 激活未启动窗口则由 activateDormantWindows 单独处理(发大请求)。
 		if entry, ok := entriesByAlias[alias]; ok {
 			if hasWeeklyQuota(entry) || hasMonthlyQuota(entry) {
 				continue
@@ -262,7 +264,8 @@ func (qc *quotaCache) refreshNow(ks *keyStore) int {
 //  1. 固定 5 分钟轮询(保底,确保数据不会太旧)
 //  2. 提前抢占:重置点前 1 分钟发 probe,主动触发窗口滚动
 //  3. 重置点定时器:重置点 +5s 再次 probe + 刷新(确认数字准确)
-//  4. 窗口激活:对周期额度"无重置时间"的 key 定期发 probe,主动启动 5h 窗口
+//  4. 窗口激活:每 30 分钟扫描老会员(无周额度),5h 窗口未启动就发大请求激活。
+//     补 group 路由的盲区——代理闲置(无流量)时也能保证老会员窗口可用。
 func (qc *quotaCache) startLoop(ks *keyStore) {
 	go func() {
 		// 启动后立即拉一次
@@ -272,8 +275,9 @@ func (qc *quotaCache) startLoop(ks *keyStore) {
 		ticker := time.NewTicker(qc.interval)
 		defer ticker.Stop()
 
-		// 窗口激活定时器(每 4 小时对没窗口的 pro key 发 probe)
-		activateTicker := time.NewTicker(4 * time.Hour)
+		// 窗口激活定时器(每 30 分钟扫描老会员,5h 窗口未启动就发请求激活)
+		// 周期短:代理闲置时(无 group 流量)也能及时补激活,避免窗口长时间卡住
+		activateTicker := time.NewTicker(30 * time.Minute)
 		defer activateTicker.Stop()
 
 		// 提前抢占定时器(重置点前 1 分钟)
@@ -358,13 +362,15 @@ func (qc *quotaCache) activateDormantWindows(ks *keyStore) {
 			continue
 		}
 
-		// 有周额度或月额度的不需要激活(高阶兜底:pro 的 unit=3 是占位字段)
-		if hasWeeklyQuota(entry) || hasMonthlyQuota(entry) {
+		// 只有「老会员」(无周额度)才需要后台激活。
+		// 有周额度的 max key 有兜底,不需要;有月度(unit=5)但无周额度的老会员
+		// 仍需激活——它们的 5h 窗口在代理闲置时(无 group 流量)会卡在未启动状态。
+		if hasWeeklyQuota(entry) {
 			continue
 		}
 
 		// 检查周期额度(unit=3)是否有重置时间
-		// 无重置时间 = 窗口未启动,需要发 probe 激活
+		// 无重置时间 = 窗口未启动,需要触发激活
 		needsActivation := false
 		for _, lim := range entry.Limits {
 			if lim.Unit == 3 && lim.NextResetMs <= 0 {
@@ -377,17 +383,41 @@ func (qc *quotaCache) activateDormantWindows(ks *keyStore) {
 			continue
 		}
 
-		log.Printf("窗口激活: %s 周期额度无重置时间,发 probe 激活 5h 窗口", alias)
-		// 发一个最小模型请求触发窗口启动
-		qc.probeModelViaProxy(alias, "glm-4-flash")
+		log.Printf("窗口激活: %s 周期额度未启动,发请求激活 5h 窗口", alias)
+		// 发一个大请求触发窗口启动(小 probe 实测无效,需 ~数万 token)。
+		// 触发后会消耗少量月度额度(unit=5),但能保证老会员窗口始终可用。
+		qc.activateWindowWithBigRequest(alias)
 		activated++
 	}
 
 	if activated > 0 {
-		log.Printf("窗口激活完成: 激活了 %d 个 key", activated)
+		log.Printf("窗口激活完成: 激活了 %d 个老会员", activated)
 		// 激活后刷新一次配额
 		qc.fetchAll(configs)
 	}
+}
+
+// activateWindowWithBigRequest 发一个较大的请求激活 z.ai 的 5h 窗口。
+// 实测:glm-4-flash 的 max_tokens=1 probe(11 token)激活不了,
+// 需要数万 token 级别的请求才能触发 z.ai 启动窗口并计入 unit=3。
+// 这里用带较长 prompt 的请求,prompt 大但 completion 小(省 output 费用)。
+func (qc *quotaCache) activateWindowWithBigRequest(alias string) {
+	// ~5万 token 的 prompt(重复文本),completion 限制 20 token
+	url := fmt.Sprintf("http://127.0.0.1%s/k/%s/https://api.z.ai/api/paas/v4/chat/completions",
+		qc.localAddr, alias)
+	// 构造约 5万 token 的 prompt:每 10 字符约 3 token,"the quick brown fox..."(44字符)约 13 token
+	// 5万 token ≈ 3800 次重复
+	prompt := strings.Repeat("the quick brown fox jumps over the lazy dog. ", 3800)
+	body := fmt.Sprintf(`{"model":"glm-4-flash","messages":[{"role":"user","content":%q}],"max_tokens":20}`,
+		prompt)
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Post(url, "application/json", strings.NewReader(body))
+	if err != nil {
+		log.Printf("窗口激活请求失败 [%s]: %v", alias, err)
+		return
+	}
+	resp.Body.Close()
+	log.Printf("窗口激活请求已发送 [%s]: HTTP %d (~5万 token prompt)", alias, resp.StatusCode)
 }
 
 // nextResetTime 返回缓存里所有 limit 中最近的一次重置时刻(已排除过期的)。
