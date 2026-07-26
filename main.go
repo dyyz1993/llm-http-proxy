@@ -25,7 +25,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -630,9 +629,11 @@ func handleGroupRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, st
 }
 
 // sortGroupMembersDynamic 对 group 成员进行动态排序。
-// 没有周额度的成员按 5h 窗口到期时间升序排列(先到先用,主动消耗使其滚动);
-// 窗口未启动(resetTime==0)的成员合成 MaxInt64 排最后,但仍参与轮询——
-// 让真实流量偶尔导给它,激活 z.ai 的 5h 窗口。
+// 过滤器分两层:
+//  1. 窗口是否未启动(percentage==0 且无 nextResetTime)?未启动的优先触发(排最前),
+//     让真实流量尽快激活 z.ai 的 5h 窗口;激活后(resetTime>0)自动降到正常档。
+//  2. 各档内按 5h 窗口到期时间升序(先到先用,主动消耗使其滚动)。
+//
 // 有周额度的成员保持原顺序排在后面(兜底资源)。
 // offset 用于轮询偏移,使每次请求从不同位置开始,避免排在后面的成员一直轮不到。
 func sortGroupMembersDynamic(members []string, qc *quotaCache, offset int64) []string {
@@ -666,10 +667,10 @@ func sortGroupMembersDynamic(members []string, qc *quotaCache, offset int64) []s
 		}
 		if !ms.hasWeekly {
 			// 无周额度的成员都进轮询池(含窗口未启动的)。
-			// 未启动的 resetTime==0,排序时合成 MaxInt64 排最后,但仍参与轮询——
-			// 让真实流量偶尔导给它,激活 z.ai 的 5h 窗口。
+			// 未启动的 resetTime==0,排序时合成 -1 排最前,优先触发真实流量激活 z.ai 的 5h 窗口;
+			// 激活后(resetTime>0)自动降到正常档,按到期时间排队。
 			if ms.resetTime == 0 {
-				ms.resetTime = math.MaxInt64
+				ms.resetTime = -1
 			}
 			scores = append(scores, ms)
 		} else {

@@ -25,26 +25,21 @@ func TestSortGroupMembersDynamic_NilCache(t *testing.T) {
 	}
 }
 
-// TestSortGroupMembersDynamic_UnstartedIncluded 验证核心修复:
-// 窗口未启动(resetTime==0)的无周额度成员应进 scores 池参与轮询,
-// 而不是被踢进 deferred 永远轮不到。
-func TestSortGroupMembersDynamic_UnstartedIncluded(t *testing.T) {
+// TestSortGroupMembersDynamic_UnstartedFirst 验证核心逻辑:
+// 窗口未启动(resetTime==0, percentage==0)的无周额度成员应排最前,优先触发真实流量激活;
+// 已启动的按到期时间正常排队。
+func TestSortGroupMembersDynamic_UnstartedFirst(t *testing.T) {
 	qc := newTestQuotaCache([]cachedQuota{
 		{Alias: "started", Level: "pro", Limits: []quotaLimit{lim(3, 50, 1000)}}, // 已启动
-		{Alias: "unstarted", Level: "pro", Limits: []quotaLimit{lim(3, 0, 0)}},   // 未启动(修复前会被踢进 deferred)
+		{Alias: "unstarted", Level: "pro", Limits: []quotaLimit{lim(3, 0, 0)}},   // 未启动(应排最前)
 	})
-	// offset=0:已启动排前,未启动排后(合成 MaxInt64)
+	// offset=0:未启动排最前(合成 -1),已启动排后
 	got := sortGroupMembersDynamic([]string{"started", "unstarted"}, qc, 0)
 	if len(got) != 2 {
 		t.Fatalf("应有 2 个成员, got %v", got)
 	}
-	if got[0] != "started" || got[1] != "unstarted" {
-		t.Errorf("未启动成员应进 scores 池排最后, got %v", got)
-	}
-	// offset=1:轮询偏移,未启动成员应被选为起点
-	got = sortGroupMembersDynamic([]string{"started", "unstarted"}, qc, 1)
-	if got[0] != "unstarted" {
-		t.Errorf("offset=1 时未启动成员应轮到首位(参与轮询), got %v", got)
+	if got[0] != "unstarted" || got[1] != "started" {
+		t.Errorf("未启动成员应排最前优先触发, got %v", got)
 	}
 }
 
@@ -98,20 +93,19 @@ func TestSortGroupMembersDynamic_WeeklyDeferred(t *testing.T) {
 	}
 }
 
-// TestSortGroupMembersDynamic_UnknownMemberDeferred 缓存里没有的成员(未知)进 deferred 排最后。
-func TestSortGroupMembersDynamic_UnknownMemberDeferred(t *testing.T) {
+// TestSortGroupMembersDynamic_UnknownMemberFirst 缓存里没有的成员(未知)按未启动处理,排最前。
+// 未知成员 entry 不存在 → hasWeekly=false, resetTime=0 → 进 scores 合成 -1 排最前
+// (和窗口未启动同档,优先触发流量)。
+func TestSortGroupMembersDynamic_UnknownMemberFirst(t *testing.T) {
 	qc := newTestQuotaCache([]cachedQuota{
 		{Alias: "known", Level: "pro", Limits: []quotaLimit{lim(3, 50, 1000)}},
 	})
-	// unknown 不在缓存里 → 无周额度信息 → 进 deferred? 不,看代码:!hasWeekly && resetTime>0
-	// unknown: entry 不存在,hasWeekly=false, resetTime=0 → 进 scores(合成 MaxInt64)
-	// 实际行为验证:unknown 和 known 都进 scores
 	got := sortGroupMembersDynamic([]string{"known", "unknown"}, qc, 0)
 	if len(got) != 2 {
 		t.Fatalf("应有 2 个成员, got %v", got)
 	}
-	// known(resetTime=1000) 排前, unknown(resetTime=0→MaxInt64) 排后
-	if got[0] != "known" || got[1] != "unknown" {
-		t.Errorf("已知成员排前,未知成员(合成 MaxInt64)排后, got %v", got)
+	// unknown(resetTime=0→-1) 排最前, known(resetTime=1000) 排后
+	if got[0] != "unknown" || got[1] != "known" {
+		t.Errorf("未知成员按未启动处理应排最前, got %v", got)
 	}
 }
