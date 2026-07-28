@@ -628,14 +628,25 @@ func handleGroupRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, st
 	http.Error(w, "所有上游成员暂时不可用,请稍后重试 (group: "+groupName+")\n", http.StatusServiceUnavailable)
 }
 
-// sortGroupMembersDynamic 对 group 成员进行动态排序。
-// 过滤器分两层:
-//  1. 窗口是否未启动(percentage==0 且无 nextResetTime)?未启动的优先触发(排最前),
-//     让真实流量尽快激活 z.ai 的 5h 窗口;激活后(resetTime>0)自动降到正常档。
-//  2. 各档内按 5h 窗口到期时间升序(先到先用,主动消耗使其滚动)。
+// group 成员排序阈值(双维度:用量 + 时间)。
+const (
+	quotaHighWaterMark = 90 // 平时让位阈值:percentage>=90 让位,留 10% 给并发突发
+	quotaUrgentBoost   = 98 // 快到期解禁阈值:剩<10min 时解禁到 98%(剩 2% 接受浪费)
+	urgentWindow       = 10 * time.Minute
+)
+
+// sortGroupMembersDynamic 对 group 成员进行双维度动态排序。
 //
-// 有周额度的成员保持原顺序排在后面(兜底资源)。
-// offset 用于轮询偏移,使每次请求从不同位置开始,避免排在后面的成员一直轮不到。
+// 排序档位(从最优先到最后):
+//
+//	tier 0 优先 — 窗口未启动(percentage==0 且无 reset),加速激活
+//	tier 1 全力 — 快到期(剩<10min)且 percentage<98%,趁过期前抢着用
+//	tier 2 正常 — percentage<90% 且不快到期,主用 + 轮询
+//	tier 3 让位 — percentage>=98%(绝对上限) 或 (不快到期且>=90%),留余量给并发
+//	deferred    — 有周额度的 max key,兜底
+//
+// 同 tier 内按 resetTime 升序(先到期的先用/先恢复)。
+// offset 轮询偏移只对 tier 2 生效(tier 1 要锁定全力,不能被打乱)。
 func sortGroupMembersDynamic(members []string, qc *quotaCache, offset int64) []string {
 	if qc == nil {
 		return members
@@ -648,11 +659,14 @@ func sortGroupMembersDynamic(members []string, qc *quotaCache, offset int64) []s
 	}
 
 	type memberScore struct {
-		alias     string
-		resetTime int64
-		hasWeekly bool
+		alias      string
+		resetTime  int64
+		hasWeekly  bool
+		percentage int
+		tier       int
 	}
 
+	now := time.Now().UnixMilli()
 	scores := make([]memberScore, 0, len(members))
 	var deferred []string
 	for _, m := range members {
@@ -660,37 +674,79 @@ func sortGroupMembersDynamic(members []string, qc *quotaCache, offset int64) []s
 		if entry, ok := entryByAlias[m]; ok {
 			ms.hasWeekly = hasWeeklyQuota(entry)
 			for _, lim := range entry.Limits {
-				if lim.Unit == 3 && lim.NextResetMs > 0 {
-					ms.resetTime = lim.NextResetMs
+				if lim.Unit == 3 {
+					ms.percentage = lim.Percentage
+					if lim.NextResetMs > 0 {
+						ms.resetTime = lim.NextResetMs
+					}
 				}
 			}
 		}
-		if !ms.hasWeekly {
-			// 无周额度的成员都进轮询池(含窗口未启动的)。
-			// 未启动的 resetTime==0,排序时合成 -1 排最前,优先触发真实流量激活 z.ai 的 5h 窗口;
-			// 激活后(resetTime>0)自动降到正常档,按到期时间排队。
-			if ms.resetTime == 0 {
-				ms.resetTime = -1
-			}
-			scores = append(scores, ms)
-		} else {
+		if ms.hasWeekly {
 			deferred = append(deferred, m)
+			continue
 		}
+
+		// 计算 tier
+		remainMs := ms.resetTime - now
+		urgent := ms.resetTime > 0 && remainMs > 0 && remainMs < int64(urgentWindow/time.Millisecond)
+		switch {
+		case ms.resetTime == 0:
+			// 未启动:优先档,合成 resetTime=-1 排最前
+			ms.tier = 0
+			ms.resetTime = -1
+		case ms.percentage >= quotaUrgentBoost:
+			// 真满(绝对上限 98%):无论如何让位
+			ms.tier = 3
+		case urgent && ms.percentage < quotaUrgentBoost:
+			// 快到期解禁:可用到 98%(平时 90% 让位的在这里解禁)
+			ms.tier = 1
+		case ms.percentage >= quotaHighWaterMark:
+			// 平时让位:留 10% 给并发
+			ms.tier = 3
+		default:
+			// 正常
+			ms.tier = 2
+		}
+		scores = append(scores, ms)
 	}
 
-	// 按到期时间升序(先到期先用)
+	// 排序:先 tier 升序,同 tier 内按 resetTime 升序
 	sort.Slice(scores, func(i, j int) bool {
+		if scores[i].tier != scores[j].tier {
+			return scores[i].tier < scores[j].tier
+		}
 		return scores[i].resetTime < scores[j].resetTime
 	})
 
-	// 只对没周额度的成员做轮询偏移,有周额度的固定排最后
+	// 轮询偏移只对 tier 2(正常档)生效。
+	// tier 0/1/3 保持 sort 顺序(0 加速激活、1 锁定全力、3 让位,都不该轮询)。
 	if offset > 0 && len(scores) > 1 {
-		start := int(offset % int64(len(scores)))
-		rotated := make([]string, 0, len(scores))
-		for i := 0; i < len(scores); i++ {
-			rotated = append(rotated, scores[(i+start)%len(scores)].alias)
+		// 找出 tier 2 的成员范围(排序后连续)
+		t2Start, t2End := -1, -1
+		for i, s := range scores {
+			if s.tier == 2 {
+				if t2Start == -1 {
+					t2Start = i
+				}
+				t2End = i
+			}
 		}
-		return append(rotated, deferred...)
+		if t2Start >= 0 && t2End > t2Start {
+			t2Len := t2End - t2Start + 1
+			start := int(offset % int64(t2Len))
+			result := make([]string, 0, len(scores))
+			for i := range scores {
+				if i < t2Start || i > t2End {
+					result = append(result, scores[i].alias)
+				} else {
+					// 结果位置 i 放 t2 范围内 (i-t2Start+start) 偏移的内容
+					origIdx := t2Start + ((i-t2Start)+start)%t2Len
+					result = append(result, scores[origIdx].alias)
+				}
+			}
+			return append(result, deferred...)
+		}
 	}
 
 	result := make([]string, 0, len(members))
