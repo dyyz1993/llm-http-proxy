@@ -142,7 +142,7 @@ func startProxyWithKeys(t *testing.T, ks *keyStore) *httptest.Server {
 			statsHandler(stats, nil).ServeHTTP(w, req)
 			return
 		case req.URL.Path == "/" || req.URL.Path == "":
-			serveHelp(w, "")
+			serveHelp(w, "", "k")
 			return
 		case strings.HasPrefix(req.URL.Path, "/k/"):
 			handleKeyRoute(w, req, ks, stats, us)
@@ -2378,8 +2378,8 @@ func TestHelpText(t *testing.T) {
 	_ = err
 	// 线上测试不可靠,改用本地 handler 测试
 
-	// helpText 函数单元测试
-	txt := helpText("")
+	// helpText 函数单元测试(别名模式 /k/)
+	txt := helpText("", "k")
 	if !strings.Contains(txt, "llm-http-proxy") {
 		t.Error("helpText 缺少项目名")
 	}
@@ -2397,14 +2397,27 @@ func TestHelpText(t *testing.T) {
 	}
 
 	// 带 alias 的教程应该把别名带进示例
-	txt2 := helpText("mymax")
+	txt2 := helpText("mymax", "k")
 	if !strings.Contains(txt2, "/k/mymax/") {
-		t.Error("helpText(\"mymax\") 示例里应使用 mymax 别名")
+		t.Error("helpText(\"mymax\",\"k\") 示例里应使用 mymax 别名")
 	}
 	// 默认(无别名)应使用 your-alias 占位符(不暴露真实别名)
-	txt3 := helpText("")
+	txt3 := helpText("", "k")
 	if !strings.Contains(txt3, "/k/your-alias/") {
-		t.Error("helpText(\"\") 示例应使用 your-alias 占位符")
+		t.Error("helpText(\"\",\"k\") 示例应使用 your-alias 占位符")
+	}
+
+	// group 模式(/g/)教程:应使用 /g/ 前缀 + 群组语义
+	txtG := helpText("", "g")
+	if !strings.Contains(txtG, "/g/your-alias/") {
+		t.Error("helpText(\"\",\"g\") 群组教程应使用 /g/ 前缀")
+	}
+	if !strings.Contains(txtG, "群组") {
+		t.Error("helpText(\"\",\"g\") 应说明这是群组模式")
+	}
+	// group 教程用 /g/ 而非 /k/(关键:复制 /g/ 打开后教程匹配)
+	if strings.Contains(txtG, "/k/your-alias/") && !strings.Contains(txtG, "/g/your-alias/") {
+		t.Error("helpText(\"\",\"g\") 不该混用 /k/ 前缀")
 	}
 }
 

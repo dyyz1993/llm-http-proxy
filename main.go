@@ -226,7 +226,7 @@ func main() {
 			return
 		case req.URL.Path == "/" || req.URL.Path == "":
 			// 根路径返回使用指南(TXT)
-			serveHelp(w, "")
+			serveHelp(w, "", "k")
 			return
 		case ks != nil && strings.HasPrefix(req.URL.Path, "/g/"):
 			// 群组模式: /g/{group}/https://目标
@@ -288,13 +288,21 @@ func versionHandler(w http.ResponseWriter, req *http.Request) {
 	json.NewEncoder(w).Encode(info)
 }
 
-// helpText 返回纯文本使用教程(分章节)。根路径 / 裸 alias 路径访问时展示。
-// 接收 alias 参数:为空时是通用教程,非空时在示例里用该 alias。
-func helpText(alias string) string {
+// helpText 返回纯文本使用教程(分章节)。根路径 / 裸 alias/group 路径访问时展示。
+// alias 非空时在示例里用该 alias;mode="k" 渲染别名模式教程,mode="g" 渲染群组模式教程。
+func helpText(alias, mode string) string {
 	aliasExample := "your-alias" // 占位符,不暴露真实别名
 	if alias != "" {
 		aliasExample = alias
 	}
+	if mode == "g" {
+		return helpTextGroup(aliasExample)
+	}
+	return helpTextAlias(aliasExample)
+}
+
+// helpTextAlias 别名模式(/k/)教程。
+func helpTextAlias(aliasExample string) string {
 	return fmt.Sprintf(`# llm-http-proxy 使用指南
 
 100%% 透传的反向代理,支持 GLM / OpenAI / Claude 等 LLM API。
@@ -376,12 +384,76 @@ GitHub: https://github.com/dyyz1993/llm-http-proxy
 `, aliasExample)
 }
 
+// helpTextGroup 群组模式(/g/)教程。
+// 群组把多个成员(别名)聚合,自动在成员间分配请求(负载均衡 + 故障切换)。
+func helpTextGroup(aliasExample string) string {
+	return fmt.Sprintf(`# llm-http-proxy 群组使用指南
+
+群组模式: /g/{群组名}/目标完整URL
+群组把多个成员(别名)聚合,请求自动在成员间分配:
+  - 负载均衡(轮询,避免单 key 打满)
+  - 故障切换(某成员 429/502 自动切下一个)
+  - 用量均衡(按 5h 额度到期/用量动态排序)
+
+真实 API key 只存在服务端,客户端用群组名调用,key 不外泄。
+
+---
+
+## 一、快速开始(群组模式)
+
+  # OpenAI 兼容格式
+  curl https://p.19930810.xyz:8443/g/%[1]s/https://api.z.ai/api/coding/paas/v4/chat/completions \
+    -H "Authorization: Bearer 任意值" \
+    -H "Content-Type: application/json" \
+    -d '{"model":"glm-4-flash","messages":[{"role":"user","content":"你好"}]}'
+
+  # Anthropic 兼容格式
+  curl https://p.19930810.xyz:8443/g/%[1]s/https://api.z.ai/api/anthropic/v1/messages \
+    -H "x-api-key: 任意值" \
+    -H "anthropic-version: 2023-06-01" \
+    -H "Content-Type: application/json" \
+    -d '{"model":"glm-4.6","messages":[{"role":"user","content":"你好"}],"max_tokens":50}'
+
+注:/g/{群组名}/ 和 /k/{群组名}/ 都能走群组(/k/ 有兜底转群组),
+但推荐用 /g/ 以明确语义。
+
+---
+
+## 二、原理说明
+
+1. 群组成员按「5h 额度到期时间 + 用量」动态排序:
+   - 未启动的窗口优先(加速激活)
+   - 快到期且未满的全力用(趁过期前消耗)
+   - 用量到 90%% 让位(留 10%% 给并发突发)
+   - 到 98%% 绝对让位(避免 429)
+2. 某成员返回 429/502 等可切换状态码时,自动冷却并切下一个成员。
+3. 所有成员都不可用时返回 503 + Retry-After: 60。
+4. SSE 流式 / WebSocket 全程透传。
+
+---
+
+## 三、状态码说明
+
+  200          正常
+  499          客户端主动断连
+  502          上游转发失败
+  503          所有群组成员暂时不可用(稍后重试)
+  429          触发成员切换(对客户端透明)
+
+---
+
+## 四、源码 / 反馈
+
+GitHub: https://github.com/dyyz1993/llm-http-proxy
+`, aliasExample)
+}
+
 // serveHelp 返回 TXT 教程(text/plain),状态码 200。
-// alias 参数用于在示例里替换别名,为空则用默认 "glm"。
-func serveHelp(w http.ResponseWriter, alias string) {
+// alias 用于在示例里替换别名;mode="k" 渲染别名模式教程,"g" 渲染群组模式教程。
+func serveHelp(w http.ResponseWriter, alias, mode string) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	io.WriteString(w, helpText(alias))
+	io.WriteString(w, helpText(alias, mode))
 }
 
 // handleKeyRoute 处理 key 注入模式: /k/{alias}/https://目标
@@ -398,21 +470,21 @@ func handleKeyRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, stat
 	rest := strings.TrimPrefix(raw, "k/")
 	if rest == raw || rest == "" {
 		// 裸 /k/ → 返回通用教程
-		serveHelp(w, "")
+		serveHelp(w, "", "k")
 		return
 	}
 	// 取第一个 / 之前的部分作为 alias
 	slash := strings.IndexByte(rest, '/')
 	if slash < 0 {
 		// 裸 /k/{alias}(无目标)→ 返回带该 alias 的教程
-		serveHelp(w, rest)
+		serveHelp(w, rest, "k")
 		return
 	}
 	alias := rest[:slash]
 	target := rest[slash+1:]
 	if target == "" || !strings.Contains(target, "://") {
 		// 裸 /k/{alias}/ (无目标) 或目标格式不对 → 返回带该 alias 的教程
-		serveHelp(w, alias)
+		serveHelp(w, alias, "k")
 		return
 	}
 
@@ -464,18 +536,18 @@ func handleGroupRoutePrefix(w http.ResponseWriter, req *http.Request, ks *keySto
 	raw := strings.TrimPrefix(req.RequestURI, "/")
 	rest := strings.TrimPrefix(raw, "g/")
 	if rest == raw || rest == "" {
-		serveHelp(w, "")
+		serveHelp(w, "", "g")
 		return
 	}
 	slash := strings.IndexByte(rest, '/')
 	if slash < 0 {
-		serveHelp(w, rest)
+		serveHelp(w, rest, "g")
 		return
 	}
 	groupName := rest[:slash]
 	target := rest[slash+1:]
 	if target == "" || !strings.Contains(target, "://") {
-		serveHelp(w, groupName)
+		serveHelp(w, groupName, "g")
 		return
 	}
 	handleGroupRoute(w, req, ks, stats, us, groupName, target)
