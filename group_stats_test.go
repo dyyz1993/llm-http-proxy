@@ -9,32 +9,57 @@ import (
 
 // === 测试1:resetAlias(usageStats) ===
 
-// TestUsageResetAlias 验证 resetAlias 清零指定 alias 的 usage 数据。
+// TestUsageResetAlias 验证 resetAlias 清零指定 alias(或 group)的 usage 数据。
+// group 维度用 "group:{name}" 带前缀的 key(与 key 维度隔离,避免重名混淆)。
 func TestUsageResetAlias(t *testing.T) {
 	us := newUsageStats() // 内存模式,不持久化
-	// 记两条数据:一个 key 维度,一个 group 维度
+	// 记两条数据:一个 key 维度,一个 group 维度(带前缀)
 	us.record("glm", usageData{Prompt: 100, Completion: 50, HasData: true})
-	us.record("mygroup", usageData{Prompt: 200, Completion: 100, HasData: true})
+	us.record("group:mygroup", usageData{Prompt: 200, Completion: 100, HasData: true})
 
 	// 确认两条都在
 	snap := us.snapshot()
 	if _, ok := snap["glm"]; !ok {
 		t.Fatal("reset 前 glm 应存在")
 	}
-	if _, ok := snap["mygroup"]; !ok {
-		t.Fatal("reset 前 mygroup 应存在")
+	if _, ok := snap["group:mygroup"]; !ok {
+		t.Fatal("reset 前 group:mygroup 应存在")
 	}
 
-	// 重置 group 维度
-	us.resetAlias("mygroup")
+	// 重置 group 维度(用带前缀的 key)
+	us.resetAlias("group:mygroup")
 
-	// mygroup 应被删除,glm 保留
+	// group:mygroup 应被删除,glm 保留
 	snap = us.snapshot()
-	if _, ok := snap["mygroup"]; ok {
-		t.Error("reset 后 mygroup 应被删除")
+	if _, ok := snap["group:mygroup"]; ok {
+		t.Error("reset 后 group:mygroup 应被删除")
 	}
 	if _, ok := snap["glm"]; !ok {
 		t.Error("reset 后 glm 应保留(不受影响)")
+	}
+}
+
+// TestUsageGroupNoCollision 验证 group 名和 alias 重名时数据不混淆。
+// 关键:group 维度用 "group:xxx" 带前缀,不会覆盖 alias "xxx" 的数据。
+func TestUsageGroupNoCollision(t *testing.T) {
+	us := newUsageStats()
+	// 假设有个 alias 叫 "mygroup",同时也有个 group 叫 "mygroup"
+	us.record("mygroup", usageData{Prompt: 100, HasData: true})       // alias 维度
+	us.record("group:mygroup", usageData{Prompt: 200, HasData: true}) // group 维度
+
+	snap := us.snapshot()
+	// 两条数据应共存(不同 key)
+	if snap["mygroup"].WindowPrompt != 100 {
+		t.Errorf("alias mygroup 应是 100, got %d", snap["mygroup"].WindowPrompt)
+	}
+	if snap["group:mygroup"].WindowPrompt != 200 {
+		t.Errorf("group:mygroup 应是 200, got %d", snap["group:mygroup"].WindowPrompt)
+	}
+	// 重置 group 不影响 alias
+	us.resetAlias("group:mygroup")
+	snap = us.snapshot()
+	if _, ok := snap["mygroup"]; !ok {
+		t.Error("重置 group:mygroup 后,alias mygroup 应保留")
 	}
 }
 

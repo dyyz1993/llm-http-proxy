@@ -342,7 +342,7 @@ function copyURL(alias) {
 </table></div>
 {{/* 群组汇总统计(读 group 维度独立统计,不再累加成员) */}}
 <div style="margin-top:6px;padding:6px 10px;background:#f5f5f5;border-radius:4px;font-size:13px">
-{{with index $.UsageSnap $name}}
+{{with index $.UsageSnap (printf "group:%s" $name)}}
 <b>群组合计:</b> 请求 {{if gt .WindowSuccess 0}}{{.WindowSuccess}}{{else}}0{{end}} | 输入 {{fmtTokens .WindowPrompt}} | 输出 {{fmtTokens .WindowCompletion}} | 费用 {{printf "%.4f" .TotalCost}}
 {{else}}
 <b>群组合计:</b> 暂无统计(未被调用)

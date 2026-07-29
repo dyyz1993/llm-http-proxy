@@ -1219,17 +1219,14 @@ func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLa
 		start := time.Now()
 
 		// 双重统计:group 维度。groupLabel 形如 "group:mygroup"(空=非 group 路由)。
-		// groupAlias 去掉前缀,供 usageStats.record 使用(usage 按 alias 记,不带 "group:" 前缀)。
-		groupAlias := ""
-		if groupLabel != "" {
-			groupAlias = strings.TrimPrefix(groupLabel, "group:")
-		}
-
+		// stats 和 usage 都用带 "group:" 前缀的 label,与 key 维度("key:xxx")隔离,
+		// 避免 group 名和 alias 重名时数据混淆。
+		//
 		// recordStats:记录 stats(ip 维度),成员 + group 双重。
 		recordStats := func(status int) {
 			if stats != nil {
 				stats.record(ip, statKey, targetHost, status)
-				if groupAlias != "" {
+				if groupLabel != "" {
 					stats.record(ip, groupLabel, targetHost, status)
 				}
 			}
@@ -1253,12 +1250,12 @@ func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLa
 					usageTracker.recordSuccess(alias)
 				}
 			}
-			// group 维度
-			if groupAlias != "" {
+			// group 维度(groupLabel 带 "group:" 前缀,usageStats 按这个带前缀的 key 记)
+			if groupLabel != "" {
 				if status >= 400 {
-					usageTracker.recordError(groupAlias)
+					usageTracker.recordError(groupLabel)
 				} else if status > 0 {
-					usageTracker.recordSuccess(groupAlias)
+					usageTracker.recordSuccess(groupLabel)
 				}
 			}
 		}
@@ -1569,9 +1566,9 @@ func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLa
 				if alias != "-" {
 					usageTracker.record(alias, u)
 				}
-				// group 维度也记 token/费用(groupAlias 空=非 group 路由,跳过)
-				if groupAlias != "" {
-					usageTracker.record(groupAlias, u)
+				// group 维度也记 token/费用(groupLabel 带 "group:" 前缀,与 key 维度隔离)
+				if groupLabel != "" {
+					usageTracker.record(groupLabel, u)
 				}
 			}
 		}

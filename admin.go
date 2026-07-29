@@ -563,9 +563,9 @@ func (a *adminServer) handleGroupReset(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "缺少 name", http.StatusBadRequest)
 		return
 	}
-	// usage 维度:key 是 "group:{name}" 去掉前缀的 group 名
+	// usage 维度:key 是 "group:{name}"(带前缀,与 stats 对齐)
 	if a.usage != nil {
-		a.usage.resetAlias(name)
+		a.usage.resetAlias("group:" + name)
 	}
 	// stats 维度:key 是 "group:{name}"(带前缀,散布在各 IP 的 Keys 里)
 	if a.stats != nil {
