@@ -251,7 +251,7 @@ func main() {
 				Store: ks,
 			}
 			runChecks(w, passthroughChecks, ctx)
-			newProxyHandler(stats, nil, "", ctx.ImageFilter, ctx.TokenMultipliers, ctx.RetryConfig).ServeHTTP(w, req)
+			newProxyHandler(stats, nil, "", "", ctx.ImageFilter, ctx.TokenMultipliers, ctx.RetryConfig).ServeHTTP(w, req)
 		}
 	})
 
@@ -527,11 +527,9 @@ func handleKeyRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, stat
 
 	// 全部通过,转发
 	req.RequestURI = "/" + target
-	newProxyHandler(stats, ctx.HeadersToInject, ctx.StatLabel,
+	newProxyHandler(stats, ctx.HeadersToInject, ctx.StatLabel, "",
 		ctx.ImageFilter, ctx.TokenMultipliers, ctx.RetryConfig).ServeHTTP(w, req)
-}
-
-// handleGroupRoutePrefix 解析 /g/{group}/https://target 并交给 handleGroupRoute。
+} // handleGroupRoutePrefix 解析 /g/{group}/https://target 并交给 handleGroupRoute。
 func handleGroupRoutePrefix(w http.ResponseWriter, req *http.Request, ks *keyStore, stats *statsCollector, us *usageStats) {
 	raw := strings.TrimPrefix(req.RequestURI, "/")
 	rest := strings.TrimPrefix(raw, "g/")
@@ -611,14 +609,15 @@ func handleGroupRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, st
 
 		// 拦截器链检查(禁止时段/限额/限流/白名单)
 		ctx := &CheckContext{
-			Alias:    member,
-			Target:   target,
-			Domain:   extractDomain(target),
-			Config:   memberCfg,
-			Request:  req,
-			Store:    ks,
-			Usage:    us,
-			Settings: settingsMgr,
+			Alias:      member,
+			Target:     target,
+			Domain:     extractDomain(target),
+			Config:     memberCfg,
+			Request:    req,
+			Store:      ks,
+			Usage:      us,
+			Settings:   settingsMgr,
+			GroupLabel: "group:" + groupName,
 		}
 
 		// groupWriter:延迟 commit,SSE/WebSocket 流式透传,命中 on_status 或
@@ -647,7 +646,7 @@ func handleGroupRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, st
 			}
 			req.RequestURI = "/" + target
 			rec := newGroupWriter(w, cfg.OnStatus)
-			newProxyHandler(stats, ctx.HeadersToInject, ctx.StatLabel,
+			newProxyHandler(stats, ctx.HeadersToInject, ctx.StatLabel, ctx.GroupLabel,
 				ctx.ImageFilter, ctx.TokenMultipliers, ctx.RetryConfig).ServeHTTP(rec, req)
 
 			// 判定结果
@@ -844,14 +843,15 @@ func handleGroupWebSocket(w http.ResponseWriter, req *http.Request, ks *keyStore
 		memberCfg = resolveConfig(memberCfg, ks.getInterceptorProfiles(), "default")
 
 		ctx := &CheckContext{
-			Alias:    member,
-			Target:   target,
-			Domain:   extractDomain(target),
-			Config:   memberCfg,
-			Request:  req,
-			Store:    ks,
-			Usage:    us,
-			Settings: settingsMgr,
+			Alias:      member,
+			Target:     target,
+			Domain:     extractDomain(target),
+			Config:     memberCfg,
+			Request:    req,
+			Store:      ks,
+			Usage:      us,
+			Settings:   settingsMgr,
+			GroupLabel: "group:" + groupName,
 		}
 
 		if !runChecks(w, keyRouteChecks, ctx) {
@@ -863,7 +863,7 @@ func handleGroupWebSocket(w http.ResponseWriter, req *http.Request, ks *keyStore
 
 		// 直接传真实 w(不包 groupWriter),WS 握手 + 双向隧道需要原始 conn。
 		req.RequestURI = "/" + target
-		newProxyHandler(stats, ctx.HeadersToInject, ctx.StatLabel,
+		newProxyHandler(stats, ctx.HeadersToInject, ctx.StatLabel, ctx.GroupLabel,
 			ctx.ImageFilter, ctx.TokenMultipliers, ctx.RetryConfig).ServeHTTP(w, req)
 		return
 	}
@@ -1197,7 +1197,7 @@ var sharedClient = &http.Client{Transport: sharedTransport}
 // imageFilter 是 image_url 过滤规则,非空时在转发前过滤请求 body。
 // tokenMultipliers 是 Token 用量乘数规则,在提取 usage 后应用。
 // retryCfg 是上游重试配置(零值=不重试)。
-func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLabel string, imageFilter []ImageFilterRule, tokenMultipliers []TokenMultiplierRule, retryCfg RetryConfig) http.Handler {
+func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLabel, groupLabel string, imageFilter []ImageFilterRule, tokenMultipliers []TokenMultiplierRule, retryCfg RetryConfig) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		raw := strings.TrimPrefix(req.RequestURI, "/")
 		if raw == "" || !strings.Contains(raw, "://") {
@@ -1218,16 +1218,59 @@ func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLa
 		targetHost := hostFromRaw(raw)
 		start := time.Now()
 
+		// 双重统计:group 维度。groupLabel 形如 "group:mygroup"(空=非 group 路由)。
+		// groupAlias 去掉前缀,供 usageStats.record 使用(usage 按 alias 记,不带 "group:" 前缀)。
+		groupAlias := ""
+		if groupLabel != "" {
+			groupAlias = strings.TrimPrefix(groupLabel, "group:")
+		}
+
+		// recordStats:记录 stats(ip 维度),成员 + group 双重。
+		recordStats := func(status int) {
+			if stats != nil {
+				stats.record(ip, statKey, targetHost, status)
+				if groupAlias != "" {
+					stats.record(ip, groupLabel, targetHost, status)
+				}
+			}
+		}
+		// recordUsageResult:记录 usage(成功/错误计数),成员 + group 双重。
+		recordUsageResult := func(status int) {
+			if usageTracker == nil {
+				return
+			}
+			// 成员维度
+			alias := statKey
+			if strings.HasPrefix(statKey, "key:") {
+				alias = strings.TrimPrefix(statKey, "key:")
+			}
+			if status >= 400 {
+				if alias != "-" {
+					usageTracker.recordError(alias)
+				}
+			} else if status > 0 {
+				if alias != "-" {
+					usageTracker.recordSuccess(alias)
+				}
+			}
+			// group 维度
+			if groupAlias != "" {
+				if status >= 400 {
+					usageTracker.recordError(groupAlias)
+				} else if status > 0 {
+					usageTracker.recordSuccess(groupAlias)
+				}
+			}
+		}
+
 		// 用 statusRecorder 包一层,以便拿到最终状态码做统计。
 		rec := &statusRecorder{ResponseWriter: w, status: 200}
 
 		// WebSocket 分支:检测 Upgrade: websocket
 		if isWebSocketUpgrade(req) {
 			handleWebSocket(rec, req, raw)
-			if stats != nil {
-				stats.record(ip, statKey, targetHost, rec.status)
-				logRequest(ip, statKey, req.Method, targetHost, rec.status, time.Since(start), 0, false, usageData{}, false)
-			}
+			recordStats(rec.status)
+			logRequest(ip, statKey, req.Method, targetHost, rec.status, time.Since(start), 0, false, usageData{}, false)
 			return
 		}
 
@@ -1247,10 +1290,8 @@ func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLa
 		outReq, err := http.NewRequestWithContext(req.Context(), req.Method, raw, bodyReader)
 		if err != nil {
 			http.Error(rec, "目标 URL 无法解析: "+err.Error(), http.StatusBadRequest)
-			if stats != nil {
-				stats.record(ip, statKey, targetHost, rec.status)
-				logRequest(ip, statKey, req.Method, targetHost, rec.status, time.Since(start), 0, false, usageData{}, false)
-			}
+			recordStats(rec.status)
+			logRequest(ip, statKey, req.Method, targetHost, rec.status, time.Since(start), 0, false, usageData{}, false)
 			return
 		}
 		outReq.Header = req.Header.Clone() // 原样复制,不追加任何 header
@@ -1366,10 +1407,8 @@ func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLa
 			}
 			rec.Header().Set("Retry-After", "60")
 			http.Error(rec, "上游服务暂时不可用,请稍后重试", fallback)
-			if stats != nil {
-				stats.record(ip, statKey, targetHost, rec.status)
-				logRequest(ip, statKey, req.Method, targetHost, rec.status, time.Since(start), 0, false, usageData{}, false)
-			}
+			recordStats(rec.status)
+			logRequest(ip, statKey, req.Method, targetHost, rec.status, time.Since(start), 0, false, usageData{}, false)
 			return
 		}
 
@@ -1381,10 +1420,8 @@ func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLa
 				rec.status = status
 			}
 			http.Error(rec, "转发失败: "+lastErr.Error(), status)
-			if stats != nil {
-				stats.record(ip, statKey, targetHost, rec.status)
-				logRequest(ip, statKey, req.Method, targetHost, rec.status, time.Since(start), 0, false, usageData{}, false)
-			}
+			recordStats(rec.status)
+			logRequest(ip, statKey, req.Method, targetHost, rec.status, time.Since(start), 0, false, usageData{}, false)
 			return
 		}
 
@@ -1532,28 +1569,17 @@ func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLa
 				if alias != "-" {
 					usageTracker.record(alias, u)
 				}
+				// group 维度也记 token/费用(groupAlias 空=非 group 路由,跳过)
+				if groupAlias != "" {
+					usageTracker.record(groupAlias, u)
+				}
 			}
 		}
 
-		// 记录统计(含 token 用量)
-		if stats != nil {
-			stats.record(ip, statKey, targetHost, rec.status)
-		}
-		// 错误请求(4xx/5xx)记录到 usage 统计
-		if usageTracker != nil && rec.status >= 400 {
-			alias := statKey
-			if strings.HasPrefix(statKey, "key:") {
-				alias = strings.TrimPrefix(statKey, "key:")
-			}
-			usageTracker.recordError(alias)
-		} else if usageTracker != nil && rec.status >= 200 && rec.status < 400 {
-			// 成功请求(2xx/3xx)记录到窗口计数器(用于用量限额)
-			alias := statKey
-			if strings.HasPrefix(statKey, "key:") {
-				alias = strings.TrimPrefix(statKey, "key:")
-			}
-			usageTracker.recordSuccess(alias)
-		}
+		// 记录统计(含 token 用量),成员 + group 双重
+		recordStats(rec.status)
+		// 错误/成功计数,成员 + group 双重
+		recordUsageResult(rec.status)
 		logRequest(ip, statKey, req.Method, targetHost, rec.status, time.Since(start), ttfb, isStream, u, imageFiltered)
 	})
 }

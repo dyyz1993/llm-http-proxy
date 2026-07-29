@@ -50,6 +50,7 @@ type CheckContext struct {
 
 	// 输出(由 checkSetup 填写)
 	StatLabel        string
+	GroupLabel       string // group 路由时为 "group:{name}",其它为空(双重统计用)
 	HeadersToInject  http.Header
 	ImageFilter      []ImageFilterRule
 	TokenMultipliers []TokenMultiplierRule

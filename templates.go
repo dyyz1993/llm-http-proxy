@@ -312,16 +312,15 @@ function copyURL(alias) {
 <h2>群组配置 ({{len .Groups}})</h2>
 {{if not .Groups}}<p>暂无群组。在下方添加。</p>{{end}}
 {{range $name, $g := .Groups}}
-{{$totalReqs := 0}}
-{{$totalPrompt := 0}}
-{{$totalCompletion := 0}}
-{{$totalCost := 0.0}}
 <div style="margin:12px 0;padding:12px;background:#fff;border-radius:6px;border:1px solid #ddd">
 <div style="font-weight:bold;font-size:14px;margin-bottom:8px">
 	{{$name}}
 	<code style="font-size:12px;color:#888" id="url-{{$name}}">/g/{{$name}}/</code>
 	<button type="button" onclick="copyGroupURL('{{$name}}')" style="padding:2px 8px;font-size:12px">复制</button>
 	<a href="/__admin/groups?edit={{$name}}"><button type="button" style="padding:2px 8px;font-size:12px">编辑</button></a>
+	<form method="post" action="/__admin/groups/reset?name={{$name}}" style="display:inline;float:right">
+	<button type="submit" onclick="return confirm('重置群组 {{$name}} 统计?')" style="padding:2px 8px;font-size:12px">重置统计</button>
+	</form>
 	<form method="post" action="/__admin/groups/delete?name={{$name}}" style="display:inline;float:right">
 	<button type="submit" onclick="return confirm('删除群组 {{$name}}?')" style="padding:2px 8px;font-size:12px">删除</button>
 	</form>
@@ -341,10 +340,13 @@ function copyURL(alias) {
 </tr>
 {{end}}
 </table></div>
-{{/* 群组汇总统计 */}}
+{{/* 群组汇总统计(读 group 维度独立统计,不再累加成员) */}}
 <div style="margin-top:6px;padding:6px 10px;background:#f5f5f5;border-radius:4px;font-size:13px">
-{{range $m := $g.Members}}{{with index $.UsageSnap $m}}{{$totalPrompt = add $totalPrompt .WindowPrompt}}{{$totalCompletion = add $totalCompletion .WindowCompletion}}{{$totalCost = addf $totalCost .TotalCost}}{{end}}{{with index $.MemberStatus $m}}{{$totalReqs = add $totalReqs .TotalReqs}}{{end}}{{end}}
-<b>群组合计:</b> 请求 {{$totalReqs}} | 输入 {{fmtTokens $totalPrompt}} | 输出 {{fmtTokens $totalCompletion}} | 费用 {{printf "%.4f" $totalCost}}
+{{with index $.UsageSnap $name}}
+<b>群组合计:</b> 请求 {{if gt .WindowSuccess 0}}{{.WindowSuccess}}{{else}}0{{end}} | 输入 {{fmtTokens .WindowPrompt}} | 输出 {{fmtTokens .WindowCompletion}} | 费用 {{printf "%.4f" .TotalCost}}
+{{else}}
+<b>群组合计:</b> 暂无统计(未被调用)
+{{end}}
 </div>
 <div style="font-size:12px;color:#888;margin-top:4px">
 	切换条件: {{range $g.OnStatus}} {{.}}{{end}} | 冷却: {{$g.Cooldown}}

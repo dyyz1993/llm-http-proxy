@@ -165,6 +165,7 @@ func (a *adminServer) handler() http.Handler {
 	mux.HandleFunc("/__admin/groups", a.requireAuth(a.handleGroups))
 	mux.HandleFunc("/__admin/groups/new", a.requireAuth(a.handleGroupNew))
 	mux.HandleFunc("/__admin/groups/delete", a.requireAuth(a.handleGroupDelete))
+	mux.HandleFunc("/__admin/groups/reset", a.requireAuth(a.handleGroupReset))
 	mux.HandleFunc("/__admin/quota/refresh", a.requireAuth(a.handleQuotaRefresh))
 	return mux
 }
@@ -546,6 +547,30 @@ func (a *adminServer) handleGroupDelete(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	http.Redirect(w, r, "/__admin/groups", http.StatusSeeOther)
+}
+
+// handleGroupReset 清零某个 group 的独立统计(usage + stats)。
+// group 维度统计用 "group:{name}" 标签独立记录,与成员维度的 "key:{member}" 分离。
+// 重置后该 group 的累计数据清零,下次请求重新开始计数。
+func (a *adminServer) handleGroupReset(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	name := r.URL.Query().Get("name")
+	if name == "" {
+		http.Error(w, "缺少 name", http.StatusBadRequest)
+		return
+	}
+	// usage 维度:key 是 "group:{name}" 去掉前缀的 group 名
+	if a.usage != nil {
+		a.usage.resetAlias(name)
+	}
+	// stats 维度:key 是 "group:{name}"(带前缀,散布在各 IP 的 Keys 里)
+	if a.stats != nil {
+		a.stats.resetGroup(name)
+	}
 	http.Redirect(w, r, "/__admin/groups", http.StatusSeeOther)
 }
 

@@ -411,6 +411,17 @@ func (us *usageStats) recordSuccess(alias string) {
 	atomic.AddInt64(&s.WindowSuccess, 1)
 }
 
+// resetAlias 清零某个 alias(或 group)的 usage 统计。
+// 用于 group 维度的手动重置(删除该 key 的所有累计数据,下次请求重新开始)。
+func (us *usageStats) resetAlias(alias string) {
+	if alias == "" {
+		return
+	}
+	us.mu.Lock()
+	defer us.mu.Unlock()
+	delete(us.data, alias)
+}
+
 // checkQuota 检查某个 alias 是否超限(窗口自动重置 + 限额比较)。
 // 返回:
 //   - ok=true:允许继续
@@ -528,6 +539,9 @@ func buildUsageHTML(snap map[string]aliasUsageStats, keysConfig map[string]KeyCo
 	// 按 alias 排序(spotlight 优先)
 	aliases := make([]string, 0, len(snap))
 	for a := range snap {
+		if strings.HasPrefix(a, "group:") {
+			continue // group 维度不显示在 key 视图(防污染)
+		}
 		aliases = append(aliases, a)
 	}
 	sort.Slice(aliases, func(i, j int) bool {
@@ -655,6 +669,9 @@ func buildDailyHTML(snap map[string]aliasUsageStats) string {
 	}
 	var entries []dayEntry
 	for alias, s := range snap {
+		if strings.HasPrefix(alias, "group:") {
+			continue // group 维度不显示在 key 视图(防污染)
+		}
 		for date, d := range s.Daily {
 			entries = append(entries, dayEntry{Date: date, Alias: alias, DailyUsage: *d})
 		}

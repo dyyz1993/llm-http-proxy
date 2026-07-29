@@ -130,6 +130,20 @@ func (s *statsCollector) record(ip, maskedKey, targetHost string, status int) {
 	s.bumpHour(time.Now())
 }
 
+// resetGroup 清零某个 group 的 stats(group 数据散布在各 IP 的 Keys 里,
+// 需遍历所有 IP 删除 "group:{name}" 条目)。
+func (s *statsCollector) resetGroup(name string) {
+	if name == "" {
+		return
+	}
+	label := "group:" + name
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, is := range s.data {
+		delete(is.Keys, label)
+	}
+}
+
 // bumpHour 在当前小时桶上 +1,必要时滚动新桶(环形)。
 func (s *statsCollector) bumpHour(now time.Time) {
 	curHour := now.Truncate(time.Hour)
@@ -287,7 +301,10 @@ func topN(snap map[string]*ipStats, by string, n int) map[string]*ipStats {
 	var list []ipCount
 	for ip, is := range snap {
 		var t int64
-		for _, ke := range is.Keys {
+		for k, ke := range is.Keys {
+			if strings.HasPrefix(k, "group:") {
+				continue
+			}
 			t += ke.Count
 		}
 		list = append(list, ipCount{ip, t})
@@ -327,13 +344,18 @@ func statsByIP(snap map[string]*ipStats) map[string]*ipAggView {
 	out := make(map[string]*ipAggView, len(snap))
 	for ip, is := range snap {
 		var total, ok2xx int64
-		for _, ke := range is.Keys {
+		distinct := 0
+		for k, ke := range is.Keys {
+			if strings.HasPrefix(k, "group:") {
+				continue
+			}
 			total += ke.Count
 			ok2xx += count2xx(ke)
+			distinct++
 		}
 		out[ip] = &ipAggView{
 			Keys:         is.Keys,
-			DistinctKeys: len(is.Keys),
+			DistinctKeys: distinct,
 			TotalCount:   total,
 			SuccessRate:  ratio(ok2xx, total),
 		}
@@ -353,6 +375,9 @@ func statsByKey(snap map[string]*ipStats) map[string]*keyAggView {
 	out := make(map[string]*keyAggView)
 	for ip, is := range snap {
 		for k, ke := range is.Keys {
+			if strings.HasPrefix(k, "group:") {
+				continue // group 维度不显示在 by=key 视图(防污染)
+			}
 			kv, ok := out[k]
 			if !ok {
 				kv = &keyAggView{IPs: make(map[string]*keyEntry)}
@@ -399,6 +424,9 @@ func renderStatsTable(w io.Writer, snap map[string]*ipStats, by string) {
 	if by == "key" {
 		for ip, is := range snap {
 			for k, ke := range is.Keys {
+				if strings.HasPrefix(k, "group:") {
+					continue
+				}
 				rows = append(rows, rowView{
 					Primary: k, Peer: ip,
 					Count: ke.Count, FirstSeen: ke.FirstSeen, LastSeen: ke.LastSeen,
@@ -409,6 +437,9 @@ func renderStatsTable(w io.Writer, snap map[string]*ipStats, by string) {
 	} else {
 		for ip, is := range snap {
 			for k, ke := range is.Keys {
+				if strings.HasPrefix(k, "group:") {
+					continue
+				}
 				rows = append(rows, rowView{
 					Primary: ip, Peer: k,
 					Count: ke.Count, FirstSeen: ke.FirstSeen, LastSeen: ke.LastSeen,
@@ -495,6 +526,9 @@ func distinctKeyCount(snap map[string]*ipStats) int {
 	seen := map[string]bool{}
 	for _, is := range snap {
 		for k := range is.Keys {
+			if strings.HasPrefix(k, "group:") {
+				continue
+			}
 			seen[k] = true
 		}
 	}
@@ -504,7 +538,10 @@ func distinctKeyCount(snap map[string]*ipStats) int {
 func totalCount(snap map[string]*ipStats) int64 {
 	var t int64
 	for _, is := range snap {
-		for _, ke := range is.Keys {
+		for k, ke := range is.Keys {
+			if strings.HasPrefix(k, "group:") {
+				continue
+			}
 			t += ke.Count
 		}
 	}
