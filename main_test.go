@@ -2139,13 +2139,20 @@ func TestPickHeader(t *testing.T) {
 
 // TestKeyRouteDomainWhitelist 验证域名白名单:不在白名单的域名被拒绝(403)。
 func TestKeyRouteDomainWhitelist(t *testing.T) {
+	// 用本地 mock 后端测试白名单逻辑,不依赖外部网络(z.ai 防火墙会拦截无效请求,
+	// 导致测试脆弱:https://api.z.ai/api/test 可能被 z.ai 返回 403 而非代理放行)。
+	backend := echoBackend()
+	defer backend.Close()
+	backendHost := strings.TrimPrefix(backend.URL, "http://") // 如 127.0.0.1:PORT
+	backendDomain := strings.Split(backendHost, ":")[0]       // 127.0.0.1(extractDomain 去端口)
+
 	ks := newKeyStore()
 	ks.setConfig("glm", KeyConfig{Key: "sk-secret", Header: "", Prefix: ""}) // 自动模式
 
-	// 设白名单:只允许 api.z.ai
+	// 设白名单:只允许 mock 后端的域名(extractDomain 提取的是不带端口的 host)
 	oldSettings := settingsMgr
 	settingsMgr = newSettingsManager()
-	settingsMgr.AddDomain("api.z.ai")
+	settingsMgr.AddDomain(backendDomain)
 	defer func() { settingsMgr = oldSettings }()
 
 	proxy := startProxyWithKeys(t, ks)
@@ -2161,8 +2168,8 @@ func TestKeyRouteDomainWhitelist(t *testing.T) {
 		t.Errorf("非白名单域名应 403, got %d", resp.StatusCode)
 	}
 
-	// 在白名单的域名 → 放行(会尝试转发,目标不存在但不应是 403)
-	resp2, err := http.Get(proxy.URL + "/k/glm/https://api.z.ai/api/test")
+	// 在白名单的域名(mock 后端)→ 放行,转发到 mock,拿到 200
+	resp2, err := http.Get(proxy.URL + "/k/glm/http://" + backendHost + "/api/test")
 	if err != nil {
 		t.Fatal(err)
 	}
