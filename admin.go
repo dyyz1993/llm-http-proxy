@@ -511,11 +511,26 @@ func (a *adminServer) handleGroupNew(w http.ResponseWriter, r *http.Request) {
 	if cooldown == "" {
 		cooldown = "5m"
 	}
+	// group 级限额字段(可选,0/空=不限)
+	expires := normalizeExpires(r.FormValue("expires"))
+	maxTokens, _ := strconv.ParseInt(strings.TrimSpace(r.FormValue("max_tokens")), 10, 64)
+	maxReqs, _ := strconv.ParseInt(strings.TrimSpace(r.FormValue("max_requests")), 10, 64)
+	window := strings.TrimSpace(r.FormValue("window"))
+	if maxTokens < 0 {
+		maxTokens = 0
+	}
+	if maxReqs < 0 {
+		maxReqs = 0
+	}
 
 	cfg := GroupConfig{
-		Members:  members,
-		OnStatus: onStatus,
-		Cooldown: cooldown,
+		Members:   members,
+		OnStatus:  onStatus,
+		Cooldown:  cooldown,
+		Expires:   expires,
+		MaxTokens: maxTokens,
+		MaxReqs:   maxReqs,
+		Window:    window,
 	}
 
 	if err := a.keys.setGroup(name, cfg); err != nil {

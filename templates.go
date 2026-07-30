@@ -343,13 +343,13 @@ function copyURL(alias) {
 {{/* 群组汇总统计(读 group 维度独立统计,不再累加成员) */}}
 <div style="margin-top:6px;padding:6px 10px;background:#f5f5f5;border-radius:4px;font-size:13px">
 {{with index $.UsageSnap (printf "group:%s" $name)}}
-<b>群组合计:</b> 请求 {{if gt .WindowSuccess 0}}{{.WindowSuccess}}{{else}}0{{end}} | 输入 {{fmtTokens .WindowPrompt}} | 输出 {{fmtTokens .WindowCompletion}} | 费用 {{printf "%.4f" .TotalCost}}
+<b>群组合计:</b> 请求 {{if gt .WindowSuccess 0}}{{.WindowSuccess}}{{else}}0{{end}}{{if gt $g.MaxReqs 0}}/{{$g.MaxReqs}}{{end}} | 输入 {{fmtTokens .WindowPrompt}} | 输出 {{fmtTokens .WindowCompletion}}{{if gt $g.MaxTokens 0}} / 上限 {{fmtTokens $g.MaxTokens}}{{end}} | 费用 {{printf "%.4f" .TotalCost}}
 {{else}}
 <b>群组合计:</b> 暂无统计(未被调用)
 {{end}}
 </div>
 <div style="font-size:12px;color:#888;margin-top:4px">
-	切换条件: {{range $g.OnStatus}} {{.}}{{end}} | 冷却: {{$g.Cooldown}}
+	切换条件: {{range $g.OnStatus}} {{.}}{{end}} | 冷却: {{$g.Cooldown}}{{if $g.Expires}} | 有效期: {{$g.Expires}}{{end}}{{if or (gt $g.MaxTokens 0) (gt $g.MaxReqs 0)}} | 限额: {{if gt $g.MaxReqs 0}}{{$g.MaxReqs}}次{{end}}{{if gt $g.MaxTokens 0}} {{fmtTokens $g.MaxTokens}}token{{end}} / {{$g.Window}}{{end}}
 </div>
 </div>
 {{end}}
@@ -385,6 +385,10 @@ function copyURL(alias) {
 </td></tr>
 <tr><td>切换状态码</td><td><input name="on_status" style="width:200px" value="{{if .Editing}}{{joinInt .EditCfg.OnStatus ", "}}{{else}}402, 429, 502, 503{{end}}" placeholder="402, 429, 502, 503"></td></tr>
 <tr><td>冷却时间</td><td><input name="cooldown" style="width:100px" value="{{if .Editing}}{{.EditCfg.Cooldown}}{{else}}5m{{end}}" placeholder="5m"></td></tr>
+<tr><td>有效期<br><span style="font-size:11px;color:#888">留空=永久</span></td><td><input name="expires" style="width:200px" value="{{if .Editing}}{{.EditCfg.Expires}}{{end}}" placeholder="如 2026-12-31 或 2026-12-31 23:59"></td></tr>
+<tr><td>Token上限<br><span style="font-size:11px;color:#888">0=不限</span></td><td><input name="max_tokens" type="number" style="width:150px" value="{{if .Editing}}{{.EditCfg.MaxTokens}}{{else}}0{{end}}" placeholder="0"></td></tr>
+<tr><td>请求上限<br><span style="font-size:11px;color:#888">0=不限</span></td><td><input name="max_requests" type="number" style="width:150px" value="{{if .Editing}}{{.EditCfg.MaxReqs}}{{else}}0{{end}}" placeholder="0"></td></tr>
+<tr><td>统计窗口<br><span style="font-size:11px;color:#888">如 24h, 7d</span></td><td><input name="window" style="width:100px" value="{{if .Editing}}{{.EditCfg.Window}}{{end}}" placeholder="24h"></td></tr>
 </table>
 <button type="submit" onclick="syncMembers()">{{if .Editing}}保存修改{{else}}创建群组{{end}}</button>
 {{if .Editing}}<a href="/__admin/groups"><button type="button">取消</button></a>{{end}}

@@ -22,9 +22,13 @@ import (
 
 // GroupConfig 是单个 group 的配置。
 type GroupConfig struct {
-	Members  []string `yaml:"members"`   // 成员 alias 列表(按优先级排序)
-	OnStatus []int    `yaml:"on_status"` // 上游返回这些码时触发换人
-	Cooldown string   `yaml:"cooldown"`  // 冷却时间(如 "5m", "30s")
+	Members   []string `yaml:"members"`      // 成员 alias 列表(按优先级排序)
+	OnStatus  []int    `yaml:"on_status"`    // 上游返回这些码时触发换人
+	Cooldown  string   `yaml:"cooldown"`     // 冷却时间(如 "5m", "30s")
+	Expires   string   `yaml:"expires"`      // 可选有效期(空=永久)
+	MaxTokens int64    `yaml:"max_tokens"`   // 窗口内总 token 上限(0=不限)
+	MaxReqs   int64    `yaml:"max_requests"` // 窗口内成功请求次数上限(0=不限)
+	Window    string   `yaml:"window"`       // 窗口时长(如 "24h", "7d")
 }
 
 // memberState 记录单个成员的实时状态(内存,不持久化)。

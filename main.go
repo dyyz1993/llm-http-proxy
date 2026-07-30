@@ -567,6 +567,26 @@ func handleGroupRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, st
 		return
 	}
 
+	// group 级有效期检查(410 Gone)
+	if cfg.Expires != "" {
+		if exp, ok := parseExpires(cfg.Expires); ok && time.Now().After(exp) {
+			http.Error(w, "此 group 已过期: "+groupName+"\n", http.StatusGone)
+			return
+		}
+	}
+	// group 级配额检查(402 Payment Required) — 复用 checkQuota,用 group 维度统计。
+	// group 级限额是「整个入口」的限额,超了换成员没意义 → 直接返回,不进成员选择。
+	if us != nil && (cfg.MaxTokens > 0 || cfg.MaxReqs > 0) {
+		quotaCfg := KeyConfig{MaxTokens: cfg.MaxTokens, MaxReqs: cfg.MaxReqs, Window: cfg.Window}
+		if ok, reason, retryAfter := us.checkQuota("group:"+groupName, quotaCfg); !ok {
+			if retryAfter > 0 {
+				w.Header().Set("Retry-After", fmt.Sprintf("%.0f", retryAfter.Seconds()))
+			}
+			http.Error(w, reason+"\n", http.StatusPaymentRequired)
+			return
+		}
+	}
+
 	log.Printf("group 请求: group=%s members=%v target=%s", groupName, cfg.Members, target[:min(60, len(target))])
 
 	// WebSocket 不参与换人(无法 buffer/重放),直接流式转发到第一个可用成员。
@@ -830,6 +850,24 @@ func sortGroupMembersDynamic(members []string, qc *quotaCache, offset int64) []s
 // handleGroupWebSocket 处理 group 路径下的 WebSocket 请求。
 // WebSocket 无法 buffer/重放,不参与成员换人——直接选第一个可用成员流式转发。
 func handleGroupWebSocket(w http.ResponseWriter, req *http.Request, ks *keyStore, stats *statsCollector, us *usageStats, gm *groupManager, cfg GroupConfig, groupName, target string) {
+	// group 级有效期 + 配额检查(同 HTTP 路由,WS 也要受限)
+	if cfg.Expires != "" {
+		if exp, ok := parseExpires(cfg.Expires); ok && time.Now().After(exp) {
+			http.Error(w, "此 group 已过期: "+groupName+"\n", http.StatusGone)
+			return
+		}
+	}
+	if us != nil && (cfg.MaxTokens > 0 || cfg.MaxReqs > 0) {
+		quotaCfg := KeyConfig{MaxTokens: cfg.MaxTokens, MaxReqs: cfg.MaxReqs, Window: cfg.Window}
+		if ok, reason, retryAfter := us.checkQuota("group:"+groupName, quotaCfg); !ok {
+			if retryAfter > 0 {
+				w.Header().Set("Retry-After", fmt.Sprintf("%.0f", retryAfter.Seconds()))
+			}
+			http.Error(w, reason+"\n", http.StatusPaymentRequired)
+			return
+		}
+	}
+
 	for _, member := range cfg.Members {
 		st := gm.memberStatus(member)
 		if st.IsCooling {
