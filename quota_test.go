@@ -118,8 +118,8 @@ func TestBuildQuotaHTML_ShowUnstarted(t *testing.T) {
 			Limits: []quotaLimit{
 				// 5h额度:窗口未启动(0% + 无重置时间)
 				{Type: "TOKENS_LIMIT", Unit: 3, Percentage: 0, NextResetMs: 0},
-				// 周额度:正常
-				{Type: "TOKENS_LIMIT", Unit: 6, Percentage: 1, NextResetMs: 1785587454984},
+				// 周额度:正常(用未来时间,避免测试随时间过期)
+				{Type: "TOKENS_LIMIT", Unit: 6, Percentage: 1, NextResetMs: time.Now().Add(7 * 24 * time.Hour).UnixMilli()},
 			},
 			FetchedAt: time.Now(),
 		},

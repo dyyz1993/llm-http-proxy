@@ -29,6 +29,7 @@ type GroupConfig struct {
 	MaxTokens int64    `yaml:"max_tokens"`   // 窗口内总 token 上限(0=不限)
 	MaxReqs   int64    `yaml:"max_requests"` // 窗口内成功请求次数上限(0=不限)
 	Window    string   `yaml:"window"`       // 窗口时长(如 "24h", "7d")
+	Disabled  bool     `yaml:"disabled"`     // 禁用开关(禁用时返回 503)
 }
 
 // memberState 记录单个成员的实时状态(内存,不持久化)。

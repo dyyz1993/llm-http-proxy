@@ -312,13 +312,16 @@ function copyURL(alias) {
 <h2>群组配置 ({{len .Groups}})</h2>
 {{if not .Groups}}<p>暂无群组。在下方添加。</p>{{end}}
 {{range $name, $g := .Groups}}
-<div style="margin:12px 0;padding:12px;background:#fff;border-radius:6px;border:1px solid #ddd">
+<div style="margin:12px 0;padding:12px;background:{{if $g.Disabled}}#f0f0f0{{else}}#fff{{end}};border-radius:6px;border:1px solid {{if $g.Disabled}}#ccc{{else}}#ddd{{end}}{{if $g.Disabled}};opacity:0.7{{end}}">
 <div style="font-weight:bold;font-size:14px;margin-bottom:8px">
-	{{$name}}
+	{{$name}}{{if $g.Disabled}} <span style="color:#e74c3c;font-size:12px">⛔ 已禁用</span>{{end}}
 	<code style="font-size:12px;color:#888" id="url-{{$name}}">/g/{{$name}}/</code>
 	<button type="button" onclick="copyGroupURL('{{$name}}')" style="padding:2px 8px;font-size:12px">复制</button>
 	<a href="/__admin/groups?edit={{$name}}"><button type="button" style="padding:2px 8px;font-size:12px">编辑</button></a>
 	<form method="post" action="/__admin/groups/reset?name={{$name}}" style="display:inline;float:right">
+	<form method="post" action="/__admin/groups/toggle?name={{$name}}" style="display:inline;float:right">
+	<button type="submit" style="padding:2px 8px;font-size:12px">{{if $g.Disabled}}启用{{else}}禁用{{end}}</button>
+	</form>
 	<button type="submit" onclick="return confirm('重置群组 {{$name}} 统计?')" style="padding:2px 8px;font-size:12px">重置统计</button>
 	</form>
 	<form method="post" action="/__admin/groups/delete?name={{$name}}" style="display:inline;float:right">

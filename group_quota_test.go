@@ -201,3 +201,96 @@ func TestGroupQuota_E2E_Expires(t *testing.T) {
 		t.Errorf("过期 group 应 410 Gone, got %d", resp.StatusCode)
 	}
 }
+
+// === group 禁用测试 ===
+
+// TestGroupDisabled_Returns503 禁用的 group 返回 503 Service Unavailable。
+func TestGroupDisabled_Returns503(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	backend := echoBackend()
+	defer backend.Close()
+
+	ks := newKeyStore()
+	ks.configs["m1"] = KeyConfig{Key: "sk-test-key-1234567890123456", Header: "Authorization", Prefix: "Bearer "}
+	ks.groups = map[string]GroupConfig{
+		"disabled-group": {
+			Members:  []string{"m1"},
+			Cooldown: "1m",
+			Disabled: true, // 禁用
+		},
+	}
+	ks.groupMgr.updateGroups(ks.groups)
+
+	stats := newStatsCollector()
+	us := newUsageStats()
+
+	mux := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/g/") {
+			handleGroupRoute(w, r, ks, stats, us, "disabled-group", backend.URL+"/v1/test")
+			return
+		}
+		http.NotFound(w, r)
+	})
+	proxy := httptest.NewServer(mux)
+	defer proxy.Close()
+
+	resp, err := http.Post(proxy.URL+"/g/disabled-group/"+backend.URL+"/v1/test",
+		"application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("禁用 group 应 503, got %d", resp.StatusCode)
+	}
+	// 应带 Retry-After
+	if resp.Header.Get("Retry-After") == "" {
+		t.Error("禁用 group 应返回 Retry-After header")
+	}
+}
+
+// TestGroupDisabled_Toggle 切换禁用/启用状态。
+func TestGroupDisabled_Toggle(t *testing.T) {
+	ks := newKeyStore()
+	ks.setGroup("mygroup", GroupConfig{Members: []string{"m1"}, Cooldown: "1m"})
+
+	// 初始:未禁用
+	cfg, _ := ks.getGroups()["mygroup"]
+	if cfg.Disabled {
+		t.Error("初始应未禁用")
+	}
+
+	// 切换:启用 → 禁用
+	cfg.Disabled = !cfg.Disabled
+	ks.setGroup("mygroup", cfg)
+	cfg, _ = ks.getGroups()["mygroup"]
+	if !cfg.Disabled {
+		t.Error("切换后应已禁用")
+	}
+
+	// 再切换:禁用 → 启用
+	cfg.Disabled = !cfg.Disabled
+	ks.setGroup("mygroup", cfg)
+	cfg, _ = ks.getGroups()["mygroup"]
+	if cfg.Disabled {
+		t.Error("二次切换后应恢复启用")
+	}
+}
+
+// TestGroupDisabled_NotAffectOthers 禁用某 group 不影响其它 group。
+func TestGroupDisabled_NotAffectOthers(t *testing.T) {
+	ks := newKeyStore()
+	ks.setGroup("g1", GroupConfig{Members: []string{"m1"}, Disabled: true})
+	ks.setGroup("g2", GroupConfig{Members: []string{"m1"}, Disabled: false})
+
+	groups := ks.getGroups()
+	if !groups["g1"].Disabled {
+		t.Error("g1 应已禁用")
+	}
+	if groups["g2"].Disabled {
+		t.Error("g2 不应被禁用(独立)")
+	}
+}

@@ -166,6 +166,7 @@ func (a *adminServer) handler() http.Handler {
 	mux.HandleFunc("/__admin/groups/new", a.requireAuth(a.handleGroupNew))
 	mux.HandleFunc("/__admin/groups/delete", a.requireAuth(a.handleGroupDelete))
 	mux.HandleFunc("/__admin/groups/reset", a.requireAuth(a.handleGroupReset))
+	mux.HandleFunc("/__admin/groups/toggle", a.requireAuth(a.handleGroupToggle))
 	mux.HandleFunc("/__admin/quota/refresh", a.requireAuth(a.handleQuotaRefresh))
 	return mux
 }
@@ -585,6 +586,32 @@ func (a *adminServer) handleGroupReset(w http.ResponseWriter, r *http.Request) {
 	// stats 维度:key 是 "group:{name}"(带前缀,散布在各 IP 的 Keys 里)
 	if a.stats != nil {
 		a.stats.resetGroup(name)
+	}
+	http.Redirect(w, r, "/__admin/groups", http.StatusSeeOther)
+}
+
+// handleGroupToggle 切换 group 的禁用/启用状态。
+// 禁用后该 group 所有请求返回 503;启用后恢复。配置保留,不删数据。
+func (a *adminServer) handleGroupToggle(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	name := r.URL.Query().Get("name")
+	if name == "" {
+		http.Error(w, "缺少 name", http.StatusBadRequest)
+		return
+	}
+	groups := a.keys.getGroups()
+	cfg, ok := groups[name]
+	if !ok {
+		http.Error(w, "未知的 group: "+name, http.StatusNotFound)
+		return
+	}
+	cfg.Disabled = !cfg.Disabled // 切换
+	if err := a.keys.setGroup(name, cfg); err != nil {
+		renderMsg(w, "操作失败", err.Error())
+		return
 	}
 	http.Redirect(w, r, "/__admin/groups", http.StatusSeeOther)
 }

@@ -567,6 +567,13 @@ func handleGroupRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, st
 		return
 	}
 
+	// group 级禁用检查(503 Service Unavailable)
+	if cfg.Disabled {
+		w.Header().Set("Retry-After", "60")
+		http.Error(w, "此 group 已被禁用: "+groupName+"\n", http.StatusServiceUnavailable)
+		return
+	}
+
 	// group 级有效期检查(410 Gone)
 	if cfg.Expires != "" {
 		if exp, ok := parseExpires(cfg.Expires); ok && time.Now().After(exp) {
@@ -850,6 +857,11 @@ func sortGroupMembersDynamic(members []string, qc *quotaCache, offset int64) []s
 // handleGroupWebSocket 处理 group 路径下的 WebSocket 请求。
 // WebSocket 无法 buffer/重放,不参与成员换人——直接选第一个可用成员流式转发。
 func handleGroupWebSocket(w http.ResponseWriter, req *http.Request, ks *keyStore, stats *statsCollector, us *usageStats, gm *groupManager, cfg GroupConfig, groupName, target string) {
+	// group 级禁用检查(同 HTTP 路由)
+	if cfg.Disabled {
+		http.Error(w, "此 group 已被禁用: "+groupName+"\n", http.StatusServiceUnavailable)
+		return
+	}
 	// group 级有效期 + 配额检查(同 HTTP 路由,WS 也要受限)
 	if cfg.Expires != "" {
 		if exp, ok := parseExpires(cfg.Expires); ok && time.Now().After(exp) {
