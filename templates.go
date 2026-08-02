@@ -318,10 +318,10 @@ function copyURL(alias) {
 	<code style="font-size:12px;color:#888" id="url-{{$name}}">/g/{{$name}}/</code>
 	<button type="button" onclick="copyGroupURL('{{$name}}')" style="padding:2px 8px;font-size:12px">复制</button>
 	<a href="/__admin/groups?edit={{$name}}"><button type="button" style="padding:2px 8px;font-size:12px">编辑</button></a>
-	<form method="post" action="/__admin/groups/reset?name={{$name}}" style="display:inline;float:right">
 	<form method="post" action="/__admin/groups/toggle?name={{$name}}" style="display:inline;float:right">
 	<button type="submit" style="padding:2px 8px;font-size:12px">{{if $g.Disabled}}启用{{else}}禁用{{end}}</button>
 	</form>
+	<form method="post" action="/__admin/groups/reset?name={{$name}}" style="display:inline;float:right">
 	<button type="submit" onclick="return confirm('重置群组 {{$name}} 统计?')" style="padding:2px 8px;font-size:12px">重置统计</button>
 	</form>
 	<form method="post" action="/__admin/groups/delete?name={{$name}}" style="display:inline;float:right">
