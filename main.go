@@ -381,7 +381,59 @@ HTTP / SSE / WebSocket 全透传,不追加任何 header,不修改响应体。
 
 ---
 
-## 四、状态码说明
+## 四、智谱 MCP Server 配置(Claude Code / Cline / ZCode 等)
+
+智谱为编程套餐用户提供 3 个 MCP Server,均可通过本代理使用(把 API Key 换成别名)。
+
+### 1. 视觉理解 MCP(本地 npx,需要 GLM-4.6V)
+
+  在 Claude Code / Cline 的 mcpServers 配置中加入:
+
+    "zai-vision": {
+      "command": "npx",
+      "args": ["-y", "@z_ai/mcp-server"],
+      "env": { "Z_AI_API_KEY": "你的API Key" }
+    }
+
+  通过本代理使用(别名模式,key 不暴露):
+    把 env 里的 Z_AI_API_KEY 删掉,改为在 npx 启动前设环境变量指向别名不可行
+    (本地 MCP 走 npx 不经过 HTTP 代理,需直接用真实 key)。
+    适用场景:视觉 MCP 是本地运行的,不走 HTTP,所以直接用真实 key。
+
+### 2. Web 搜索 MCP(远程 URL,走 HTTP,可走代理)
+
+  原始端点:https://mcp.z.ai/mcp/web-search
+  认证:Authorization: 你的 API Key
+
+  通过本代理使用(别名模式):
+
+    "zai-web-search": {
+      "type": "streamable-http",
+      "url": "https://p.19930810.xyz:8443/k/%[1]s/https://mcp.z.ai/mcp/web-search",
+      "headers": { "Authorization": "任意值" }
+    }
+
+  (服务端注入真实 key,客户端用别名即可)
+
+### 3. Web Reader MCP(远程 URL,走 HTTP,可走代理)
+
+  原始端点:https://mcp.z.ai/mcp/web-reader
+  认证:Authorization: 你的 API Key
+
+  通过本代理使用(别名模式):
+
+    "zai-web-reader": {
+      "type": "streamable-http",
+      "url": "https://p.19930810.xyz:8443/k/%[1]s/https://mcp.z.ai/mcp/web-reader",
+      "headers": { "Authorization": "任意值" }
+    }
+
+注:远程 MCP(Web 搜索 / Web Reader)走 HTTP,完美适配本代理;
+    本地 MCP(视觉理解)走 npx 不经过 HTTP,需直接用真实 key。
+
+---
+
+## 五、状态码说明
 
   200          正常
   499          客户端主动断连(自己超时取消了请求,非上游问题)
@@ -391,7 +443,7 @@ HTTP / SSE / WebSocket 全透传,不追加任何 header,不修改响应体。
 
 ---
 
-## 五、源码 / 反馈
+## 六、源码 / 反馈
 
 GitHub: https://github.com/dyyz1993/llm-http-proxy
 `, aliasExample)
