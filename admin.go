@@ -442,13 +442,44 @@ func (a *adminServer) handleGroups(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 计算 group 健康状态(已禁用/已过期/限额已满/正常)
+	groupHealth := make(map[string]string)
+	for name, g := range groups {
+		if g.Disabled {
+			groupHealth[name] = "disabled"
+			continue
+		}
+		if g.Expires != "" {
+			if exp, ok := parseExpires(g.Expires); ok && time.Now().After(exp) {
+				groupHealth[name] = "expired"
+				continue
+			}
+		}
+		if a.usage != nil && (g.MaxTokens > 0 || g.MaxReqs > 0) {
+			quotaCfg := KeyConfig{MaxTokens: g.MaxTokens, MaxReqs: g.MaxReqs, Window: g.Window}
+			if ok, _, _ := a.usage.checkQuota("group:"+name, quotaCfg); !ok {
+				groupHealth[name] = "quota_full"
+				continue
+			}
+		}
+		groupHealth[name] = "ok"
+	}
+
 	editName := r.URL.Query().Get("edit")
+	copyName := r.URL.Query().Get("copy")
 	var editCfg GroupConfig
 	editing := false
+	copying := false
 	if editName != "" {
 		if g, ok := groups[editName]; ok {
 			editCfg = g
 			editing = true
+		}
+	} else if copyName != "" {
+		// 复制模式:预填源 group 的全部配置,群组名留空可改
+		if g, ok := groups[copyName]; ok {
+			editCfg = g
+			copying = true
 		}
 	}
 
@@ -456,11 +487,14 @@ func (a *adminServer) handleGroups(w http.ResponseWriter, r *http.Request) {
 		"Groups":       groups,
 		"MemberStatus": memberStatus,
 		"MemberHealth": memberHealth,
+		"GroupHealth":  groupHealth,
 		"Aliases":      aliases,
 		"UsageSnap":    usageSnap,
 		"Editing":      editing,
 		"EditName":     editName,
 		"EditCfg":      editCfg,
+		"Copying":      copying,
+		"CopyFrom":     copyName,
 	})
 }
 

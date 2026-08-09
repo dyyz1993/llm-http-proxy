@@ -577,7 +577,7 @@ func handleGroupRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, st
 	// group 级有效期检查(410 Gone)
 	if cfg.Expires != "" {
 		if exp, ok := parseExpires(cfg.Expires); ok && time.Now().After(exp) {
-			http.Error(w, "此 group 已过期: "+groupName+"\n", http.StatusGone)
+			http.Error(w, "此 group 已过期: "+groupName+" (过期于 "+cfg.Expires+")\n", http.StatusGone)
 			return
 		}
 	}
@@ -586,7 +586,10 @@ func handleGroupRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, st
 	if us != nil && (cfg.MaxTokens > 0 || cfg.MaxReqs > 0) {
 		quotaCfg := KeyConfig{MaxTokens: cfg.MaxTokens, MaxReqs: cfg.MaxReqs, Window: cfg.Window}
 		if ok, reason, retryAfter := us.checkQuota("group:"+groupName, quotaCfg); !ok {
+			// 重写 reason 成 group 语义(checkQuota 默认说「此 key」)
+			reason = strings.Replace(reason, "此 key", "此 group", 1)
 			if retryAfter > 0 {
+				reason += fmt.Sprintf(",还有 %v 重置", retryAfter.Round(time.Minute))
 				w.Header().Set("Retry-After", fmt.Sprintf("%.0f", retryAfter.Seconds()))
 			}
 			http.Error(w, reason+"\n", http.StatusPaymentRequired)
@@ -865,14 +868,16 @@ func handleGroupWebSocket(w http.ResponseWriter, req *http.Request, ks *keyStore
 	// group 级有效期 + 配额检查(同 HTTP 路由,WS 也要受限)
 	if cfg.Expires != "" {
 		if exp, ok := parseExpires(cfg.Expires); ok && time.Now().After(exp) {
-			http.Error(w, "此 group 已过期: "+groupName+"\n", http.StatusGone)
+			http.Error(w, "此 group 已过期: "+groupName+" (过期于 "+cfg.Expires+")\n", http.StatusGone)
 			return
 		}
 	}
 	if us != nil && (cfg.MaxTokens > 0 || cfg.MaxReqs > 0) {
 		quotaCfg := KeyConfig{MaxTokens: cfg.MaxTokens, MaxReqs: cfg.MaxReqs, Window: cfg.Window}
 		if ok, reason, retryAfter := us.checkQuota("group:"+groupName, quotaCfg); !ok {
+			reason = strings.Replace(reason, "此 key", "此 group", 1)
 			if retryAfter > 0 {
+				reason += fmt.Sprintf(",还有 %v 重置", retryAfter.Round(time.Minute))
 				w.Header().Set("Retry-After", fmt.Sprintf("%.0f", retryAfter.Seconds()))
 			}
 			http.Error(w, reason+"\n", http.StatusPaymentRequired)

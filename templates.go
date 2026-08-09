@@ -314,10 +314,11 @@ function copyURL(alias) {
 {{range $name, $g := .Groups}}
 <div style="margin:12px 0;padding:12px;background:{{if $g.Disabled}}#f0f0f0{{else}}#fff{{end}};border-radius:6px;border:1px solid {{if $g.Disabled}}#ccc{{else}}#ddd{{end}}{{if $g.Disabled}};opacity:0.7{{end}}">
 <div style="font-weight:bold;font-size:14px;margin-bottom:8px">
-	{{$name}}{{if $g.Disabled}} <span style="color:#e74c3c;font-size:12px">⛔ 已禁用</span>{{end}}
+	{{$name}}{{if eq (index $.GroupHealth $name) "disabled"}} <span style="color:#e74c3c;font-size:12px">⛔ 已禁用</span>{{else if eq (index $.GroupHealth $name) "expired"}} <span style="color:#95a5a6;font-size:12px">🔒 已过期</span>{{else if eq (index $.GroupHealth $name) "quota_full"}} <span style="color:#e74c3c;font-size:12px">🚫 限额已满</span>{{end}}
 	<code style="font-size:12px;color:#888" id="url-{{$name}}">/g/{{$name}}/</code>
 	<button type="button" onclick="copyGroupURL('{{$name}}')" style="padding:2px 8px;font-size:12px">复制</button>
 	<a href="/__admin/groups?edit={{$name}}"><button type="button" style="padding:2px 8px;font-size:12px">编辑</button></a>
+	<a href="/__admin/groups?copy={{$name}}"><button type="button" style="padding:2px 8px;font-size:12px">复制</button></a>
 	<form method="post" action="/__admin/groups/toggle?name={{$name}}" style="display:inline;float:right">
 	<button type="submit" style="padding:2px 8px;font-size:12px">{{if $g.Disabled}}启用{{else}}禁用{{end}}</button>
 	</form>
@@ -357,13 +358,13 @@ function copyURL(alias) {
 </div>
 {{end}}
 
-<h3>{{if .Editing}}编辑 {{.EditName}}{{else}}新增群组{{end}}</h3>
+<h3>{{if .Editing}}编辑 {{.EditName}}{{else if .Copying}}复制自 {{.CopyFrom}}{{else}}新增群组{{end}}</h3>
 <form method="post" action="/__admin/groups/new" id="groupForm">
 <table>
 <tr><td>群组名</td><td>{{if .Editing}}<b>{{.EditName}}</b>（不可修改）<input type="hidden" name="name" value="{{.EditName}}">{{else}}<input name="name" placeholder="如 glm-pool" required>{{end}}</td></tr>
 <tr><td>成员排序<br><span style="font-size:11px;color:#888">上面优先消耗</span></td><td>
 <div id="memberList" style="min-height:40px;border:1px solid #ccc;border-radius:4px;padding:4px;width:350px">
-{{if .Editing}}{{range $i, $m := .EditCfg.Members}}
+{{if or .Editing .Copying}}{{range $i, $m := .EditCfg.Members}}
 <div class="member-item" data-alias="{{$m}}" style="display:flex;align-items:center;gap:6px;padding:4px 6px;margin:2px 0;background:#f5f5f5;border-radius:4px;cursor:move">
 <span style="color:#888;cursor:pointer" onclick="moveUp(this)">▲</span>
 <span style="color:#888;cursor:pointer" onclick="moveDown(this)">▼</span>
@@ -386,15 +387,15 @@ function copyURL(alias) {
 </div>
 <input type="hidden" name="members" id="membersInput">
 </td></tr>
-<tr><td>切换状态码</td><td><input name="on_status" style="width:200px" value="{{if .Editing}}{{joinInt .EditCfg.OnStatus ", "}}{{else}}402, 429, 502, 503{{end}}" placeholder="402, 429, 502, 503"></td></tr>
-<tr><td>冷却时间</td><td><input name="cooldown" style="width:100px" value="{{if .Editing}}{{.EditCfg.Cooldown}}{{else}}5m{{end}}" placeholder="5m"></td></tr>
-<tr><td>有效期<br><span style="font-size:11px;color:#888">留空=永久</span></td><td><input name="expires" style="width:200px" value="{{if .Editing}}{{.EditCfg.Expires}}{{end}}" placeholder="如 2026-12-31 或 2026-12-31 23:59"></td></tr>
-<tr><td>Token上限<br><span style="font-size:11px;color:#888">0=不限</span></td><td><input name="max_tokens" type="number" style="width:150px" value="{{if .Editing}}{{.EditCfg.MaxTokens}}{{else}}0{{end}}" placeholder="0"></td></tr>
-<tr><td>请求上限<br><span style="font-size:11px;color:#888">0=不限</span></td><td><input name="max_requests" type="number" style="width:150px" value="{{if .Editing}}{{.EditCfg.MaxReqs}}{{else}}0{{end}}" placeholder="0"></td></tr>
-<tr><td>统计窗口<br><span style="font-size:11px;color:#888">如 24h, 7d</span></td><td><input name="window" style="width:100px" value="{{if .Editing}}{{.EditCfg.Window}}{{end}}" placeholder="24h"></td></tr>
+<tr><td>切换状态码</td><td><input name="on_status" style="width:200px" value="{{if or .Editing .Copying}}{{joinInt .EditCfg.OnStatus ", "}}{{else}}402, 429, 502, 503{{end}}" placeholder="402, 429, 502, 503"></td></tr>
+<tr><td>冷却时间</td><td><input name="cooldown" style="width:100px" value="{{if or .Editing .Copying}}{{.EditCfg.Cooldown}}{{else}}5m{{end}}" placeholder="5m"></td></tr>
+<tr><td>有效期<br><span style="font-size:11px;color:#888">留空=永久</span></td><td><input name="expires" style="width:200px" value="{{if or .Editing .Copying}}{{.EditCfg.Expires}}{{end}}" placeholder="如 2026-12-31 或 2026-12-31 23:59"></td></tr>
+<tr><td>Token上限<br><span style="font-size:11px;color:#888">0=不限</span></td><td><input name="max_tokens" type="number" style="width:150px" value="{{if or .Editing .Copying}}{{.EditCfg.MaxTokens}}{{else}}0{{end}}" placeholder="0"></td></tr>
+<tr><td>请求上限<br><span style="font-size:11px;color:#888">0=不限</span></td><td><input name="max_requests" type="number" style="width:150px" value="{{if or .Editing .Copying}}{{.EditCfg.MaxReqs}}{{else}}0{{end}}" placeholder="0"></td></tr>
+<tr><td>统计窗口<br><span style="font-size:11px;color:#888">如 24h, 7d</span></td><td><input name="window" style="width:100px" value="{{if or .Editing .Copying}}{{.EditCfg.Window}}{{end}}" placeholder="24h"></td></tr>
 </table>
-<button type="submit" onclick="syncMembers()">{{if .Editing}}保存修改{{else}}创建群组{{end}}</button>
-{{if .Editing}}<a href="/__admin/groups"><button type="button">取消</button></a>{{end}}
+<button type="submit" onclick="syncMembers()">{{if .Editing}}保存修改{{else if .Copying}}复制为新群组{{else}}创建群组{{end}}</button>
+{{if or .Editing .Copying}}<a href="/__admin/groups"><button type="button">取消</button></a>{{end}}
 </form>
 <script>
 function syncMembers() {
