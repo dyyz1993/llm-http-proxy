@@ -389,16 +389,19 @@ HTTP / SSE / WebSocket 全透传,不追加任何 header,不修改响应体。
 
   在 Claude Code / Cline 的 mcpServers 配置中加入:
 
-    "zai-vision": {
+    "zai-mcp-server": {
+      "type": "stdio",
       "command": "npx",
       "args": ["-y", "@z_ai/mcp-server"],
-      "env": { "Z_AI_API_KEY": "你的API Key" }
+      "env": {
+        "Z_AI_API_KEY": "任意值",
+        "Z_AI_BASE_URL": "https://p.19930810.xyz:8443/k/%[1]s/https://open.bigmodel.cn/api/paas/v4/"
+      }
     }
 
-  通过本代理使用(别名模式,key 不暴露):
-    把 env 里的 Z_AI_API_KEY 删掉,改为在 npx 启动前设环境变量指向别名不可行
-    (本地 MCP 走 npx 不经过 HTTP 代理,需直接用真实 key)。
-    适用场景:视觉 MCP 是本地运行的,不走 HTTP,所以直接用真实 key。
+  通过 Z_AI_BASE_URL 指向本代理,npx 本地运行的 MCP 也会走代理,
+  key 由服务端注入,客户端不需要真实 key。
+  也可走 group:把 /k/%[1]s/ 换成 /g/群组名/。
 
 ### 2. Web 搜索 MCP(远程 URL,走 HTTP,可走代理)
 
@@ -428,8 +431,10 @@ HTTP / SSE / WebSocket 全透传,不追加任何 header,不修改响应体。
       "headers": { "Authorization": "任意值" }
     }
 
-注:远程 MCP(Web 搜索 / Web Reader)走 HTTP,完美适配本代理;
-    本地 MCP(视觉理解)走 npx 不经过 HTTP,需直接用真实 key。
+注:以上 3 个 MCP 均可通过本代理使用。
+    视觉 MCP 通过 Z_AI_BASE_URL 环境变量指向代理;
+    Web 搜索 / Web Reader 通过 mcpServers 的 url 指向代理。
+    三种方式都不需要客户端持有真实 key,服务端注入。
 
 ---
 
