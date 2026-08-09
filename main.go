@@ -358,11 +358,24 @@ HTTP / SSE / WebSocket 全透传,不追加任何 header,不修改响应体。
    - 透传模式:原样转发,不改 header。
 2. Header 自动检测:客户端带 x-api-key 就替换 x-api-key,
    带 Authorization 就替换 Authorization,两个都带就都替换。
-3. 支持的三种上游路径(同一套 GLM 后端,优先用 api.z.ai):
-   - api.z.ai/api/coding/paas/v4/...        (OpenAI 格式,推荐 / 编程套餐)
-   - api.z.ai/api/anthropic/v1/...          (Anthropic 格式,推荐)
-   - open.bigmodel.cn/api/coding/paas/v4/... (OpenAI 格式,官方域名 / 编程套餐)
-   - open.bigmodel.cn/api/anthropic/v1/... (Anthropic 格式,官方域名)
+3. 支持的上游路径(同一套 GLM 后端,对应 ZCode 不同配置场景):
+
+   场景一:编程套餐(Coding Plan)— ZCode「API Key」模式选 Coding 端点
+   - api.z.ai/api/coding/paas/v4/...        (OpenAI 格式,海外 / 推荐)
+   - open.bigmodel.cn/api/coding/paas/v4/... (OpenAI 格式,国内 / 编程套餐)
+   ⚠️ Coding 端点不能换成通用 paas/v4,否则报余额不足。
+
+   场景二:模型资源包/充值余额 — ZCode「API Key」模式选通用端点
+   - api.z.ai/api/paas/v4/...               (OpenAI 格式,海外)
+   - open.bigmodel.cn/api/paas/v4/...        (OpenAI 格式,国内)
+
+   场景三:Anthropic 协议(Claude SDK / ZCode Anthropic 模式)
+   - api.z.ai/api/anthropic/v1/...          (Anthropic 格式,海外 / 推荐)
+   - open.bigmodel.cn/api/anthropic/v1/...   (Anthropic 格式,国内)
+
+   在 ZCode 中配自定义供应商指向本代理时:
+   - OpenAI 接口地址填:https://p.19930810.xyz:8443/k/{别名}/https://api.z.ai/api/coding/paas/v4
+   - Anthropic 接口地址填:https://p.19930810.xyz:8443/k/{别名}/https://api.z.ai/api/anthropic
 4. SSE 流式 / WebSocket 全程透传,边收边转发,不缓冲不修改。
 5. key 不会出现在日志、统计、URL 里;统计只用别名/掩码 key。
 
