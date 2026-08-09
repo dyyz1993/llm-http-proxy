@@ -77,7 +77,7 @@ button{padding:10px 20px;cursor:pointer}
 	{{range $alias, $cfg := .Aliases}}
 	<tr {{if index $.Expired $alias}}class="expired"{{end}}>
 	<td><b>{{$alias}}</b></td>
-	<td><code style="font-size:12px" id="url-{{$alias}}">/k/{{$alias}}/</code> <button type="button" onclick="copyURL('{{$alias}}')" style="padding:2px 8px;font-size:12px">复制</button></td>
+	<td><code style="font-size:12px" id="url-{{$alias}}">/k/{{$alias}}/</code> <button type="button" onclick="copyURL('{{$alias}}')" style="padding:2px 8px;font-size:12px">复制地址</button></td>
 	<td>{{if $cfg.Header}}{{$cfg.Header}}{{else}}<span style="color:#888">自动</span>{{end}}</td>
 	<td>{{$cfg.Prefix}}</td>
 	<td><code>{{$cfg.Key}}</code></td>
@@ -88,7 +88,7 @@ button{padding:10px 20px;cursor:pointer}
 	<td>{{if $cfg.Expires}}{{$cfg.Expires}}{{if index $.Expired $alias}}<span class="expired-tag">已到期</span>{{end}}{{else}}永久{{end}}</td>
 	<td style="white-space:nowrap">
 	<a href="/__admin/keys?edit={{$alias}}"><button type="button">编辑</button></a>
-	<a href="/__admin/keys?copy={{$alias}}"><button type="button">复制</button></a>
+	<a href="/__admin/keys?copy={{$alias}}"><button type="button">克隆</button></a>
 	<form method="post" action="/__admin/keys/delete?alias={{$alias}}" style="display:inline">
 	<button type="submit" onclick="return confirm('删除 {{$alias}}?')">删除</button></form>
 	</td>
@@ -316,9 +316,9 @@ function copyURL(alias) {
 <div style="font-weight:bold;font-size:14px;margin-bottom:8px">
 	{{$name}}{{if eq (index $.GroupHealth $name) "disabled"}} <span style="color:#e74c3c;font-size:12px">⛔ 已禁用</span>{{else if eq (index $.GroupHealth $name) "expired"}} <span style="color:#95a5a6;font-size:12px">🔒 已过期</span>{{else if eq (index $.GroupHealth $name) "quota_full"}} <span style="color:#e74c3c;font-size:12px">🚫 限额已满</span>{{end}}
 	<code style="font-size:12px;color:#888" id="url-{{$name}}">/g/{{$name}}/</code>
-	<button type="button" onclick="copyGroupURL('{{$name}}')" style="padding:2px 8px;font-size:12px">复制</button>
+	<button type="button" onclick="copyGroupURL('{{$name}}')" style="padding:2px 8px;font-size:12px">复制地址</button>
 	<a href="/__admin/groups?edit={{$name}}"><button type="button" style="padding:2px 8px;font-size:12px">编辑</button></a>
-	<a href="/__admin/groups?copy={{$name}}"><button type="button" style="padding:2px 8px;font-size:12px">复制</button></a>
+	<a href="/__admin/groups?copy={{$name}}"><button type="button" style="padding:2px 8px;font-size:12px">克隆</button></a>
 	<form method="post" action="/__admin/groups/toggle?name={{$name}}" style="display:inline;float:right">
 	<button type="submit" style="padding:2px 8px;font-size:12px">{{if $g.Disabled}}启用{{else}}禁用{{end}}</button>
 	</form>
