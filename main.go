@@ -383,11 +383,12 @@ HTTP / SSE / WebSocket 全透传,不追加任何 header,不修改响应体。
 
 ## 四、智谱 MCP Server 配置(Claude Code / Cline / ZCode 等)
 
-智谱为编程套餐用户提供 3 个 MCP Server,均可通过本代理使用(把 API Key 换成别名)。
+智谱为编程套餐用户提供 4 个 MCP Server,均可通过本代理使用(把 API Key 换成别名)。
+也可走 group:把 /k/%[1]s/ 换成 /g/群组名/。
 
 ### 1. 视觉理解 MCP(本地 npx,需要 GLM-4.6V)
 
-  在 Claude Code / Cline 的 mcpServers 配置中加入:
+  通过 Z_AI_BASE_URL 指向代理,npx 本地 MCP 也走代理:
 
     "zai-mcp-server": {
       "type": "stdio",
@@ -399,42 +400,33 @@ HTTP / SSE / WebSocket 全透传,不追加任何 header,不修改响应体。
       }
     }
 
-  通过 Z_AI_BASE_URL 指向本代理,npx 本地运行的 MCP 也会走代理,
-  key 由服务端注入,客户端不需要真实 key。
-  也可走 group:把 /k/%[1]s/ 换成 /g/群组名/。
+### 2. 深度阅读 MCP zread(远程 HTTP)
 
-### 2. Web 搜索 MCP(远程 URL,走 HTTP,可走代理)
-
-  原始端点:https://mcp.z.ai/mcp/web-search
-  认证:Authorization: 你的 API Key
-
-  通过本代理使用(别名模式):
-
-    "zai-web-search": {
-      "type": "streamable-http",
-      "url": "https://p.19930810.xyz:8443/k/%[1]s/https://mcp.z.ai/mcp/web-search",
-      "headers": { "Authorization": "任意值" }
+    "zread": {
+      "type": "http",
+      "url": "https://p.19930810.xyz:8443/k/%[1]s/https://open.bigmodel.cn/api/mcp/zread/mcp",
+      "headers": { "Authorization": "Bearer 任意值" }
     }
 
-  (服务端注入真实 key,客户端用别名即可)
+### 3. Web 搜索 MCP web-search-prime(远程 HTTP)
 
-### 3. Web Reader MCP(远程 URL,走 HTTP,可走代理)
-
-  原始端点:https://mcp.z.ai/mcp/web-reader
-  认证:Authorization: 你的 API Key
-
-  通过本代理使用(别名模式):
-
-    "zai-web-reader": {
-      "type": "streamable-http",
-      "url": "https://p.19930810.xyz:8443/k/%[1]s/https://mcp.z.ai/mcp/web-reader",
-      "headers": { "Authorization": "任意值" }
+    "web-search-prime": {
+      "type": "http",
+      "url": "https://p.19930810.xyz:8443/k/%[1]s/https://open.bigmodel.cn/api/mcp/web_search_prime/mcp",
+      "headers": { "Authorization": "Bearer 任意值" }
     }
 
-注:以上 3 个 MCP 均可通过本代理使用。
-    视觉 MCP 通过 Z_AI_BASE_URL 环境变量指向代理;
-    Web 搜索 / Web Reader 通过 mcpServers 的 url 指向代理。
-    三种方式都不需要客户端持有真实 key,服务端注入。
+### 4. 网页阅读 MCP web-reader(远程 HTTP)
+
+    "web-reader": {
+      "type": "http",
+      "url": "https://p.19930810.xyz:8443/k/%[1]s/https://open.bigmodel.cn/api/mcp/web_reader/mcp",
+      "headers": { "Authorization": "Bearer 任意值" }
+    }
+
+注:以上 4 个 MCP 均可通过本代理使用,客户端不需要真实 key,服务端注入。
+    视觉 MCP 通过 Z_AI_BASE_URL 环境变量;
+    其余 3 个通过 mcpServers 的 url 指向代理。
 
 ---
 
