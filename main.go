@@ -674,7 +674,10 @@ func handleGroupRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, st
 		req.Body.Close()
 	}
 
-	sortedMembers := sortGroupMembersDynamic(cfg.Members, quotaCacheInst, gm.nextOffset())
+	// 动态排序(用量/窗口分档)之后应用置顶:置顶成员压过所有档位,
+	// 冷却中的置顶成员在下方循环里被跳过,流量自动落到其后的成员。
+	sortedMembers := reorderPinnedFirst(cfg.Pinned,
+		sortGroupMembersDynamic(cfg.Members, quotaCacheInst, gm.nextOffset()))
 
 	for _, member := range sortedMembers {
 		// 每次迭代重建 req.Body(上一次尝试可能已消耗)
@@ -947,7 +950,8 @@ func handleGroupWebSocket(w http.ResponseWriter, req *http.Request, ks *keyStore
 		}
 	}
 
-	for _, member := range cfg.Members {
+	// 置顶成员优先(WS 不参与动态排序,直接在配置顺序上提置顶,与 HTTP 路径行为对齐)
+	for _, member := range reorderPinnedFirst(cfg.Pinned, cfg.Members) {
 		st := gm.memberStatus(member)
 		if st.IsCooling {
 			continue

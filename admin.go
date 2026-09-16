@@ -167,6 +167,7 @@ func (a *adminServer) handler() http.Handler {
 	mux.HandleFunc("/__admin/groups/delete", a.requireAuth(a.handleGroupDelete))
 	mux.HandleFunc("/__admin/groups/reset", a.requireAuth(a.handleGroupReset))
 	mux.HandleFunc("/__admin/groups/toggle", a.requireAuth(a.handleGroupToggle))
+	mux.HandleFunc("/__admin/groups/pin", a.requireAuth(a.handleGroupPin))
 	mux.HandleFunc("/__admin/quota/refresh", a.requireAuth(a.handleQuotaRefresh))
 	return mux
 }
@@ -483,11 +484,20 @@ func (a *adminServer) handleGroups(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 置顶标记(key = "group:alias"),成员表展示 📌 和切换按钮用
+	pinnedFlags := make(map[string]bool)
+	for name, g := range groups {
+		for _, p := range g.Pinned {
+			pinnedFlags[name+":"+p] = true
+		}
+	}
+
 	renderTemplate(w, "groups", map[string]interface{}{
 		"Groups":       groups,
 		"MemberStatus": memberStatus,
 		"MemberHealth": memberHealth,
 		"GroupHealth":  groupHealth,
+		"PinnedFlags":  pinnedFlags,
 		"Aliases":      aliases,
 		"UsageSnap":    usageSnap,
 		"Editing":      editing,
@@ -568,6 +578,12 @@ func (a *adminServer) handleGroupNew(w http.ResponseWriter, r *http.Request) {
 		Window:    window,
 	}
 
+	// 编辑已有群组时继承旧置顶标记(置顶在成员列表页单独切换,表单不展示),
+	// 并剔除已不在新成员列表里的置顶项。克隆模式同理带上源群组的置顶。
+	if old, ok := a.keys.getGroups()[name]; ok {
+		cfg.Pinned = filterPinnedMembers(old.Pinned, members)
+	}
+
 	if err := a.keys.setGroup(name, cfg); err != nil {
 		renderMsg(w, "保存失败", err.Error())
 		return
@@ -643,6 +659,50 @@ func (a *adminServer) handleGroupToggle(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	cfg.Disabled = !cfg.Disabled // 切换
+	if err := a.keys.setGroup(name, cfg); err != nil {
+		renderMsg(w, "操作失败", err.Error())
+		return
+	}
+	http.Redirect(w, r, "/__admin/groups", http.StatusSeeOther)
+}
+
+// handleGroupPin 切换 group 成员的置顶状态。
+// 置顶成员只要不在冷却期就最优先使用(压过动态排序的所有档位),
+// 冷却期间流量自动落到其他成员,冷却结束恢复置顶——适合"额度快到期想优先消耗"的成员。
+func (a *adminServer) handleGroupPin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if a.keys == nil {
+		http.Error(w, "key 模式未启用", http.StatusBadRequest)
+		return
+	}
+	name := r.URL.Query().Get("name")
+	alias := r.URL.Query().Get("alias")
+	if name == "" || alias == "" {
+		http.Error(w, "缺少 name 或 alias", http.StatusBadRequest)
+		return
+	}
+	groups := a.keys.getGroups()
+	cfg, ok := groups[name]
+	if !ok {
+		http.Error(w, "未知的 group: "+name, http.StatusNotFound)
+		return
+	}
+	if !sliceContains(cfg.Members, alias) {
+		http.Error(w, "成员不在群组 "+name+" 中: "+alias, http.StatusBadRequest)
+		return
+	}
+
+	// 切换置顶:在列表里则移除,不在则追加
+	if sliceContains(cfg.Pinned, alias) {
+		cfg.Pinned = removeFromSlice(cfg.Pinned, alias)
+	} else if cfg.Pinned == nil {
+		cfg.Pinned = []string{alias}
+	} else {
+		cfg.Pinned = append(cfg.Pinned, alias)
+	}
 	if err := a.keys.setGroup(name, cfg); err != nil {
 		renderMsg(w, "操作失败", err.Error())
 		return
@@ -1128,6 +1188,20 @@ func sliceContains(slice []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// removeFromSlice 返回一个不含 s 的新切片(不修改原切片)。
+func removeFromSlice(slice []string, s string) []string {
+	out := make([]string, 0, len(slice))
+	for _, v := range slice {
+		if v != s {
+			out = append(out, v)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // toInt64 把 interface{} 转成 int64(模板 add 用)。

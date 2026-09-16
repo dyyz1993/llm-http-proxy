@@ -330,17 +330,20 @@ function copyURL(alias) {
 	</form>
 </div>
 <div class="table-wrap"><table style="font-size:13px">
-<tr><th>#</th><th>成员</th><th>Key</th><th>Token用量</th><th>额度</th><th>状态</th><th>请求</th><th>错误分布</th></tr>
+<tr><th>#</th><th>成员</th><th>Key</th><th>Token用量</th><th>额度</th><th>状态</th><th>请求</th><th>错误分布</th><th>置顶</th></tr>
 {{range $i, $m := $g.Members}}
 <tr>
 <td>{{$i}}</td>
-<td><b>{{$m}}</b></td>
+<td><b>{{$m}}</b>{{if index $.PinnedFlags (printf "%s:%s" $name $m)}} <span title="置顶成员,最优先使用">📌</span>{{end}}</td>
 {{with index $.Aliases $m}}<td><code style="font-size:11px;color:#888">{{maskKey .Key}}</code></td>{{else}}<td style="color:red">不存在</td>{{end}}
 {{with index $.UsageSnap $m}}<td>{{fmtTokens .WindowPrompt}} + {{fmtTokens .WindowCompletion}}</td>{{else}}<td>-</td>{{end}}
 {{with index $.Aliases $m}}<td>{{if .MaxTokens}}{{fmtTokens .MaxTokens}}{{else}}-{{end}}</td>{{else}}<td>-</td>{{end}}
 <td>{{if eq (index $.MemberHealth $m) "expired"}}<span style="color:#95a5a6">🔒 已过期</span>{{else if eq (index $.MemberHealth $m) "quota_full"}}<span style="color:#e74c3c">🚫 限额已满</span>{{else if eq (index $.MemberHealth $m) "time_block"}}<span style="color:#95a5a6">⏰ 禁止时段</span>{{else}}{{with index $.MemberStatus $m}}{{if .IsCooling}}<span style="color:#e67e22">⏸ 冷却</span>{{else}}<span style="color:#27ae60">✅ 活跃</span>{{end}}{{else}}<span style="color:#27ae60">✅ 活跃</span>{{end}}{{end}}</td>
 <td>{{with index $.MemberStatus $m}}{{if gt .TotalReqs 0}}{{.TotalReqs}}{{else}}-{{end}}{{else}}-{{end}}</td>
 <td style="font-size:12px">{{with index $.MemberStatus $m}}{{if .StatusCounts}}{{range $code, $cnt := .StatusCounts}}{{if gt $code 399}}<span style="color:{{if eq $code 401}}#e74c3c{{else if eq $code 429}}#e67e22{{else if ge $code 500}}#e74c3c{{else}}#888{{end}}">{{$code}}×{{$cnt}}</span> {{end}}{{end}}{{else}}-{{end}}{{else}}-{{end}}</td>
+<td><form method="post" action="/__admin/groups/pin?name={{$name}}&alias={{$m}}" style="display:inline">
+<button type="submit" style="padding:1px 6px;font-size:12px" title="置顶成员只要不在冷却期就最优先使用(优先于动态排序);失败进冷却时流量自动落到其他成员,冷却结束恢复置顶">{{if index $.PinnedFlags (printf "%s:%s" $name $m)}}取消置顶{{else}}置顶{{end}}</button>
+</form></td>
 </tr>
 {{end}}
 </table></div>
@@ -353,7 +356,7 @@ function copyURL(alias) {
 {{end}}
 </div>
 <div style="font-size:12px;color:#888;margin-top:4px">
-	切换条件: {{range $g.OnStatus}} {{.}}{{end}} | 冷却: {{$g.Cooldown}}{{if $g.Expires}} | 有效期: {{$g.Expires}}{{end}}{{if or (gt $g.MaxTokens 0) (gt $g.MaxReqs 0)}} | 限额: {{if gt $g.MaxReqs 0}}{{$g.MaxReqs}}次{{end}}{{if gt $g.MaxTokens 0}} {{fmtTokens $g.MaxTokens}}token{{end}} / {{$g.Window}}{{end}}
+切换条件: {{range $g.OnStatus}} {{.}}{{end}} | 冷却: {{$g.Cooldown}}{{if $g.Pinned}} | 📌 置顶: {{range $g.Pinned}}{{.}} {{end}}{{end}}{{if $g.Expires}} | 有效期: {{$g.Expires}}{{end}}{{if or (gt $g.MaxTokens 0) (gt $g.MaxReqs 0)}} | 限额: {{if gt $g.MaxReqs 0}}{{$g.MaxReqs}}次{{end}}{{if gt $g.MaxTokens 0}} {{fmtTokens $g.MaxTokens}}token{{end}} / {{$g.Window}}{{end}}
 </div>
 </div>
 {{end}}

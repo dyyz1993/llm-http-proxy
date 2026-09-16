@@ -107,7 +107,8 @@ myalias:
 # 成员按顺序尝试,失败(402/429/502等)自动换下一个,客户端无感知。
 # groups:
 #   glm-pool:
-#     members: [glm, max-0, channel]    # 按优先级试
+#     members: [glm, max-0, channel]    # 成员列表(实际顺序由动态排序决定)
+#     pinned: [max-0]                   # 置顶成员:不在冷却期时最优先使用,冷却时自动回落
 #     on_status: [402, 429, 502, 503]   # 这些码触发换人
 #     cooldown: 5m                      # 失败成员冷却时间
 # 调用: /k/glm-pool/https://...(和普通别名一样)

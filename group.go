@@ -22,14 +22,15 @@ import (
 
 // GroupConfig 是单个 group 的配置。
 type GroupConfig struct {
-	Members   []string `yaml:"members"`      // 成员 alias 列表(按优先级排序)
-	OnStatus  []int    `yaml:"on_status"`    // 上游返回这些码时触发换人
-	Cooldown  string   `yaml:"cooldown"`     // 冷却时间(如 "5m", "30s")
-	Expires   string   `yaml:"expires"`      // 可选有效期(空=永久)
-	MaxTokens int64    `yaml:"max_tokens"`   // 窗口内总 token 上限(0=不限)
-	MaxReqs   int64    `yaml:"max_requests"` // 窗口内成功请求次数上限(0=不限)
-	Window    string   `yaml:"window"`       // 窗口时长(如 "24h", "7d")
-	Disabled  bool     `yaml:"disabled"`     // 禁用开关(禁用时返回 503)
+	Members   []string `yaml:"members"`          // 成员 alias 列表(实际顺序由动态排序决定,见 sortGroupMembersDynamic)
+	Pinned    []string `yaml:"pinned,omitempty"` // 置顶成员:不在冷却期时最优先使用(压过动态排序所有档位),冷却期间自动回落到其他成员
+	OnStatus  []int    `yaml:"on_status"`        // 上游返回这些码时触发换人
+	Cooldown  string   `yaml:"cooldown"`         // 冷却时间(如 "5m", "30s")
+	Expires   string   `yaml:"expires"`          // 可选有效期(空=永久)
+	MaxTokens int64    `yaml:"max_tokens"`       // 窗口内总 token 上限(0=不限)
+	MaxReqs   int64    `yaml:"max_requests"`     // 窗口内成功请求次数上限(0=不限)
+	Window    string   `yaml:"window"`           // 窗口时长(如 "24h", "7d")
+	Disabled  bool     `yaml:"disabled"`         // 禁用开关(禁用时返回 503)
 }
 
 // memberState 记录单个成员的实时状态(内存,不持久化)。
@@ -298,4 +299,50 @@ func (gm *groupManager) allGroupStatus() []groupStatusSnapshot {
 		})
 	}
 	return result
+}
+
+// reorderPinnedFirst 把置顶成员按原列表相对顺序提到最前,其余成员保持原有顺序。
+// 在动态排序(或配置顺序)的结果上应用:置顶成员压过所有档位,只要不在冷却期就最先被尝试;
+// 冷却判断留给调用方主循环——置顶成员冷却中会被跳过,流量自然落到其后的成员,冷却结束自动恢复置顶。
+// pinned 中不在 members 里的项忽略。
+func reorderPinnedFirst(pinned, members []string) []string {
+	if len(pinned) == 0 || len(members) == 0 {
+		return members
+	}
+	pinnedSet := make(map[string]bool, len(pinned))
+	for _, p := range pinned {
+		pinnedSet[p] = true
+	}
+	head := make([]string, 0, len(members))
+	rest := make([]string, 0, len(members))
+	for _, m := range members {
+		if pinnedSet[m] {
+			head = append(head, m)
+		} else {
+			rest = append(rest, m)
+		}
+	}
+	return append(head, rest...)
+}
+
+// filterPinnedMembers 过滤置顶列表,只保留仍是 members 的项。
+// 群组编辑(增删成员)保存时调用,避免残留对已移除成员的置顶。
+func filterPinnedMembers(pinned, members []string) []string {
+	if len(pinned) == 0 {
+		return nil
+	}
+	set := make(map[string]bool, len(members))
+	for _, m := range members {
+		set[m] = true
+	}
+	out := make([]string, 0, len(pinned))
+	for _, p := range pinned {
+		if set[p] {
+			out = append(out, p)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
