@@ -154,6 +154,7 @@ func (a *adminServer) handler() http.Handler {
 	mux.HandleFunc("/__admin/keys/new", a.requireAuth(a.handleKeyNew))
 	mux.HandleFunc("/__admin/keys/quickadd", a.handleKeyQuickAdd) // JSON+CORS，独立鉴权
 	mux.HandleFunc("/__admin/keys/delete", a.requireAuth(a.handleKeyDelete))
+	mux.HandleFunc("/__admin/keys/toggle", a.requireAuth(a.handleKeyToggle))
 	mux.HandleFunc("/__admin/stats", a.requireAuth(a.handleStats))
 	mux.HandleFunc("/__admin/daily", a.requireAuth(a.handleDaily))
 	mux.HandleFunc("/__admin/logs", a.requireAuth(a.handleLogs))
@@ -814,6 +815,10 @@ func (a *adminServer) handleKeyNew(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	cfg := KeyConfig{Key: key, Header: header, Prefix: prefix, Rate: rate, Burst: burst, Expires: expires}
+	// 编辑模式:表单没有禁用开关(由 /keys/toggle 按钮单独管理),保留原禁用状态
+	if existing, ok := a.keys.allConfigs()[alias]; ok {
+		cfg.Disabled = existing.Disabled
+	}
 	if err := a.keys.setConfig(alias, cfg); err != nil {
 		renderMsg(w, "保存失败", err.Error())
 		return
@@ -837,6 +842,41 @@ func (a *adminServer) handleKeyDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := a.keys.deleteConfig(alias); err != nil {
 		renderMsg(w, "删除失败", err.Error())
+		return
+	}
+	http.Redirect(w, r, "/__admin/keys", http.StatusSeeOther)
+}
+
+// handleKeyToggle 切换 alias 的手动禁用/启用状态(快速开关,与过期不同,可随时恢复)。
+// 禁用后:直连 /k/{alias}/ 返回 503;作为群组成员时被跳过。配置保留,不删数据。
+// ?back=groups 时重定向回群组页(群组成员行也有这个按钮)。
+func (a *adminServer) handleKeyToggle(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if a.keys == nil {
+		http.Error(w, "key 模式未启用", http.StatusBadRequest)
+		return
+	}
+	alias := r.URL.Query().Get("alias")
+	if alias == "" {
+		http.Error(w, "缺少 alias", http.StatusBadRequest)
+		return
+	}
+	cfg, ok := a.keys.allConfigs()[alias]
+	if !ok {
+		http.Error(w, "未知的 alias: "+alias, http.StatusNotFound)
+		return
+	}
+	cfg.Disabled = !cfg.Disabled // 切换
+	if err := a.keys.setConfig(alias, cfg); err != nil {
+		renderMsg(w, "操作失败", err.Error())
+		return
+	}
+	back := r.URL.Query().Get("back")
+	if back == "groups" {
+		http.Redirect(w, r, "/__admin/groups", http.StatusSeeOther)
 		return
 	}
 	http.Redirect(w, r, "/__admin/keys", http.StatusSeeOther)
@@ -1218,13 +1258,18 @@ func toInt64(v interface{}) int64 {
 }
 
 // computeMemberHealth 计算成员的健康标签。
-// 返回值: "expired"(已过期) / "quota_full"(限额已满) / "time_block"(禁止时段) / "ok"(正常)
+// 返回值: "expired"(已过期) / "disabled"(手动禁用) / "quota_full"(限额已满) / "time_block"(禁止时段) / "ok"(正常)
 func computeMemberHealth(ks *keyStore, us *usageStats, alias string) string {
 	cfg, ok := ks.lookup(alias)
 	if !ok {
 		return "expired"
 	}
 	cfg = resolveConfig(cfg, ks.getInterceptorProfiles(), "default")
+
+	// 手动禁用(优先于其他状态展示——它压过一切,群组也会跳过)
+	if cfg.Disabled {
+		return "disabled"
+	}
 
 	// 检查限额
 	if cfg.HasQuota() && us != nil {

@@ -29,14 +29,15 @@ type KeyConfig struct {
 	Prefix  string `yaml:"prefix"`  // 可选前缀(如 Authorization 需要 "Bearer ")
 	Profile string `yaml:"profile"` // 引用拦截器模板 ID(interceptor_profiles 段)
 	// 拦截器参数(可以直接写在这里,或通过 profile 引用+override 覆盖)
-	Rate      int                 `yaml:"rate"`         // 限流:每分钟补充令牌数(0=不限流)
-	Burst     int                 `yaml:"burst"`        // 限流:桶容量上限(突发上限)
-	Expires   string              `yaml:"expires"`      // 可选有效期
-	MaxTokens int64               `yaml:"max_tokens"`   // 窗口内总 token 上限
-	MaxReqs   int64               `yaml:"max_requests"` // 窗口内成功请求次数上限
-	Window    string              `yaml:"window"`       // 窗口时长
-	TimeBlock *TimeBlock          `yaml:"time_block"`   // 禁止时段
-	Override  *InterceptorProfile `yaml:"override"`     // 覆盖 profile 中的部分参数
+	Rate      int                 `yaml:"rate"`               // 限流:每分钟补充令牌数(0=不限流)
+	Burst     int                 `yaml:"burst"`              // 限流:桶容量上限(突发上限)
+	Expires   string              `yaml:"expires"`            // 可选有效期
+	MaxTokens int64               `yaml:"max_tokens"`         // 窗口内总 token 上限
+	MaxReqs   int64               `yaml:"max_requests"`       // 窗口内成功请求次数上限
+	Window    string              `yaml:"window"`             // 窗口时长
+	TimeBlock *TimeBlock          `yaml:"time_block"`         // 禁止时段
+	Override  *InterceptorProfile `yaml:"override"`           // 覆盖 profile 中的部分参数
+	Disabled  bool                `yaml:"disabled,omitempty"` // 手动禁用开关:直连返回 503,群组跳过该成员(与过期不同,可随时点按钮恢复)
 }
 
 // InterceptorProfile 是拦截器模板,在 interceptor_profiles 段定义,被 KeyConfig.Profile 引用。

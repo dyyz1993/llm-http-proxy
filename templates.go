@@ -75,8 +75,8 @@ button{padding:10px 20px;cursor:pointer}
 <table>
 	<tr><th>Alias</th><th>调用地址</th><th>Header</th><th>Prefix</th><th>Key</th><th>Rate/min</th><th>Burst</th><th>Token上限</th><th>窗口</th><th>有效期</th><th>操作</th></tr>
 	{{range $alias, $cfg := .Aliases}}
-	<tr {{if index $.Expired $alias}}class="expired"{{end}}>
-	<td><b>{{$alias}}</b></td>
+	<tr {{if or (index $.Expired $alias) $cfg.Disabled}}class="expired"{{end}}>
+	<td><b>{{$alias}}</b>{{if $cfg.Disabled}} <span style="color:#e74c3c;font-size:12px" title="手动禁用中:直连返回 503,群组跳过该成员">⛔ 已禁用</span>{{end}}</td>
 	<td><code style="font-size:12px" id="url-{{$alias}}">/k/{{$alias}}/</code> <button type="button" onclick="copyURL('{{$alias}}')" style="padding:2px 8px;font-size:12px">复制地址</button></td>
 	<td>{{if $cfg.Header}}{{$cfg.Header}}{{else}}<span style="color:#888">自动</span>{{end}}</td>
 	<td>{{$cfg.Prefix}}</td>
@@ -87,6 +87,9 @@ button{padding:10px 20px;cursor:pointer}
 	<td>{{if $cfg.Window}}{{$cfg.Window}}{{else}}-{{end}}</td>
 	<td>{{if $cfg.Expires}}{{$cfg.Expires}}{{if index $.Expired $alias}}<span class="expired-tag">已到期</span>{{end}}{{else}}永久{{end}}</td>
 	<td style="white-space:nowrap">
+	<form method="post" action="/__admin/keys/toggle?alias={{$alias}}" style="display:inline">
+	<button type="submit" {{if $cfg.Disabled}}style="color:#27ae60" title="恢复该 key,立即生效"{{else}}title="快速禁用:直连返回 503,群组跳过该成员;随时可再启用"{{end}}>{{if $cfg.Disabled}}启用{{else}}禁用{{end}}</button>
+	</form>
 	<a href="/__admin/keys?edit={{$alias}}"><button type="button">编辑</button></a>
 	<a href="/__admin/keys?copy={{$alias}}"><button type="button">克隆</button></a>
 	<form method="post" action="/__admin/keys/delete?alias={{$alias}}" style="display:inline">
@@ -330,7 +333,7 @@ function copyURL(alias) {
 	</form>
 </div>
 <div class="table-wrap"><table style="font-size:13px">
-<tr><th>#</th><th>成员</th><th>Key</th><th>Token用量</th><th>额度</th><th>状态</th><th>请求</th><th>错误分布</th><th>置顶</th></tr>
+<tr><th>#</th><th>成员</th><th>Key</th><th>Token用量</th><th>额度</th><th>状态</th><th>请求</th><th>错误分布</th><th>置顶/禁用</th></tr>
 {{range $i, $m := $g.Members}}
 <tr>
 <td>{{$i}}</td>
@@ -338,11 +341,14 @@ function copyURL(alias) {
 {{with index $.Aliases $m}}<td><code style="font-size:11px;color:#888">{{maskKey .Key}}</code></td>{{else}}<td style="color:red">不存在</td>{{end}}
 {{with index $.UsageSnap $m}}<td>{{fmtTokens .WindowPrompt}} + {{fmtTokens .WindowCompletion}}</td>{{else}}<td>-</td>{{end}}
 {{with index $.Aliases $m}}<td>{{if .MaxTokens}}{{fmtTokens .MaxTokens}}{{else}}-{{end}}</td>{{else}}<td>-</td>{{end}}
-<td>{{if eq (index $.MemberHealth $m) "expired"}}<span style="color:#95a5a6">🔒 已过期</span>{{else if eq (index $.MemberHealth $m) "quota_full"}}<span style="color:#e74c3c">🚫 限额已满</span>{{else if eq (index $.MemberHealth $m) "time_block"}}<span style="color:#95a5a6">⏰ 禁止时段</span>{{else}}{{with index $.MemberStatus $m}}{{if .IsCooling}}<span style="color:#e67e22">⏸ 冷却</span>{{else}}<span style="color:#27ae60">✅ 活跃</span>{{end}}{{else}}<span style="color:#27ae60">✅ 活跃</span>{{end}}{{end}}</td>
+<td>{{if eq (index $.MemberHealth $m) "disabled"}}<span style="color:#e74c3c">⛔ 已禁用</span>{{else if eq (index $.MemberHealth $m) "expired"}}<span style="color:#95a5a6">🔒 已过期</span>{{else if eq (index $.MemberHealth $m) "quota_full"}}<span style="color:#e74c3c">🚫 限额已满</span>{{else if eq (index $.MemberHealth $m) "time_block"}}<span style="color:#95a5a6">⏰ 禁止时段</span>{{else}}{{with index $.MemberStatus $m}}{{if .IsCooling}}<span style="color:#e67e22">⏸ 冷却</span>{{else}}<span style="color:#27ae60">✅ 活跃</span>{{end}}{{else}}<span style="color:#27ae60">✅ 活跃</span>{{end}}{{end}}</td>
 <td>{{with index $.MemberStatus $m}}{{if gt .TotalReqs 0}}{{.TotalReqs}}{{else}}-{{end}}{{else}}-{{end}}</td>
 <td style="font-size:12px">{{with index $.MemberStatus $m}}{{if .StatusCounts}}{{range $code, $cnt := .StatusCounts}}{{if gt $code 399}}<span style="color:{{if eq $code 401}}#e74c3c{{else if eq $code 429}}#e67e22{{else if ge $code 500}}#e74c3c{{else}}#888{{end}}">{{$code}}×{{$cnt}}</span> {{end}}{{end}}{{else}}-{{end}}{{else}}-{{end}}</td>
 <td><form method="post" action="/__admin/groups/pin?name={{$name}}&alias={{$m}}" style="display:inline">
 <button type="submit" style="padding:1px 6px;font-size:12px" title="置顶成员只要不在冷却期就最优先使用(优先于动态排序);失败进冷却时流量自动落到其他成员,冷却结束恢复置顶">{{if index $.PinnedFlags (printf "%s:%s" $name $m)}}取消置顶{{else}}置顶{{end}}</button>
+</form>
+<form method="post" action="/__admin/keys/toggle?alias={{$m}}&back=groups" style="display:inline">
+<button type="submit" style="padding:1px 6px;font-size:12px" title="快速禁用该 key:群组跳过该成员,直连 /k/ 返回 503;随时可再启用(注意:对该 key 的所有入口生效,不只是本群组)">{{if (index $.Aliases $m).Disabled}}启用{{else}}禁用{{end}}</button>
 </form></td>
 </tr>
 {{end}}

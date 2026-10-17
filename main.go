@@ -570,6 +570,14 @@ func handleKeyRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, stat
 	// 合并拦截器模板(profile → override → alias 直接字段)
 	cfg = resolveConfig(cfg, ks.getInterceptorProfiles(), "default")
 
+	// 手动禁用检查(503 Service Unavailable,同 group 级禁用;与过期的 410 不同,可随时恢复)
+	if cfg.Disabled {
+		w.Header().Set("Retry-After", "60")
+		log.Printf("alias 已禁用,拒绝请求: %s", alias)
+		http.Error(w, "此 key 已被禁用: "+alias+"\n", http.StatusServiceUnavailable)
+		return
+	}
+
 	// 构建拦截器上下文
 	ctx := &CheckContext{
 		Alias:    alias,
@@ -701,6 +709,12 @@ func handleGroupRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, st
 			continue
 		}
 		memberCfg = resolveConfig(memberCfg, ks.getInterceptorProfiles(), "default")
+
+		// 手动禁用的成员直接跳过(不进冷却——它是人为开关,不是故障,恢复后立即参与)
+		if memberCfg.Disabled {
+			log.Printf("group 跳过已禁用成员: group=%s member=%s", groupName, member)
+			continue
+		}
 
 		// 拦截器链检查(禁止时段/限额/限流/白名单)
 		ctx := &CheckContext{
@@ -962,6 +976,12 @@ func handleGroupWebSocket(w http.ResponseWriter, req *http.Request, ks *keyStore
 			continue
 		}
 		memberCfg = resolveConfig(memberCfg, ks.getInterceptorProfiles(), "default")
+
+		// 手动禁用的成员直接跳过(同 HTTP 路径)
+		if memberCfg.Disabled {
+			log.Printf("group 跳过已禁用成员(WS): group=%s member=%s", groupName, member)
+			continue
+		}
 
 		ctx := &CheckContext{
 			Alias:      member,
