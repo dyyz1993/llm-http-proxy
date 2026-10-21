@@ -16,21 +16,34 @@
 package main
 
 import (
+	"fmt"
+	"strings"
 	"sync"
 	"time"
 )
 
 // GroupConfig 是单个 group 的配置。
 type GroupConfig struct {
-	Members   []string `yaml:"members"`          // 成员 alias 列表(实际顺序由动态排序决定,见 sortGroupMembersDynamic)
-	Pinned    []string `yaml:"pinned,omitempty"` // 置顶成员:不在冷却期时最优先使用(压过动态排序所有档位),冷却期间自动回落到其他成员
-	OnStatus  []int    `yaml:"on_status"`        // 上游返回这些码时触发换人
-	Cooldown  string   `yaml:"cooldown"`         // 冷却时间(如 "5m", "30s")
-	Expires   string   `yaml:"expires"`          // 可选有效期(空=永久)
-	MaxTokens int64    `yaml:"max_tokens"`       // 窗口内总 token 上限(0=不限)
-	MaxReqs   int64    `yaml:"max_requests"`     // 窗口内成功请求次数上限(0=不限)
-	Window    string   `yaml:"window"`           // 窗口时长(如 "24h", "7d")
-	Disabled  bool     `yaml:"disabled"`         // 禁用开关(禁用时返回 503)
+	Members   []string           `yaml:"members"`             // 成员 alias 列表(实际顺序由动态排序决定,见 sortGroupMembersDynamic)
+	Pinned    []string           `yaml:"pinned,omitempty"`    // 置顶成员:不在冷却期时最优先使用(压过动态排序所有档位),冷却期间自动回落到其他成员
+	PinRules  map[string]PinRule `yaml:"pin_rules,omitempty"` // alias → 置顶自动解除条件(无规则=永久置顶)
+	OnStatus  []int              `yaml:"on_status"`           // 上游返回这些码时触发换人
+	Cooldown  string             `yaml:"cooldown"`            // 冷却时间(如 "5m", "30s")
+	Expires   string             `yaml:"expires"`             // 可选有效期(空=永久)
+	MaxTokens int64              `yaml:"max_tokens"`          // 窗口内总 token 上限(0=不限)
+	MaxReqs   int64              `yaml:"max_requests"`        // 窗口内成功请求次数上限(0=不限)
+	Window    string             `yaml:"window"`              // 窗口时长(如 "24h", "7d")
+	Disabled  bool               `yaml:"disabled"`            // 禁用开关(禁用时返回 503)
+}
+
+// PinRule 给置顶加自动解除条件(读取时判定,见 activePins)。
+// Until 是北京时间绝对时间("2006-01-02 15:04");MaxReqs 是置顶期间该成员
+// 成功服务的请求数上限(429/失败不计,BaseReqs 是置顶时的成功数基线)。
+// 过期规则留在配置里是惰性的(不影响行为),下次置顶/取消/编辑群组时自然清理。
+type PinRule struct {
+	Until    string `yaml:"until,omitempty"`         // 自动取消的绝对时间(空=不限时)
+	MaxReqs  int64  `yaml:"max_requests,omitempty"`  // 置顶期间成功请求数上限(0=不限)
+	BaseReqs int64  `yaml:"base_requests,omitempty"` // 置顶时的成功请求数基线
 }
 
 // memberState 记录单个成员的实时状态(内存,不持久化)。
@@ -323,6 +336,117 @@ func reorderPinnedFirst(pinned, members []string) []string {
 		}
 	}
 	return append(head, rest...)
+}
+
+// activePins 返回 group 当前生效的置顶成员(按配置顺序),以及每个成员的剩余条件说明
+// (如 "剩23分钟" / "剩57次",永久置顶无说明)。
+// 时长到期或成功请求数达到上限的置顶被过滤;读时判定、不写盘——
+// 请求路径零开销,过期规则留在配置里是惰性的,下次置顶/取消/编辑群组时自然清理。
+func (gm *groupManager) activePins(groupName string) ([]string, map[string]string) {
+	gm.mu.RLock()
+	defer gm.mu.RUnlock()
+
+	cfg, ok := gm.groups[groupName]
+	if !ok || len(cfg.Pinned) == 0 {
+		return nil, nil
+	}
+	now := time.Now()
+	pins := make([]string, 0, len(cfg.Pinned))
+	notes := make(map[string]string, len(cfg.Pinned))
+	for _, p := range cfg.Pinned {
+		rule, has := cfg.PinRules[p]
+		if has {
+			if rule.Until != "" {
+				exp, ok := parseExpires(rule.Until)
+				if !ok || now.After(exp) {
+					continue // 时长已到期
+				}
+			}
+			if rule.MaxReqs > 0 && successCount(gm.states[p])-rule.BaseReqs >= rule.MaxReqs {
+				continue // 成功请求数已达上限
+			}
+		}
+		pins = append(pins, p)
+		if note := pinRuleNote(rule, has, now, gm.states[p]); note != "" {
+			notes[p] = note
+		}
+	}
+	if len(pins) == 0 {
+		return nil, notes
+	}
+	return pins, notes
+}
+
+// pinRuleNote 生成置顶剩余条件的简短说明("剩23分钟" / "剩57次" / "剩1.5小时/57次")。
+// 无规则(永久置顶)返回空。
+func pinRuleNote(rule PinRule, has bool, now time.Time, st *memberState) string {
+	if !has {
+		return ""
+	}
+	var parts []string
+	if rule.Until != "" {
+		if exp, ok := parseExpires(rule.Until); ok {
+			d := exp.Sub(now)
+			if d < 0 {
+				d = 0
+			}
+			if d >= time.Hour {
+				parts = append(parts, fmt.Sprintf("剩%.1f小时", d.Hours()))
+			} else {
+				parts = append(parts, fmt.Sprintf("剩%d分钟", int(d.Minutes())+1))
+			}
+		}
+	}
+	if rule.MaxReqs > 0 {
+		left := rule.MaxReqs - (successCount(st) - rule.BaseReqs)
+		if left < 0 {
+			left = 0
+		}
+		parts = append(parts, fmt.Sprintf("剩%d次", left))
+	}
+	return strings.Join(parts, "/")
+}
+
+// successCount 返回成员累计成功请求次数(totalReqs 减去 >=400 的失败计数),未知成员返回 0。
+func successCount(st *memberState) int64 {
+	if st == nil {
+		return 0
+	}
+	var fails int64
+	for code, cnt := range st.statusCounts {
+		if code >= 400 {
+			fails += cnt
+		}
+	}
+	return st.totalReqs - fails
+}
+
+// memberSuccessCount 是 successCount 的加锁版本(给 admin 置顶时取基线用)。
+func (gm *groupManager) memberSuccessCount(alias string) int64 {
+	gm.mu.RLock()
+	defer gm.mu.RUnlock()
+	return successCount(gm.states[alias])
+}
+
+// filterPinRules 过滤置顶规则,只保留仍是置顶成员的项(群组编辑保存时调用)。
+func filterPinRules(rules map[string]PinRule, pinned []string) map[string]PinRule {
+	if len(rules) == 0 {
+		return nil
+	}
+	set := make(map[string]bool, len(pinned))
+	for _, p := range pinned {
+		set[p] = true
+	}
+	out := make(map[string]PinRule, len(rules))
+	for alias, rule := range rules {
+		if set[alias] {
+			out[alias] = rule
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // filterPinnedMembers 过滤置顶列表,只保留仍是 members 的项。

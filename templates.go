@@ -344,9 +344,24 @@ function copyURL(alias) {
 <td>{{if eq (index $.MemberHealth $m) "disabled"}}<span style="color:#e74c3c">⛔ 已禁用</span>{{else if eq (index $.MemberHealth $m) "expired"}}<span style="color:#95a5a6">🔒 已过期</span>{{else if eq (index $.MemberHealth $m) "quota_full"}}<span style="color:#e74c3c">🚫 限额已满</span>{{else if eq (index $.MemberHealth $m) "time_block"}}<span style="color:#95a5a6">⏰ 禁止时段</span>{{else}}{{with index $.MemberStatus $m}}{{if .IsCooling}}<span style="color:#e67e22">⏸ 冷却</span>{{else}}<span style="color:#27ae60">✅ 活跃</span>{{end}}{{else}}<span style="color:#27ae60">✅ 活跃</span>{{end}}{{end}}</td>
 <td>{{with index $.MemberStatus $m}}{{if gt .TotalReqs 0}}{{.TotalReqs}}{{else}}-{{end}}{{else}}-{{end}}</td>
 <td style="font-size:12px">{{with index $.MemberStatus $m}}{{if .StatusCounts}}{{range $code, $cnt := .StatusCounts}}{{if gt $code 399}}<span style="color:{{if eq $code 401}}#e74c3c{{else if eq $code 429}}#e67e22{{else if ge $code 500}}#e74c3c{{else}}#888{{end}}">{{$code}}×{{$cnt}}</span> {{end}}{{end}}{{else}}-{{end}}{{else}}-{{end}}</td>
-<td><form method="post" action="/__admin/groups/pin?name={{$name}}&alias={{$m}}" style="display:inline">
-<button type="submit" style="padding:1px 6px;font-size:12px" title="置顶成员只要不在冷却期就最优先使用(优先于动态排序);失败进冷却时流量自动落到其他成员,冷却结束恢复置顶">{{if index $.PinnedFlags (printf "%s:%s" $name $m)}}取消置顶{{else}}置顶{{end}}</button>
+<td style="white-space:nowrap">
+{{if index $.PinnedFlags (printf "%s:%s" $name $m)}}
+<form method="post" action="/__admin/groups/pin?name={{$name}}&alias={{$m}}" style="display:inline">
+<button type="submit" style="padding:1px 6px;font-size:12px" title="置顶成员只要不在冷却期就最优先使用(优先于动态排序);失败进冷却时流量自动落到其他成员,冷却结束恢复置顶">取消置顶</button>
+</form>{{if index $.PinNotes (printf "%s:%s" $name $m)}} <span style="font-size:11px;color:#e67e22" title="置顶自动解除剩余条件">{{index $.PinNotes (printf "%s:%s" $name $m)}}</span>{{end}}
+{{else}}
+<form method="post" action="/__admin/groups/pin?name={{$name}}&alias={{$m}}" style="display:inline">
+<select name="duration" style="font-size:11px;padding:1px" title="可选:到点自动取消置顶">
+<option value="">不限时</option>
+<option value="30m">30分钟</option>
+<option value="1h">1小时</option>
+<option value="2h">2小时</option>
+<option value="8h">8小时</option>
+</select>
+<input name="maxreqs" type="number" min="0" placeholder="次数" style="width:54px;font-size:11px;padding:1px" title="可选:置顶期间成功服务满 N 个请求后自动取消置顶(失败/429 不计)">
+<button type="submit" style="padding:1px 6px;font-size:12px" title="置顶成员只要不在冷却期就最优先使用(优先于动态排序);可同时设置自动解除:时长和/或成功请求数,到点自动取消置顶">置顶</button>
 </form>
+{{end}}
 <form method="post" action="/__admin/keys/toggle?alias={{$m}}&back=groups" style="display:inline">
 <button type="submit" style="padding:1px 6px;font-size:12px" title="快速禁用该 key:群组跳过该成员,直连 /k/ 返回 503;随时可再启用(注意:对该 key 的所有入口生效,不只是本群组)">{{if (index $.Aliases $m).Disabled}}启用{{else}}禁用{{end}}</button>
 </form></td>
@@ -362,7 +377,7 @@ function copyURL(alias) {
 {{end}}
 </div>
 <div style="font-size:12px;color:#888;margin-top:4px">
-切换条件: {{range $g.OnStatus}} {{.}}{{end}} | 冷却: {{$g.Cooldown}}{{if $g.Pinned}} | 📌 置顶: {{range $g.Pinned}}{{.}} {{end}}{{end}}{{if $g.Expires}} | 有效期: {{$g.Expires}}{{end}}{{if or (gt $g.MaxTokens 0) (gt $g.MaxReqs 0)}} | 限额: {{if gt $g.MaxReqs 0}}{{$g.MaxReqs}}次{{end}}{{if gt $g.MaxTokens 0}} {{fmtTokens $g.MaxTokens}}token{{end}} / {{$g.Window}}{{end}}
+切换条件: {{range $g.OnStatus}} {{.}}{{end}} | 冷却: {{$g.Cooldown}}{{if index $.ActivePins $name}} | 📌 置顶: {{range index $.ActivePins $name}}{{.}} {{end}}{{end}}{{if $g.Expires}} | 有效期: {{$g.Expires}}{{end}}{{if or (gt $g.MaxTokens 0) (gt $g.MaxReqs 0)}} | 限额: {{if gt $g.MaxReqs 0}}{{$g.MaxReqs}}次{{end}}{{if gt $g.MaxTokens 0}} {{fmtTokens $g.MaxTokens}}token{{end}} / {{$g.Window}}{{end}}
 </div>
 </div>
 {{end}}

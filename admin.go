@@ -485,11 +485,26 @@ func (a *adminServer) handleGroups(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 置顶标记(key = "group:alias"),成员表展示 📌 和切换按钮用
+	// 置顶标记(key = "group:alias"),成员表展示 📌 和切换按钮用。
+	// 只统计生效置顶(activePins 已过滤到期/达到请求数的,自动解除);
+	// PinNotes 是剩余条件说明("剩23分钟"/"剩57次"),ActivePins 给群组汇总行用。
 	pinnedFlags := make(map[string]bool)
+	pinNotes := make(map[string]string)
+	activePins := make(map[string][]string)
 	for name, g := range groups {
-		for _, p := range g.Pinned {
+		var pins []string
+		var notes map[string]string
+		if gm != nil {
+			pins, notes = gm.activePins(name)
+		} else {
+			pins = g.Pinned
+		}
+		activePins[name] = pins
+		for _, p := range pins {
 			pinnedFlags[name+":"+p] = true
+			if n := notes[p]; n != "" {
+				pinNotes[name+":"+p] = n
+			}
 		}
 	}
 
@@ -499,6 +514,8 @@ func (a *adminServer) handleGroups(w http.ResponseWriter, r *http.Request) {
 		"MemberHealth": memberHealth,
 		"GroupHealth":  groupHealth,
 		"PinnedFlags":  pinnedFlags,
+		"PinNotes":     pinNotes,
+		"ActivePins":   activePins,
 		"Aliases":      aliases,
 		"UsageSnap":    usageSnap,
 		"Editing":      editing,
@@ -580,9 +597,10 @@ func (a *adminServer) handleGroupNew(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 编辑已有群组时继承旧置顶标记(置顶在成员列表页单独切换,表单不展示),
-	// 并剔除已不在新成员列表里的置顶项。克隆模式同理带上源群组的置顶。
+	// 并剔除已不在新成员列表里的置顶项及其自动解除规则。克隆模式同理带上源群组的置顶。
 	if old, ok := a.keys.getGroups()[name]; ok {
 		cfg.Pinned = filterPinnedMembers(old.Pinned, members)
+		cfg.PinRules = filterPinRules(old.PinRules, cfg.Pinned)
 	}
 
 	if err := a.keys.setGroup(name, cfg); err != nil {
@@ -670,6 +688,11 @@ func (a *adminServer) handleGroupToggle(w http.ResponseWriter, r *http.Request) 
 // handleGroupPin 切换 group 成员的置顶状态。
 // 置顶成员只要不在冷却期就最优先使用(压过动态排序的所有档位),
 // 冷却期间流量自动落到其他成员,冷却结束恢复置顶——适合"额度快到期想优先消耗"的成员。
+// 可选自动解除条件(form 字段):
+//   - duration: 30m / 1h / 2h 等,到点自动取消置顶
+//   - maxreqs:  正整数,置顶期间成功服务满 N 个请求后自动取消置顶(429/失败不计)
+//
+// 都不填 = 永久置顶(和旧行为一致)。判定在读取时进行(activePins),请求路径零写盘。
 func (a *adminServer) handleGroupPin(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -696,13 +719,46 @@ func (a *adminServer) handleGroupPin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 切换置顶:在列表里则移除,不在则追加
 	if sliceContains(cfg.Pinned, alias) {
+		// 取消置顶:移除并清理自动解除规则
 		cfg.Pinned = removeFromSlice(cfg.Pinned, alias)
-	} else if cfg.Pinned == nil {
-		cfg.Pinned = []string{alias}
+		if cfg.PinRules != nil {
+			delete(cfg.PinRules, alias)
+			if len(cfg.PinRules) == 0 {
+				cfg.PinRules = nil
+			}
+		}
 	} else {
 		cfg.Pinned = append(cfg.Pinned, alias)
+
+		// 解析可选的自动解除条件
+		durationStr := strings.TrimSpace(r.FormValue("duration"))
+		maxReqs, _ := strconv.ParseInt(strings.TrimSpace(r.FormValue("maxreqs")), 10, 64)
+		if maxReqs < 0 {
+			maxReqs = 0
+		}
+		var rule *PinRule
+		if durationStr != "" {
+			d, err := time.ParseDuration(durationStr)
+			if err != nil || d <= 0 {
+				renderMsg(w, "参数错误", "置顶时长格式不对: "+durationStr+"(可用 30m / 1h / 2h)")
+				return
+			}
+			rule = &PinRule{Until: time.Now().In(beijing).Add(d).Format("2006-01-02 15:04")}
+		}
+		if maxReqs > 0 {
+			if rule == nil {
+				rule = &PinRule{}
+			}
+			rule.MaxReqs = maxReqs
+			rule.BaseReqs = a.keys.getGroupManager().memberSuccessCount(alias)
+		}
+		if rule != nil {
+			if cfg.PinRules == nil {
+				cfg.PinRules = make(map[string]PinRule)
+			}
+			cfg.PinRules[alias] = *rule
+		}
 	}
 	if err := a.keys.setGroup(name, cfg); err != nil {
 		renderMsg(w, "操作失败", err.Error())

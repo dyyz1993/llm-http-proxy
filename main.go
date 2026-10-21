@@ -684,7 +684,9 @@ func handleGroupRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, st
 
 	// 动态排序(用量/窗口分档)之后应用置顶:置顶成员压过所有档位,
 	// 冷却中的置顶成员在下方循环里被跳过,流量自动落到其后的成员。
-	sortedMembers := reorderPinnedFirst(cfg.Pinned,
+	// activePins 已过滤到期/达到请求数的置顶(读时判定,自动解除)。
+	activePins, _ := gm.activePins(groupName)
+	sortedMembers := reorderPinnedFirst(activePins,
 		sortGroupMembersDynamic(cfg.Members, quotaCacheInst, gm.nextOffset()))
 
 	for _, member := range sortedMembers {
@@ -964,8 +966,10 @@ func handleGroupWebSocket(w http.ResponseWriter, req *http.Request, ks *keyStore
 		}
 	}
 
-	// 置顶成员优先(WS 不参与动态排序,直接在配置顺序上提置顶,与 HTTP 路径行为对齐)
-	for _, member := range reorderPinnedFirst(cfg.Pinned, cfg.Members) {
+	// 置顶成员优先(WS 不参与动态排序,直接在配置顺序上提置顶,与 HTTP 路径行为对齐;
+	// activePins 已过滤到期/达到请求数的置顶)
+	wsPins, _ := gm.activePins(groupName)
+	for _, member := range reorderPinnedFirst(wsPins, cfg.Members) {
 		st := gm.memberStatus(member)
 		if st.IsCooling {
 			continue
