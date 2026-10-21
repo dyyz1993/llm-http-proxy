@@ -404,7 +404,8 @@ func pinRuleNote(rule PinRule, has bool, now time.Time, st *memberState) string 
 		}
 		parts = append(parts, fmt.Sprintf("剩%d次", left))
 	}
-	return strings.Join(parts, "/")
+	// 同时设时长+次数时是"或"的关系:任一满足即自动取消
+	return strings.Join(parts, " 或 ")
 }
 
 // successCount 返回成员累计成功请求次数(totalReqs 减去 >=400 的失败计数),未知成员返回 0。

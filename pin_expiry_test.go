@@ -300,7 +300,11 @@ func TestGroupsPage_RendersPinFormAndNotes(t *testing.T) {
 			Members: []string{"pm1", "pm2", "pm3"},
 			Pinned:  []string{"pm1", "pm2"},
 			PinRules: map[string]PinRule{
-				"pm2": {Until: time.Now().Add(30 * time.Minute).Format("2006-01-02 15:04")},
+				// 同时设时长+次数:剩余说明应是"或"的关系
+				"pm2": {
+					Until:   time.Now().Add(30 * time.Minute).Format("2006-01-02 15:04"),
+					MaxReqs: 100,
+				},
 			},
 			OnStatus: []int{429},
 			Cooldown: "1m",
@@ -317,10 +321,16 @@ func TestGroupsPage_RendersPinFormAndNotes(t *testing.T) {
 		t.Fatalf("群组页应 200, got %d", w.Code)
 	}
 	for _, want := range []string{
-		"不限时",            // 未置顶成员的时长下拉
-		"30分钟",           // 下拉选项
-		`name="maxreqs"`, // 次数输入
-		"剩",              // pm2 的剩余说明
+		`<details class="pin-picker">`,     // 未置顶成员:点"置顶"展开面板
+		`name="duration" value="" checked`, // 默认选中"不限时"
+		`name="maxreqs" value="0" checked`, // 默认选中"不限次"
+		"30分钟",                             // 预设选项
+		"100次",                             // 预设选项
+		">确认</button>",                     // 面板确认按钮
+		">取消</button>",                     // 面板取消按钮
+		"剩",                                // pm2 的剩余说明
+		" 或 ",                              // 同时设时长+次数时明确"或"关系
+		"取消置顶",                             // 已置顶成员(pm1/pm2)的按钮
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("群组页应包含 %q", want)

@@ -348,19 +348,34 @@ function copyURL(alias) {
 {{if index $.PinnedFlags (printf "%s:%s" $name $m)}}
 <form method="post" action="/__admin/groups/pin?name={{$name}}&alias={{$m}}" style="display:inline">
 <button type="submit" style="padding:1px 6px;font-size:12px" title="置顶成员只要不在冷却期就最优先使用(优先于动态排序);失败进冷却时流量自动落到其他成员,冷却结束恢复置顶">取消置顶</button>
-</form>{{if index $.PinNotes (printf "%s:%s" $name $m)}} <span style="font-size:11px;color:#e67e22" title="置顶自动解除剩余条件">{{index $.PinNotes (printf "%s:%s" $name $m)}}</span>{{end}}
+</form>{{if index $.PinNotes (printf "%s:%s" $name $m)}} <span class="pin-note" title="置顶自动解除剩余条件(可同时设,任一满足即取消)">{{index $.PinNotes (printf "%s:%s" $name $m)}}</span>{{end}}
 {{else}}
-<form method="post" action="/__admin/groups/pin?name={{$name}}&alias={{$m}}" style="display:inline">
-<select name="duration" style="font-size:11px;padding:1px" title="可选:到点自动取消置顶">
-<option value="">不限时</option>
-<option value="30m">30分钟</option>
-<option value="1h">1小时</option>
-<option value="2h">2小时</option>
-<option value="8h">8小时</option>
-</select>
-<input name="maxreqs" type="number" min="0" placeholder="次数" style="width:54px;font-size:11px;padding:1px" title="可选:置顶期间成功服务满 N 个请求后自动取消置顶(失败/429 不计)">
-<button type="submit" style="padding:1px 6px;font-size:12px" title="置顶成员只要不在冷却期就最优先使用(优先于动态排序);可同时设置自动解除:时长和/或成功请求数,到点自动取消置顶">置顶</button>
+<details class="pin-picker">
+<summary title="置顶成员只要不在冷却期就最优先使用(优先于动态排序);点开可设自动解除条件">置顶</summary>
+<div class="pin-panel">
+<form method="post" action="/__admin/groups/pin?name={{$name}}&alias={{$m}}">
+<div class="pin-row"><span class="lbl">时长</span>
+<label class="pin-opt"><input type="radio" name="duration" value="" checked>不限时</label>
+<label class="pin-opt"><input type="radio" name="duration" value="30m">30分钟</label>
+<label class="pin-opt"><input type="radio" name="duration" value="1h">1小时</label>
+<label class="pin-opt"><input type="radio" name="duration" value="2h">2小时</label>
+<label class="pin-opt"><input type="radio" name="duration" value="8h">8小时</label>
+</div>
+<div class="pin-row"><span class="lbl">次数</span>
+<label class="pin-opt"><input type="radio" name="maxreqs" value="0" checked>不限次</label>
+<label class="pin-opt"><input type="radio" name="maxreqs" value="20">20次</label>
+<label class="pin-opt"><input type="radio" name="maxreqs" value="50">50次</label>
+<label class="pin-opt"><input type="radio" name="maxreqs" value="100">100次</label>
+<label class="pin-opt"><input type="radio" name="maxreqs" value="200">200次</label>
+</div>
+<div class="pin-hint">时长/次数可同时设,任一到期自动取消(或);都选"不限"=永久置顶。次数按成功请求计,429/失败不计。</div>
+<div class="pin-row" style="margin-top:6px">
+<button type="submit" style="padding:2px 14px;font-size:12px">确认</button>
+<button type="button" onclick="var d=this.closest('details');if(d)d.removeAttribute('open')" style="padding:2px 14px;font-size:12px">取消</button>
+</div>
 </form>
+</div>
+</details>
 {{end}}
 <form method="post" action="/__admin/keys/toggle?alias={{$m}}&back=groups" style="display:inline">
 <button type="submit" style="padding:1px 6px;font-size:12px" title="快速禁用该 key:群组跳过该成员,直连 /k/ 返回 503;随时可再启用(注意:对该 key 的所有入口生效,不只是本群组)">{{if (index $.Aliases $m).Disabled}}启用{{else}}禁用{{end}}</button>
@@ -544,6 +559,18 @@ code{background:#eee;padding:2px 4px;border-radius:3px}
 input,select{padding:4px}
 button{padding:6px 14px;cursor:pointer}
 h2{margin-top:0}
+/* 置顶选项面板:点"置顶"展开,浮在表格上方,不撑开行高 */
+.pin-picker{position:relative;display:inline-block}
+.pin-picker summary{list-style:none;cursor:pointer;display:inline-block;padding:1px 6px;font-size:12px;border:1px solid #ccc;border-radius:3px;background:#fff}
+.pin-picker summary::-webkit-details-marker{display:none}
+.pin-panel{position:absolute;left:0;top:calc(100% + 4px);z-index:20;background:#fff;border:1px solid #bbb;border-radius:6px;padding:8px 10px;box-shadow:0 3px 10px rgba(0,0,0,.18);white-space:nowrap}
+.pin-row{margin:3px 0;display:flex;gap:4px;align-items:center}
+.pin-row .lbl{font-size:11px;color:#888;width:34px}
+.pin-opt{border:1px solid #ccc;border-radius:4px;padding:2px 9px;font-size:12px;cursor:pointer;user-select:none;background:#fafafa}
+.pin-opt input{display:none}
+.pin-opt:has(input:checked){background:#2980b9;border-color:#2980b9;color:#fff}
+.pin-hint{font-size:11px;color:#888;margin-top:5px;max-width:280px;white-space:normal}
+.pin-note{font-size:11px;color:#e67e22}
 </style>{{end}}
 {{define "nav"}}<div class="nav">
 <span class="title">llm-http-proxy</span>
