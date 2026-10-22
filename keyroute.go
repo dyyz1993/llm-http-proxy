@@ -38,6 +38,10 @@ type KeyConfig struct {
 	TimeBlock *TimeBlock          `yaml:"time_block"`         // 禁止时段
 	Override  *InterceptorProfile `yaml:"override"`           // 覆盖 profile 中的部分参数
 	Disabled  bool                `yaml:"disabled,omitempty"` // 手动禁用开关:直连返回 503,群组跳过该成员(与过期不同,可随时点按钮恢复)
+	// 自动禁用预算:成功请求数达到 DisableAfterReqs 后自动置 Disabled(一次性,触发后字段清零)。
+	// DisableBaseReqs 是设置时刻的 TotalSuccess 基准;禁用中的 key 预算无意义,手动禁用时会清掉。
+	DisableAfterReqs int64 `yaml:"disable_after_reqs,omitempty"`
+	DisableBaseReqs  int64 `yaml:"disable_base_reqs,omitempty"`
 }
 
 // InterceptorProfile 是拦截器模板,在 interceptor_profiles 段定义,被 KeyConfig.Profile 引用。
@@ -732,6 +736,29 @@ func (ks *keyStore) setConfig(alias string, cfg KeyConfig) error {
 		ks.getOrCreateLimiter(alias, cfg)
 	}
 	return ks.saveYAMLAll()
+}
+
+// maybeAutoDisable 检查 alias 的"N 次后自动禁用"预算,达标则置 Disabled 并清掉预算。
+// 在每次成功响应后调用;未设置预算时只是一次廉价的配置读。
+// 并发下可能少量超出预算(几个请求同时进行中),语义是"大约 N 次",可接受。
+func maybeAutoDisable(ks *keyStore, us *usageStats, alias string) {
+	cfg, ok := ks.lookup(alias)
+	if !ok || cfg.DisableAfterReqs <= 0 {
+		return
+	}
+	if us.totalSuccess(alias)-cfg.DisableBaseReqs < cfg.DisableAfterReqs {
+		return
+	}
+	// 达标:一次性禁用并清预算(避免重启后旧基准再触发)
+	budget := cfg.DisableAfterReqs
+	cfg.Disabled = true
+	cfg.DisableAfterReqs = 0
+	cfg.DisableBaseReqs = 0
+	if err := ks.setConfig(alias, cfg); err != nil {
+		log.Printf("alias 自动禁用失败(持久化错误): %s: %v", alias, err)
+		return
+	}
+	log.Printf("alias 已达 %d 次成功调用,自动禁用: %s", budget, alias)
 }
 
 // deleteConfig 删除一个 alias 配置,并持久化。

@@ -87,9 +87,32 @@ button{padding:10px 20px;cursor:pointer}
 	<td>{{if $cfg.Window}}{{$cfg.Window}}{{else}}-{{end}}</td>
 	<td>{{if $cfg.Expires}}{{$cfg.Expires}}{{if index $.Expired $alias}}<span class="expired-tag">已到期</span>{{end}}{{else}}永久{{end}}</td>
 	<td style="white-space:nowrap">
+	{{if $cfg.Disabled}}
 	<form method="post" action="/__admin/keys/toggle?alias={{$alias}}" style="display:inline">
-	<button type="submit" {{if $cfg.Disabled}}style="color:#27ae60" title="恢复该 key,立即生效"{{else}}title="快速禁用:直连返回 503,群组跳过该成员;随时可再启用"{{end}}>{{if $cfg.Disabled}}启用{{else}}禁用{{end}}</button>
+	<button type="submit" style="color:#27ae60" title="恢复该 key,立即生效">启用</button>
 	</form>
+	{{else}}
+	<details class="pin-picker">
+	<summary title="点开选择:立即禁用,或设置预算(成功 N 次后自动禁用)">{{if index $.DisableNotes $alias}}预算中{{else}}禁用{{end}}</summary>
+	<div class="pin-panel">
+	<form method="post" action="/__admin/keys/toggle?alias={{$alias}}">
+	<div class="pin-row"><span class="lbl">方式</span>
+	<label class="pin-opt"><input type="radio" name="reqs" value="now" checked>立即禁用</label>
+	<label class="pin-opt"><input type="radio" name="reqs" value="20">20次后</label>
+	<label class="pin-opt"><input type="radio" name="reqs" value="50">50次后</label>
+	<label class="pin-opt"><input type="radio" name="reqs" value="100">100次后</label>
+	<label class="pin-opt"><input type="radio" name="reqs" value="200">200次后</label>
+	</div>
+	<div class="pin-hint">"N 次后"= 该 key 成功调用 N 次后自动禁用(按设置时刻起算);立即禁用则马上生效,随时可再启用。{{if index $.DisableNotes $alias}}已设预算:{{index $.DisableNotes $alias}},再设将覆盖。{{end}}</div>
+	<div class="pin-row" style="margin-top:6px">
+	<button type="submit" style="padding:2px 14px;font-size:12px">确认</button>
+	<button type="button" onclick="var d=this.closest('details');if(d)d.removeAttribute('open')" style="padding:2px 14px;font-size:12px">取消</button>
+	</div>
+	</form>
+	</div>
+	</details>
+	{{end}}
+	{{if index $.DisableNotes $alias}} <span class="pin-note" title="自动禁用预算剩余">{{index $.DisableNotes $alias}}</span>{{end}}
 	<a href="/__admin/keys?edit={{$alias}}"><button type="button">编辑</button></a>
 	<a href="/__admin/keys?copy={{$alias}}"><button type="button">克隆</button></a>
 	<form method="post" action="/__admin/keys/delete?alias={{$alias}}" style="display:inline">
@@ -377,9 +400,32 @@ function copyURL(alias) {
 </div>
 </details>
 {{end}}
+{{if (index $.Aliases $m).Disabled}}
 <form method="post" action="/__admin/keys/toggle?alias={{$m}}&back=groups" style="display:inline">
-<button type="submit" style="padding:1px 6px;font-size:12px" title="快速禁用该 key:群组跳过该成员,直连 /k/ 返回 503;随时可再启用(注意:对该 key 的所有入口生效,不只是本群组)">{{if (index $.Aliases $m).Disabled}}启用{{else}}禁用{{end}}</button>
-</form></td>
+<button type="submit" style="padding:1px 6px;font-size:12px;color:#27ae60" title="恢复该 key,立即生效(对该 key 的所有入口生效)">启用</button>
+</form>
+{{else}}
+<details class="pin-picker">
+<summary style="padding:1px 6px;font-size:12px" title="点开选择:立即禁用,或设置预算(成功 N 次后自动禁用);对该 key 的所有入口生效,不只是本群组">{{if index $.DisableNotes $m}}预算中{{else}}禁用{{end}}</summary>
+<div class="pin-panel">
+<form method="post" action="/__admin/keys/toggle?alias={{$m}}&back=groups">
+<div class="pin-row"><span class="lbl">方式</span>
+<label class="pin-opt"><input type="radio" name="reqs" value="now" checked>立即禁用</label>
+<label class="pin-opt"><input type="radio" name="reqs" value="20">20次后</label>
+<label class="pin-opt"><input type="radio" name="reqs" value="50">50次后</label>
+<label class="pin-opt"><input type="radio" name="reqs" value="100">100次后</label>
+<label class="pin-opt"><input type="radio" name="reqs" value="200">200次后</label>
+</div>
+<div class="pin-hint">"N 次后"= 成功调用 N 次后自动禁用;立即禁用马上生效。{{if index $.DisableNotes $m}}已设预算:{{index $.DisableNotes $m}}。{{end}}</div>
+<div class="pin-row" style="margin-top:6px">
+<button type="submit" style="padding:2px 14px;font-size:12px">确认</button>
+<button type="button" onclick="var d=this.closest('details');if(d)d.removeAttribute('open')" style="padding:2px 14px;font-size:12px">取消</button>
+</div>
+</form>
+</div>
+</details>
+{{end}}
+{{if index $.DisableNotes $m}} <span class="pin-note" title="自动禁用预算剩余">{{index $.DisableNotes $m}}</span>{{end}}</td>
 </tr>
 {{end}}
 </table></div>

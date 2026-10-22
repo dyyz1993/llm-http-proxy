@@ -314,9 +314,8 @@ func (gm *groupManager) allGroupStatus() []groupStatusSnapshot {
 	return result
 }
 
-// reorderPinnedFirst 把置顶成员按原列表相对顺序提到最前,其余成员保持原有顺序。
-// 在动态排序(或配置顺序)的结果上应用:置顶成员压过所有档位,只要不在冷却期就最先被尝试;
-// 冷却判断留给调用方主循环——置顶成员冷却中会被跳过,流量自然落到其后的成员,冷却结束自动恢复置顶。
+// reorderPinnedFirst 把置顶成员提到最前,其余成员保持原有顺序。
+// 置顶头部按 pinned 列表自身的顺序排列(调用方可能已做轮换,不能按 members 顺序洗掉);
 // pinned 中不在 members 里的项忽略。
 func reorderPinnedFirst(pinned, members []string) []string {
 	if len(pinned) == 0 || len(members) == 0 {
@@ -326,16 +325,36 @@ func reorderPinnedFirst(pinned, members []string) []string {
 	for _, p := range pinned {
 		pinnedSet[p] = true
 	}
-	head := make([]string, 0, len(members))
+	membersSet := make(map[string]bool, len(members))
+	for _, m := range members {
+		membersSet[m] = true
+	}
+	head := make([]string, 0, len(pinned))
+	for _, p := range pinned {
+		if membersSet[p] { // 只收真实成员(pinned 里的非成员忽略)
+			head = append(head, p)
+		}
+	}
 	rest := make([]string, 0, len(members))
 	for _, m := range members {
-		if pinnedSet[m] {
-			head = append(head, m)
-		} else {
+		if !pinnedSet[m] {
 			rest = append(rest, m)
 		}
 	}
 	return append(head, rest...)
+}
+
+// rotateStrings 把切片按 offset 轮换(左移 offset%len 位),len<=1 时原样返回。
+// 用于多个置顶成员之间的轮询:每个请求换一个队头,流量在置顶成员间交替。
+func rotateStrings(s []string, offset int64) []string {
+	if len(s) <= 1 {
+		return s
+	}
+	start := int(offset % int64(len(s)))
+	if start < 0 {
+		start += len(s)
+	}
+	return append(s[start:], s[:start]...)
 }
 
 // activePins 返回 group 当前生效的置顶成员(按配置顺序),以及每个成员的剩余条件说明

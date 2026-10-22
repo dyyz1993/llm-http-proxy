@@ -516,6 +516,7 @@ func (a *adminServer) handleGroups(w http.ResponseWriter, r *http.Request) {
 		"PinnedFlags":  pinnedFlags,
 		"PinNotes":     pinNotes,
 		"ActivePins":   activePins,
+		"DisableNotes": a.disableNotes(aliases),
 		"Aliases":      aliases,
 		"UsageSnap":    usageSnap,
 		"Editing":      editing,
@@ -719,7 +720,24 @@ func (a *adminServer) handleGroupPin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if sliceContains(cfg.Pinned, alias) {
+	// getGroups 是浅拷贝,PinRules 与线上配置共享底层数组;变更前深拷贝,避免数据竞争。
+	if cfg.PinRules != nil {
+		rulesCopy := make(map[string]PinRule, len(cfg.PinRules)+1)
+		for k, v := range cfg.PinRules {
+			rulesCopy[k] = v
+		}
+		cfg.PinRules = rulesCopy
+	}
+
+	// 用生效置顶(而非原始 Pinned 列表)判定当前状态:失效的置顶仍留在列表里(惰性清理),
+	// 若按原始列表判断,点"置顶"会走取消分支,表现为"重新置顶无效"。
+	wasActive := false
+	if gm := a.keys.getGroupManager(); gm != nil {
+		activePins, _ := gm.activePins(name)
+		wasActive = sliceContains(activePins, alias)
+	}
+
+	if wasActive {
 		// 取消置顶:移除并清理自动解除规则
 		cfg.Pinned = removeFromSlice(cfg.Pinned, alias)
 		if cfg.PinRules != nil {
@@ -729,7 +747,10 @@ func (a *adminServer) handleGroupPin(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	} else {
-		cfg.Pinned = append(cfg.Pinned, alias)
+		// 置顶(含"失效后重新置顶"):确保在列表里,并整体替换自动解除规则
+		if !sliceContains(cfg.Pinned, alias) {
+			cfg.Pinned = append(cfg.Pinned, alias)
+		}
 
 		// 解析可选的自动解除条件
 		durationStr := strings.TrimSpace(r.FormValue("duration"))
@@ -753,11 +774,14 @@ func (a *adminServer) handleGroupPin(w http.ResponseWriter, r *http.Request) {
 			rule.MaxReqs = maxReqs
 			rule.BaseReqs = a.keys.getGroupManager().memberSuccessCount(alias)
 		}
+		// 无条件(永久置顶)时清掉旧规则;有条件时整体覆盖(旧的失效规则作废)
+		if cfg.PinRules == nil && rule != nil {
+			cfg.PinRules = make(map[string]PinRule)
+		}
 		if rule != nil {
-			if cfg.PinRules == nil {
-				cfg.PinRules = make(map[string]PinRule)
-			}
 			cfg.PinRules[alias] = *rule
+		} else {
+			delete(cfg.PinRules, alias)
 		}
 	}
 	if err := a.keys.setGroup(name, cfg); err != nil {
@@ -798,25 +822,50 @@ func (a *adminServer) handleKeys(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	data := struct {
-		Aliases   map[string]KeyConfig
-		Expired   map[string]bool
-		BasePath  string
-		EditAlias string
-		EditCfg   KeyConfig
-		Editing   bool
-		Copying   bool
-		CopyFrom  string
+		Aliases      map[string]KeyConfig
+		Expired      map[string]bool
+		DisableNotes map[string]string
+		BasePath     string
+		EditAlias    string
+		EditCfg      KeyConfig
+		Editing      bool
+		Copying      bool
+		CopyFrom     string
 	}{
-		Aliases:   a.keys.allConfigs(),
-		Expired:   a.keys.expiredMap(),
-		BasePath:  "/k/",
-		EditAlias: editAlias,
-		EditCfg:   editCfg,
-		Editing:   editing,
-		Copying:   copying,
-		CopyFrom:  copyAlias,
+		Aliases:      a.keys.allConfigs(),
+		Expired:      a.keys.expiredMap(),
+		DisableNotes: a.disableNotes(a.keys.allConfigs()),
+		BasePath:     "/k/",
+		EditAlias:    editAlias,
+		EditCfg:      editCfg,
+		Editing:      editing,
+		Copying:      copying,
+		CopyFrom:     copyAlias,
 	}
 	renderTemplate(w, "keys", data)
+}
+
+// disableNotes 计算"自动禁用预算"的剩余说明(给 Keys 页/群组页展示)。
+// 返回 alias → "剩M次后自动禁用";只含已设预算且未禁用的 alias。
+func (a *adminServer) disableNotes(configs map[string]KeyConfig) map[string]string {
+	if a.usage == nil {
+		return nil
+	}
+	out := make(map[string]string)
+	for alias, cfg := range configs {
+		if cfg.Disabled || cfg.DisableAfterReqs <= 0 {
+			continue
+		}
+		left := cfg.DisableAfterReqs - (a.usage.totalSuccess(alias) - cfg.DisableBaseReqs)
+		if left < 0 {
+			left = 0
+		}
+		out[alias] = fmt.Sprintf("剩%d次后自动禁用", left)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func (a *adminServer) handleKeyNew(w http.ResponseWriter, r *http.Request) {
@@ -871,9 +920,11 @@ func (a *adminServer) handleKeyNew(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	cfg := KeyConfig{Key: key, Header: header, Prefix: prefix, Rate: rate, Burst: burst, Expires: expires}
-	// 编辑模式:表单没有禁用开关(由 /keys/toggle 按钮单独管理),保留原禁用状态
+	// 编辑模式:表单没有禁用开关和预算(由 /keys/toggle 按钮单独管理),保留原状态
 	if existing, ok := a.keys.allConfigs()[alias]; ok {
 		cfg.Disabled = existing.Disabled
+		cfg.DisableAfterReqs = existing.DisableAfterReqs
+		cfg.DisableBaseReqs = existing.DisableBaseReqs
 	}
 	if err := a.keys.setConfig(alias, cfg); err != nil {
 		renderMsg(w, "保存失败", err.Error())
@@ -905,6 +956,11 @@ func (a *adminServer) handleKeyDelete(w http.ResponseWriter, r *http.Request) {
 
 // handleKeyToggle 切换 alias 的手动禁用/启用状态(快速开关,与过期不同,可随时恢复)。
 // 禁用后:直连 /k/{alias}/ 返回 503;作为群组成员时被跳过。配置保留,不删数据。
+// 可选 form 字段 reqs 设置"自动禁用预算":
+//   - reqs 为空或 "now":立即禁用/启用(翻转;禁用时清掉未完成的预算)
+//   - reqs = 正整数 N:保持启用,设置预算——该 key 成功调用 N 次后自动禁用
+//     (替换已有预算;之前设的预算作废,基准从现在起算)
+//
 // ?back=groups 时重定向回群组页(群组成员行也有这个按钮)。
 func (a *adminServer) handleKeyToggle(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -925,11 +981,31 @@ func (a *adminServer) handleKeyToggle(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "未知的 alias: "+alias, http.StatusNotFound)
 		return
 	}
-	cfg.Disabled = !cfg.Disabled // 切换
-	if err := a.keys.setConfig(alias, cfg); err != nil {
-		renderMsg(w, "操作失败", err.Error())
-		return
+
+	reqsStr := strings.TrimSpace(r.FormValue("reqs"))
+	if n, err := strconv.ParseInt(reqsStr, 10, 64); err == nil && n > 0 {
+		// 预算模式:成功 N 次后自动禁用(基准从现在起算)
+		cfg.Disabled = false
+		cfg.DisableAfterReqs = n
+		cfg.DisableBaseReqs = a.usage.totalSuccess(alias)
+		if err := a.keys.setConfig(alias, cfg); err != nil {
+			renderMsg(w, "操作失败", err.Error())
+			return
+		}
+		log.Printf("alias 设置自动禁用预算: %s → 成功 %d 次后禁用", alias, n)
+	} else {
+		// 立即翻转禁用/启用;禁用时清掉未完成的预算(重新启用后从零开始)
+		cfg.Disabled = !cfg.Disabled
+		if cfg.Disabled {
+			cfg.DisableAfterReqs = 0
+			cfg.DisableBaseReqs = 0
+		}
+		if err := a.keys.setConfig(alias, cfg); err != nil {
+			renderMsg(w, "操作失败", err.Error())
+			return
+		}
 	}
+
 	back := r.URL.Query().Get("back")
 	if back == "groups" {
 		http.Redirect(w, r, "/__admin/groups", http.StatusSeeOther)

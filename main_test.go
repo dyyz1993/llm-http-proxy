@@ -986,6 +986,7 @@ func TestStatsByKeyView(t *testing.T) {
 	defer proxy.Close()
 
 	// 同一个 key,从"两个不同 IP"调用(用 X-Forwarded-For 模拟)
+	// 注意:必须排干响应体再 Close——否则查询 stats 可能跑在服务端 record() 之前(偶发失败)
 	for _, fakeIP := range []string{"10.0.0.1", "10.0.0.2"} {
 		req, _ := http.NewRequest("POST",
 			proxyURL(proxy.URL, backend.URL+"/api"), strings.NewReader("{}"))
@@ -995,6 +996,7 @@ func TestStatsByKeyView(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		io.Copy(io.Discard, resp.Body) // 等服务端 handler 完成统计
 		resp.Body.Close()
 	}
 
@@ -1059,6 +1061,7 @@ func TestStatsDistinctCount(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		io.Copy(io.Discard, resp.Body) // 等服务端 handler 完成统计
 		resp.Body.Close()
 	}
 

@@ -297,6 +297,7 @@ type aliasUsageStats struct {
 	WindowCached     int64 `json:"window_cached"`     // 窗口内累计缓存命中 token
 	WindowCompletion int64 `json:"window_completion"` // 窗口内累计输出 token
 	WindowSuccess    int64 `json:"window_success"`    // 窗口内成功请求数(HTTP <400)
+	TotalSuccess     int64 `json:"total_success"`     // 累计成功请求数(永不重置,给"N次后自动禁用"当基准)
 }
 
 // cacheHitRate 计算缓存命中率 = cached / (prompt + cached)。
@@ -409,6 +410,22 @@ func (us *usageStats) recordSuccess(alias string) {
 		us.data[alias] = s
 	}
 	atomic.AddInt64(&s.WindowSuccess, 1)
+	atomic.AddInt64(&s.TotalSuccess, 1)
+}
+
+// totalSuccess 返回 alias 的累计成功请求数(TotalSuccess,窗口重置不影响)。
+// 未知 alias 返回 0。
+func (us *usageStats) totalSuccess(alias string) int64 {
+	if us == nil || alias == "" {
+		return 0
+	}
+	us.mu.RLock()
+	defer us.mu.RUnlock()
+	s := us.data[alias]
+	if s == nil {
+		return 0
+	}
+	return s.TotalSuccess
 }
 
 // resetAlias 清零某个 alias(或 group)的 usage 统计。

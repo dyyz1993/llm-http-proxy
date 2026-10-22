@@ -81,6 +81,10 @@ var (
 
 	// quotaCacheInst 上游配额缓存,handleGroupRoute 用于动态排序成员。
 	quotaCacheInst *quotaCache
+
+	// keysStoreInst key 注入配置(可能为 nil,未启用 -keys 时)。
+	// maybeAutoDisable 在成功响应后用它读/写 alias 配置,触发"N 次后自动禁用"。
+	keysStoreInst *keyStore
 )
 
 func main() {
@@ -163,6 +167,7 @@ func main() {
 			log.Printf("已从 %s 加载 key 配置", *keys)
 		}
 		ks.startReloadLoop(10 * time.Second)
+		keysStoreInst = ks
 	}
 
 	// 配额缓存(只在 key 注入模式下启用,后台定时轮询 api.z.ai)
@@ -684,10 +689,14 @@ func handleGroupRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, st
 
 	// 动态排序(用量/窗口分档)之后应用置顶:置顶成员压过所有档位,
 	// 冷却中的置顶成员在下方循环里被跳过,流量自动落到其后的成员。
-	// activePins 已过滤到期/达到请求数的置顶(读时判定,自动解除)。
+	// activePins 已过滤到期/达到请求数的置顶(读时判定,自动解除);
+	// 多个置顶成员之间按请求计数轮换队头(轮询),不再固定配置顺序。
+	// 注意 offset 每请求只取一次:取两次会让轮换位固定在奇数档,2 个置顶时永不交替。
+	reqOffset := gm.nextOffset()
 	activePins, _ := gm.activePins(groupName)
+	activePins = rotateStrings(activePins, reqOffset)
 	sortedMembers := reorderPinnedFirst(activePins,
-		sortGroupMembersDynamic(cfg.Members, quotaCacheInst, gm.nextOffset()))
+		sortGroupMembersDynamic(cfg.Members, quotaCacheInst, reqOffset))
 
 	for _, member := range sortedMembers {
 		// 每次迭代重建 req.Body(上一次尝试可能已消耗)
@@ -967,8 +976,9 @@ func handleGroupWebSocket(w http.ResponseWriter, req *http.Request, ks *keyStore
 	}
 
 	// 置顶成员优先(WS 不参与动态排序,直接在配置顺序上提置顶,与 HTTP 路径行为对齐;
-	// activePins 已过滤到期/达到请求数的置顶)
+	// activePins 已过滤到期/达到请求数的置顶,多个置顶间同样轮询)
 	wsPins, _ := gm.activePins(groupName)
+	wsPins = rotateStrings(wsPins, gm.nextOffset())
 	for _, member := range reorderPinnedFirst(wsPins, cfg.Members) {
 		st := gm.memberStatus(member)
 		if st.IsCooling {
@@ -1393,6 +1403,10 @@ func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLa
 			} else if status > 0 {
 				if alias != "-" {
 					usageTracker.recordSuccess(alias)
+					// "N 次后自动禁用"预算检查(成功响应后;预算未设置时是廉价的配置读)
+					if keysStoreInst != nil {
+						maybeAutoDisable(keysStoreInst, usageTracker, alias)
+					}
 				}
 			}
 			// group 维度(groupLabel 带 "group:" 前缀,usageStats 按这个带前缀的 key 记)
