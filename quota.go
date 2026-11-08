@@ -76,15 +76,21 @@ func newQuotaCache(localAddr string) *quotaCache {
 }
 
 // fetchAll 遍历 keys.yaml 里所有 key,逐个调 api.z.ai 拉配额。
-// 跳过那些 key 明显不是有效 token 的(比如以 "sk-" 开头的模拟 key)。
-// 跳过手动禁用和认证失效(AuthDead)的 key——它们不参与转发,轮询纯属浪费
-// 并刷日志(2026-11-08 实测 ~12 个死 key 每天 401 约 1.4 万次)。
-// AuthDead 的 key 每满 24h 低频探测一次:成功则自动复活,仍失败则顺延周期。
+// 跳过:模拟 key("sk-" 开头)、手动禁用、认证失效(AuthDead,每 24h 低频探测
+// 一次,成功自动复活)、**已过期(expires)的 alias**——过期 key 转发路径早已
+// 跳过,轮询只刷噪音,且 lookup 失败导致 401 计数永远无法达到隔离阈值
+// (v2.5.72 上线后发现的第二层盲区,v2.5.73 修复)。
 func (qc *quotaCache) fetchAll(ks *keyStore, configs map[string]KeyConfig) {
 	var results []cachedQuota
 	now := time.Now()
 
-	for alias, cfg := range configs {
+	for alias := range configs {
+		// 以 lookup 为门槛(而非原始 configs):lookup 对过期 alias 返回 !ok,
+		// 与转发路径的"成员不存在或已过期"判定保持同一标准
+		cfg, ok := ks.lookup(alias)
+		if !ok {
+			continue
+		}
 		rawKey := cfg.Key
 		// 跳过明显是模拟/无效的 key(如 "sk-test"、"sk-" 等)
 		if strings.HasPrefix(rawKey, "sk-") || len(rawKey) < 20 {
