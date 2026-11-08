@@ -447,3 +447,82 @@ func TestGroupE2E_StillbornFailover(t *testing.T) {
 		t.Error("m1 开场死后应被标记冷却")
 	}
 }
+
+// ---------- 端到端:快死型开场死(秒断 EOF,不挂住) ----------
+
+// mixedFastEOFBackend sk-m1 发完 message_start+ping 后立刻返回(EOF,1s 内);
+// 其他成员正常。回归 v2.5.73 的洞:2xx 未提交被误判成功,客户端收到空 200。
+func mixedFastEOFBackend() *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl := w.(http.Flusher)
+		if strings.Contains(r.Header.Get("Authorization"), "sk-m1") {
+			fmt.Fprint(w, "event: message_start\n"+`data: {"type":"message_start"}`+"\n\n")
+			fmt.Fprint(w, "event: ping\n"+`data: {"type":"ping"}`+"\n\n")
+			fl.Flush()
+			return // 立即 EOF,不挂住
+		}
+		fmt.Fprint(w, "event: message_start\n"+`data: {"type":"message_start"}`+"\n\n")
+		fmt.Fprint(w, "event: content_block_delta\n"+`data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"from-m2"}}`+"\n\n")
+		fmt.Fprint(w, "event: message_stop\n"+`data: {"type":"message_stop"}`+"\n\n")
+		fl.Flush()
+	}))
+}
+
+func TestGroupE2E_FastEOFStillbornFailover(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short 模式跳过集成测试")
+	}
+	backend := mixedFastEOFBackend()
+	defer backend.Close()
+
+	ks := newKeyStore()
+	ks.configs["m1"] = KeyConfig{Key: "sk-m1", Header: "Authorization", Prefix: "Bearer "}
+	ks.configs["m2"] = KeyConfig{Key: "sk-m2", Header: "Authorization", Prefix: "Bearer "}
+	ks.groups = map[string]GroupConfig{
+		"pool": {Members: []string{"m1", "m2"}, OnStatus: []int{502}, Cooldown: "1m"},
+	}
+	ks.groupMgr.updateGroups(ks.groups)
+	if settingsMgr == nil {
+		settingsMgr = newSettingsManager()
+	}
+	stats := newStatsCollector()
+	us := newUsageStats()
+	mux := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if strings.HasPrefix(req.URL.Path, "/g/") {
+			handleGroupRoutePrefix(w, req, ks, stats, us)
+			return
+		}
+		http.Error(w, "no route", 500)
+	})
+	proxy := httptest.NewServer(mux)
+	defer proxy.Close()
+
+	resp, err := noCompressClient.Get(proxy.URL + "/g/pool/" + backend.URL + "/sse")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	sc := bufio.NewScanner(resp.Body)
+	var got []string
+	for sc.Scan() {
+		line := sc.Text()
+		if strings.HasPrefix(line, "data: ") {
+			got = append(got, line)
+		}
+	}
+	if err := sc.Err(); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(got, "\n")
+	if !strings.Contains(joined, "from-m2") {
+		t.Errorf("快死型开场死应换人到 m2,客户端应收到 m2 内容,得到: %q", joined)
+	}
+	if strings.Contains(joined, `"type":"ping"`) {
+		t.Errorf("m1 的开场残骸不应到达客户端: %s", joined)
+	}
+	if !ks.groupMgr.memberStatus("m1").IsCooling {
+		t.Error("m1 空流后应被标记冷却")
+	}
+}

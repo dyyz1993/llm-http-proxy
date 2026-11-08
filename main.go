@@ -826,6 +826,17 @@ func handleGroupRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, st
 				log.Printf("group 成员返回 %d → 换人: group=%s member=%s", rec.status, groupName, member)
 				goto nextMember
 			case rec.status >= 200 && rec.status < 400:
+				// 快死型开场死:2xx SSE 但首个内容事件到来前上游就 EOF——
+				// hold 从未放行、客户端什么都没收到。不能当成功返回
+				// (否则客户端拿到空 200 且不换人),立即换下一个成员。
+				// 比 15s stall 更快:秒断型 1~9s 的 EOF 在此直接触发。
+				// 非 SSE 响应不走 hold,不受此判定影响。
+				if rec.holdActive && !rec.committed {
+					gm.markCooldownWithDuration(member, groupName, 502, 30*time.Second)
+					log.Printf("group 成员空流(2xx 未提交即 EOF)→ 换人: group=%s member=%s",
+						groupName, member)
+					goto nextMember
+				}
 				// 成功 → 已流式透传给客户端
 				gm.markSuccess(member, rec.status)
 				return
