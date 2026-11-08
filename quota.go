@@ -12,6 +12,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"sort"
@@ -96,7 +97,7 @@ func (qc *quotaCache) fetchAll(ks *keyStore, configs map[string]KeyConfig) {
 			continue
 		}
 
-		data := qc.fetchOne(alias, rawKey)
+		data := qc.fetchOne(ks, alias, rawKey)
 		if data != nil {
 			if cfg.AuthDead {
 				// 隔离 key 探测成功 → 自动复活
@@ -226,7 +227,9 @@ func (qc *quotaCache) probeModelViaProxy(alias, model string) {
 }
 
 // fetchOne 拉取单个别名的配额。
-func (qc *quotaCache) fetchOne(alias, rawKey string) *cachedQuota {
+// ks 非 nil 时,"身份验证失败"类响应会计入 401 自动隔离
+// (轮询直连不经过转发路径,AuthDead 只能从这里触发,见 auth_dead.go)。
+func (qc *quotaCache) fetchOne(ks *keyStore, alias, rawKey string) *cachedQuota {
 	req, err := http.NewRequest(http.MethodGet,
 		"https://api.z.ai/api/monitor/usage/quota/limit", nil)
 	if err != nil {
@@ -242,12 +245,21 @@ func (qc *quotaCache) fetchOne(alias, rawKey string) *cachedQuota {
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == 401 {
+		// HTTP 层 401:读 body 判定语义(decode 失败也不影响计数)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		markAuth401(ks, alias, body)
+		log.Printf("配额拉取 401 [%s]: %s", alias, strings.TrimSpace(string(body)))
+		return nil
+	}
+
 	var qr quotaResponse
 	if err := json.NewDecoder(resp.Body).Decode(&qr); err != nil {
 		log.Printf("配额解析失败 [%s]: %v", alias, err)
 		return nil
 	}
 	if !qr.Success || qr.Data == nil {
+		markAuth401Msg(ks, alias, qr.Msg)
 		log.Printf("配额接口返回失败 [%s]: %s", alias, qr.Msg)
 		return nil
 	}

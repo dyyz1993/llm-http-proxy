@@ -178,3 +178,45 @@ func TestComputeMemberHealth_AuthDead(t *testing.T) {
 		t.Errorf("隔离中的 key 健康标签应为 auth_dead,得到 %q", got)
 	}
 }
+
+// ---------- markAuth401Msg: 配额轮询直连路径 ----------
+
+func TestMarkAuth401Msg_IsolatesAtThreshold(t *testing.T) {
+	ks := newKeyStore()
+	ks.configs["poll-dead"] = KeyConfig{Key: "fake-zai-key-1234567890"}
+
+	// 模拟配额轮询的 qr.Msg(直连路径,不经过转发钩子)
+	markAuth401Msg(ks, "poll-dead", "身份验证失败。")
+	cfg, _ := ks.lookup("poll-dead")
+	if cfg.AuthDead {
+		t.Fatal("第 1 次不应隔离")
+	}
+	markAuth401Msg(ks, "poll-dead", "身份验证失败。")
+	cfg, _ = ks.lookup("poll-dead")
+	if !cfg.AuthDead {
+		t.Fatal("第 2 次应隔离(轮询盲区修复)")
+	}
+}
+
+func TestMarkAuth401Msg_NonAuthMsgNotCounted(t *testing.T) {
+	ks := newKeyStore()
+	ks.configs["k"] = KeyConfig{Key: "fake-zai-key-1234567890"}
+	markAuth401Msg(ks, "k", "余额不足")
+	markAuth401Msg(ks, "k", "余额不足")
+	cfg, _ := ks.lookup("k")
+	if cfg.AuthDead {
+		t.Error("非身份验证语义的消息不应计数")
+	}
+}
+
+func TestMarkAuth401_SharedCounter(t *testing.T) {
+	// 转发路径和轮询路径共用同一计数器:各来一次也应达到阈值
+	ks := newKeyStore()
+	ks.configs["k"] = KeyConfig{Key: "fake-zai-key-1234567890"}
+	markAuth401(ks, "k", []byte(`{"error":{"code":"1000"}}`))
+	markAuth401Msg(ks, "k", "身份验证失败。")
+	cfg, _ := ks.lookup("k")
+	if !cfg.AuthDead {
+		t.Error("两条计数入口应共用计数(1+1=2 达阈值)")
+	}
+}

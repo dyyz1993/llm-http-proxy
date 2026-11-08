@@ -70,6 +70,21 @@ func markAuth401(ks *keyStore, alias string, body []byte) {
 	if !isAuthVerificationFailure(body) {
 		return
 	}
+	countAuthFailure(ks, alias)
+}
+
+// markAuth401Msg 配额轮询直连接口(qc.fetchOne,不经过转发路径)时调用:
+// 用响应 msg 判定"身份验证失败"语义并计数。转发路径钩子看不到直连请求,
+// 没有这条通道死 key 永远不会被隔离(2026-11-08 v2.5.71 部署后发现的盲区)。
+func markAuth401Msg(ks *keyStore, alias, msg string) {
+	if ks == nil || alias == "" || !strings.Contains(msg, "身份验证") {
+		return
+	}
+	countAuthFailure(ks, alias)
+}
+
+// countAuthFailure 计数并按阈值隔离(所有 401 计数入口的公共尾部)。
+func countAuthFailure(ks *keyStore, alias string) {
 	ks.mu.Lock()
 	ks.auth401Count[alias]++
 	n := ks.auth401Count[alias]
