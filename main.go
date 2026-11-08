@@ -222,7 +222,7 @@ func main() {
 			}
 			// 可选 refresh=1 强制刷新
 			if req.URL.Query().Get("refresh") == "1" {
-				quotaCacheInst.fetchAll(ks.allConfigs())
+				quotaCacheInst.fetchAll(ks, ks.allConfigs())
 			}
 			entries := quotaCacheInst.getAll()
 			// 可选 alias=xxx 过滤
@@ -256,7 +256,7 @@ func main() {
 				Store: ks,
 			}
 			runChecks(w, passthroughChecks, ctx)
-			newProxyHandler(stats, nil, "", "", ctx.ImageFilter, ctx.TokenMultipliers, ctx.RetryConfig).ServeHTTP(w, req)
+			newProxyHandler(stats, nil, "", "", ctx.ImageFilter, ctx.TokenMultipliers, ctx.RetryConfig, nil).ServeHTTP(w, req)
 		}
 	})
 
@@ -603,7 +603,7 @@ func handleKeyRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, stat
 	// 全部通过,转发
 	req.RequestURI = "/" + target
 	newProxyHandler(stats, ctx.HeadersToInject, ctx.StatLabel, "",
-		ctx.ImageFilter, ctx.TokenMultipliers, ctx.RetryConfig).ServeHTTP(w, req)
+		ctx.ImageFilter, ctx.TokenMultipliers, ctx.RetryConfig, nil).ServeHTTP(w, req)
 } // handleGroupRoutePrefix 解析 /g/{group}/https://target 并交给 handleGroupRoute。
 func handleGroupRoutePrefix(w http.ResponseWriter, req *http.Request, ks *keyStore, stats *statsCollector, us *usageStats) {
 	raw := strings.TrimPrefix(req.RequestURI, "/")
@@ -727,6 +727,14 @@ func handleGroupRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, st
 			continue
 		}
 
+		// 认证失效隔离中的成员跳过(连续 401 自动隔离,见 auth_dead.go;
+		// 隔离满 24h 配额轮询会低频探测,成功自动复活,管理界面也可手动复活)
+		if memberCfg.AuthDead {
+			log.Printf("group 跳过认证失效成员: group=%s member=%s (隔离于 %s)",
+				groupName, member, memberCfg.AuthDeadAt)
+			continue
+		}
+
 		// 拦截器链检查(禁止时段/限额/限流/白名单)
 		ctx := &CheckContext{
 			Alias:      member,
@@ -755,9 +763,12 @@ func handleGroupRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, st
 		}
 
 		// 拦截器通过 → 转发请求。rec 是流式 writer,SSE 边收边 flush。
-		// 对非 429/401 的可换人状态码(如 502/500),先重试一次再冷却。
-		// 429(额度满)和 401(key 失效)是确定性的,不重试。
+		// 对非 429/401 的可换人状态码(如 502/500),失败足够快(秒级)才重试同一成员;
+		// 慢失败(上游长挂几十秒到几分钟才断,2026-11-08 观测到 3m46s)直接换人,
+		// 不再把客户端的等待时间翻倍。429(额度满)和 401(key 失效)是确定性的,不重试。
 		maxTriesForMember := 1
+		var attemptStart time.Time
+		var sg *streamGuard
 		for tryNum := 0; tryNum < maxTriesForMember; tryNum++ {
 			// 每次重试重建 body
 			if tryNum > 0 && bodyBuf != nil {
@@ -766,8 +777,20 @@ func handleGroupRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, st
 			}
 			req.RequestURI = "/" + target
 			rec := newGroupWriter(w, cfg.OnStatus)
+			sg = newStreamGuard(streamFirstContentStall)
+			sg.holder = rec
+			attemptStart = time.Now()
 			newProxyHandler(stats, ctx.HeadersToInject, ctx.StatLabel, ctx.GroupLabel,
-				ctx.ImageFilter, ctx.TokenMultipliers, ctx.RetryConfig).ServeHTTP(rec, req)
+				ctx.ImageFilter, ctx.TokenMultipliers, ctx.RetryConfig, sg).ServeHTTP(rec, req)
+
+			// 开场死:上游发了响应头(甚至 message_start+ping)但 stall 内没有内容
+			// 事件 → guard 已取消上游,rec 未 commit,客户端无感知,直接换人。
+			if sg.abortedNow() {
+				gm.markCooldownWithDuration(member, groupName, 502, 30*time.Second)
+				log.Printf("group 开场死(>%v 无内容事件)→ 换人: group=%s member=%s",
+					streamFirstContentStall, groupName, member)
+				goto nextMember
+			}
 
 			// 判定结果
 			switch {
@@ -778,9 +801,10 @@ func handleGroupRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, st
 				goto nextMember
 			case rec.intercepted:
 				// 命中 on_status → 判断是否应该重试
-				if rec.status != 429 && rec.status != 401 && tryNum == 0 {
-					// 非确定性错误(502/500/503等)→ 重试一次同一个成员
-					log.Printf("group 成员返回 %d,重试: group=%s member=%s", rec.status, groupName, member)
+				if shouldRetrySameMember(rec.status, tryNum, time.Since(attemptStart)) {
+					// 非确定性错误且失败够快 → 重试一次同一个成员
+					log.Printf("group 成员返回 %d(快速失败 %.1fs),重试: group=%s member=%s",
+						rec.status, time.Since(attemptStart).Seconds(), groupName, member)
 					maxTriesForMember = 2
 					continue
 				}
@@ -1019,7 +1043,7 @@ func handleGroupWebSocket(w http.ResponseWriter, req *http.Request, ks *keyStore
 		// 直接传真实 w(不包 groupWriter),WS 握手 + 双向隧道需要原始 conn。
 		req.RequestURI = "/" + target
 		newProxyHandler(stats, ctx.HeadersToInject, ctx.StatLabel, ctx.GroupLabel,
-			ctx.ImageFilter, ctx.TokenMultipliers, ctx.RetryConfig).ServeHTTP(w, req)
+			ctx.ImageFilter, ctx.TokenMultipliers, ctx.RetryConfig, nil).ServeHTTP(w, req)
 		return
 	}
 
@@ -1054,6 +1078,14 @@ type groupWriter struct {
 	committed      bool                // 是否已向底层 w 提交 header
 	intercepted    bool                // 是否进入拦截模式(后续 Write 全丢弃)
 	interceptBody  []byte              // 拦截时记录的前 256 字节(用于判断错误类型)
+	// 开场保持(hold):2xx SSE 响应延迟 commit,等首个内容事件再放行。
+	// z.ai 开场死(message_start+ping 后 worker 挂掉)时 holdBuf 被丢弃、
+	// 成员换人,客户端完全收不到残缺流(2026-11-08 之前这类流会带着
+	// 半截内容 commit 给客户端,既救不了也退不掉)。
+	holdChecked  bool   // 已做过"是否 SSE"判定(WriteHeader 只来一次以上时防重复)
+	holdActive   bool   // 判定为 SSE 2xx,启用 hold
+	holdReleased bool   // 已放行(或拦截终止,不再 hold)
+	holdBuf      []byte // 放行前缓存的字节(message_start/ping 等开场事件)
 }
 
 func newGroupWriter(w http.ResponseWriter, switchStatuses []int) *groupWriter {
@@ -1071,6 +1103,13 @@ func (g *groupWriter) Header() http.Header {
 func (g *groupWriter) WriteHeader(code int) {
 	if g.status == 0 {
 		g.status = code
+	}
+	// 首次判定:2xx 且 SSE → 启用 hold(见 Write)。非 SSE 保持原行为(首写即 commit)。
+	if !g.holdChecked {
+		g.holdChecked = true
+		if code >= 200 && code < 300 && isSSEResponse(g.header) {
+			g.holdActive = true
+		}
 	}
 	// 不立即 commit:由第一次 Write 决定。
 }
@@ -1106,6 +1145,21 @@ func (g *groupWriter) commit() {
 }
 
 func (g *groupWriter) Write(p []byte) (int, error) {
+	// hold 模式:首个内容事件到来前只缓存(streamGuard 在后台判定开场死)。
+	// 拦截判定照常进行:status 在 on_status(如 401)时丢弃并记录错误体。
+	if g.holdActive && !g.holdReleased {
+		if !g.committed && g.shouldIntercept() {
+			g.intercepted = true
+			if len(g.interceptBody) < 256 {
+				g.interceptBody = append(g.interceptBody, p[:min(256, len(p))]...)
+			}
+			g.holdBuf = nil
+			g.holdReleased = true // 拦截即终态
+			return len(p), nil    // 丢弃
+		}
+		g.holdBuf = append(g.holdBuf, p...)
+		return len(p), nil
+	}
 	if !g.committed {
 		// 第一次 Write:决定 commit 还是拦截
 		if g.shouldIntercept() {
@@ -1122,6 +1176,28 @@ func (g *groupWriter) Write(p []byte) (int, error) {
 		return len(p), nil // 丢弃
 	}
 	return g.w.Write(p) // 流式透传
+}
+
+// releaseHold 放行 hold 缓存:commit → 回放缓存字节 → flush。
+// 由 streamGuard 在见到首个内容事件时调用(见 stream_watch.go)。
+// 拦截态/未启用 hold/重复调用均为 no-op。
+func (g *groupWriter) releaseHold() {
+	if !g.holdActive || g.holdReleased {
+		return
+	}
+	g.holdReleased = true
+	if g.intercepted {
+		g.holdBuf = nil
+		return
+	}
+	g.commit()
+	if len(g.holdBuf) > 0 {
+		g.w.Write(g.holdBuf)
+		g.holdBuf = nil
+	}
+	if f, ok := g.w.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 // Flush 实现 http.Flusher。committed 后透传给底层 w,保证 SSE 边收边 flush。
@@ -1342,6 +1418,11 @@ var sharedTransport = &http.Transport{
 	DisableCompression:  true, // 不偷偷加 Accept-Encoding: gzip
 	MaxIdleConnsPerHost: 20,   // 每个 host 最多保持 20 条空闲连接
 	IdleConnTimeout:     90 * time.Second,
+	// 长挂保护:上游收下连接但迟迟不发响应头(2026-11-08 观测到挂 3m46s 后断开,
+	// 客户端干等)。60s 拿不到响应头即失败 → group 换人。
+	// 只管"等多久拿到响应头",流开始后的传输不受此影响
+	// (观测到 29 分钟的 SSE 长流正常完成)。
+	ResponseHeaderTimeout: 60 * time.Second,
 }
 var sharedClient = &http.Client{Transport: sharedTransport}
 
@@ -1352,7 +1433,7 @@ var sharedClient = &http.Client{Transport: sharedTransport}
 // imageFilter 是 image_url 过滤规则,非空时在转发前过滤请求 body。
 // tokenMultipliers 是 Token 用量乘数规则,在提取 usage 后应用。
 // retryCfg 是上游重试配置(零值=不重试)。
-func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLabel, groupLabel string, imageFilter []ImageFilterRule, tokenMultipliers []TokenMultiplierRule, retryCfg RetryConfig) http.Handler {
+func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLabel, groupLabel string, imageFilter []ImageFilterRule, tokenMultipliers []TokenMultiplierRule, retryCfg RetryConfig, sg *streamGuard) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		raw := strings.TrimPrefix(req.RequestURI, "/")
 		if raw == "" || !strings.Contains(raw, "://") {
@@ -1406,6 +1487,8 @@ func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLa
 					// "N 次后自动禁用"预算检查(成功响应后;预算未设置时是廉价的配置读)
 					if keysStoreInst != nil {
 						maybeAutoDisable(keysStoreInst, usageTracker, alias)
+						// 成功响应清 401 计数;隔离中却成功 → 自动复活(见 auth_dead.go)
+						noteAuthSuccess(keysStoreInst, alias)
 					}
 				}
 			}
@@ -1443,7 +1526,17 @@ func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLa
 				imageFiltered = modified
 			}
 		}
-		outReq, err := http.NewRequestWithContext(req.Context(), req.Method, raw, bodyReader)
+		// guard 存在时用可取消的派生上下文:开场死超时只掐上游请求,不影响客户端请求。
+		// 非流式/SSE 之外的场景 guard 从不武装定时器,零行为差异。
+		buildCtx := req.Context()
+		if sg != nil {
+			var cancel context.CancelFunc
+			buildCtx, cancel = context.WithCancel(req.Context())
+			sg.arm(cancel)
+			defer cancel()
+		}
+
+		outReq, err := http.NewRequestWithContext(buildCtx, req.Method, raw, bodyReader)
 		if err != nil {
 			http.Error(rec, "目标 URL 无法解析: "+err.Error(), http.StatusBadRequest)
 			recordStats(rec.status)
@@ -1470,7 +1563,7 @@ func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLa
 		// 用 buffered body 创建初始请求(替代已消耗的 outReq)
 		if bodyBuf != nil {
 			bodyReader := io.NopCloser(bytes.NewReader(bodyBuf))
-			newReq, err := http.NewRequestWithContext(req.Context(), req.Method, raw, bodyReader)
+			newReq, err := http.NewRequestWithContext(buildCtx, req.Method, raw, bodyReader)
 			if err == nil {
 				newReq.Header = outReq.Header.Clone()
 				newReq.ContentLength = outReq.ContentLength
@@ -1494,7 +1587,7 @@ func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLa
 			// 重试时重建请求(首次就在上面建好了)
 			if attempt > 0 {
 				bodyReader := io.NopCloser(bytes.NewReader(bodyBuf))
-				newReq, err := http.NewRequestWithContext(req.Context(), req.Method, raw, bodyReader)
+				newReq, err := http.NewRequestWithContext(buildCtx, req.Method, raw, bodyReader)
 				if err != nil {
 					lastErr = err
 					break
@@ -1605,6 +1698,7 @@ func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLa
 		const maxCaptureFull = 4 * 1024 * 1024 // 非 SSE:最多 4MB
 		const slidingWindow = 512 * 1024       // SSE:只保留最后 512KB
 		var sseFirstChunk []byte               // SSE 第一个 chunk(含 model)
+		var streamedBytes int64                // 实际流过的响应体字节数(终止事件估算用)
 
 		if f, ok := rec.ResponseWriter.(http.Flusher); ok {
 			buf := make([]byte, 32*1024)
@@ -1612,6 +1706,13 @@ func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLa
 			for {
 				n, rerr := resp.Body.Read(buf)
 				if n > 0 {
+					// SSE + group 模式:先喂 guard(判定开场死/放行 hold),
+					// 再写响应。feed 可能让 groupWriter releaseHold(回放缓存字节),
+					// 所以必须在 Write 之前——保证字节顺序正确。
+					if sg != nil && isStream {
+						sg.feed(buf[:n])
+					}
+					streamedBytes += int64(n)
 					rec.Write(buf[:n])
 					f.Flush()
 					if isStream {
@@ -1643,6 +1744,10 @@ func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLa
 			for {
 				n, rerr := resp.Body.Read(buf)
 				if n > 0 {
+					if sg != nil && isStream {
+						sg.feed(buf[:n])
+					}
+					streamedBytes += int64(n)
 					rec.Write(buf[:n])
 					if isStream {
 						if chunkCount == 0 {
@@ -1665,10 +1770,45 @@ func newProxyHandler(stats *statsCollector, injectHeaders http.Header, statKeyLa
 			}
 		}
 
+		// 开场死:guard 已取消上游且从未 commit → 不注入、不解析 usage、
+		// 照常记录统计后返回(group 循环负责换人)。
+		if sg != nil && sg.abortedNow() {
+			recordStats(rec.status)
+			recordUsageResult(0) // 0 = 不计成功也不计失败(成员是否可用由换人逻辑判定)
+			logRequest(ip, statKey, req.Method, targetHost, rec.status, time.Since(start), ttfb, isStream, usageData{}, false)
+			return
+		}
+
+		// SSE 终止事件合成:内容完整缺收尾 → 补 message_delta+message_stop(A 类,
+		// 已到手的答案不再作废);内容中断 → 注入 error 事件(C 类,客户端立即
+		// 明确失败并重试,而不是傻等 EOF)。见 stream_watch.go sseTerminalEvents。
+		if isStream {
+			var ev []byte
+			if sg != nil {
+				ev = sg.terminalEvents(int(streamedBytes))
+			}
+			if len(ev) > 0 {
+				rec.Write(ev)
+				if f, ok := rec.ResponseWriter.(http.Flusher); ok {
+					f.Flush()
+				}
+				// 合成事件并入 captureBuf,让 extractUsage 解析到估算 usage
+				captureBuf = append(captureBuf, ev...)
+				log.Printf("SSE 合成终止事件: alias=%s streamed=%d bytes", statKey, streamedBytes)
+			}
+		}
+
 		// SSE:把第一个 chunk(含 model)拼到 captureBuf 前面,
 		// 这样 extractUsage 既能拿到 model 又能拿到尾部 usage
 		if isStream && len(sseFirstChunk) > 0 {
 			captureBuf = append(sseFirstChunk, captureBuf...)
+		}
+
+		// 401 身份验证失败计数 → 连续 2 次自动隔离(auth_dead.go)。
+		// 放在流转发之后:此时 captureBuf 已含完整错误体(group 拦截路径的
+		// captureBuf 同样在 Write 被丢弃前完成采集——成员维度统计不受影响)。
+		if resp.StatusCode == 401 && strings.HasPrefix(statKey, "key:") {
+			markAuth401(keysStoreInst, strings.TrimPrefix(statKey, "key:"), captureBuf)
 		}
 
 		// 解析 token 用量(此时响应已全部转发给客户端,不增加延迟)。

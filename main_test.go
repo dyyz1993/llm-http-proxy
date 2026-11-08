@@ -119,7 +119,7 @@ func startProxy(t *testing.T) *httptest.Server {
 			statsHandler(stats, nil).ServeHTTP(w, req)
 			return
 		}
-		newProxyHandler(stats, nil, "", "", nil, nil, RetryConfig{}).ServeHTTP(w, req)
+		newProxyHandler(stats, nil, "", "", nil, nil, RetryConfig{}, nil).ServeHTTP(w, req)
 	})
 	return httptest.NewServer(mux)
 }
@@ -148,7 +148,7 @@ func startProxyWithKeys(t *testing.T, ks *keyStore) *httptest.Server {
 			handleKeyRoute(w, req, ks, stats, us)
 			return
 		default:
-			newProxyHandler(stats, nil, "", "", nil, nil, RetryConfig{}).ServeHTTP(w, req)
+			newProxyHandler(stats, nil, "", "", nil, nil, RetryConfig{}, nil).ServeHTTP(w, req)
 		}
 	})
 	return httptest.NewServer(mux)
@@ -185,7 +185,7 @@ func startProxyWithAdmin(t *testing.T, password string, ks *keyStore) *httptest.
 			statsHandler(stats, authFn).ServeHTTP(w, req)
 			return
 		default:
-			newProxyHandler(stats, nil, "", "", nil, nil, RetryConfig{}).ServeHTTP(w, req)
+			newProxyHandler(stats, nil, "", "", nil, nil, RetryConfig{}, nil).ServeHTTP(w, req)
 		}
 	})
 	return httptest.NewServer(mux)
@@ -736,7 +736,7 @@ func TestStatsRecordAndAggregate(t *testing.T) {
 			statsHandler(stats, nil).ServeHTTP(w, req)
 			return
 		}
-		newProxyHandler(stats, nil, "", "", nil, nil, RetryConfig{}).ServeHTTP(w, req)
+		newProxyHandler(stats, nil, "", "", nil, nil, RetryConfig{}, nil).ServeHTTP(w, req)
 	})
 	proxy := httptest.NewServer(mux)
 	defer proxy.Close()
@@ -980,7 +980,7 @@ func TestStatsByKeyView(t *testing.T) {
 			statsHandler(stats, alwaysAuth).ServeHTTP(w, req)
 			return
 		}
-		newProxyHandler(stats, nil, "", "", nil, nil, RetryConfig{}).ServeHTTP(w, req)
+		newProxyHandler(stats, nil, "", "", nil, nil, RetryConfig{}, nil).ServeHTTP(w, req)
 	})
 	proxy := httptest.NewServer(mux)
 	defer proxy.Close()
@@ -1041,7 +1041,7 @@ func TestStatsDistinctCount(t *testing.T) {
 			statsHandler(stats, alwaysAuth).ServeHTTP(w, req)
 			return
 		}
-		newProxyHandler(stats, nil, "", "", nil, nil, RetryConfig{}).ServeHTTP(w, req)
+		newProxyHandler(stats, nil, "", "", nil, nil, RetryConfig{}, nil).ServeHTTP(w, req)
 	})
 	proxy := httptest.NewServer(mux)
 	defer proxy.Close()
@@ -1108,7 +1108,7 @@ func TestStatsFormatTable(t *testing.T) {
 			statsHandler(stats, nil).ServeHTTP(w, req)
 			return
 		}
-		newProxyHandler(stats, nil, "", "", nil, nil, RetryConfig{}).ServeHTTP(w, req)
+		newProxyHandler(stats, nil, "", "", nil, nil, RetryConfig{}, nil).ServeHTTP(w, req)
 	})
 	proxy := httptest.NewServer(mux)
 	defer proxy.Close()
@@ -2598,7 +2598,7 @@ func TestKeyRouteQuotaReqsExceeded(t *testing.T) {
 			handleKeyRoute(w, req, ks, stats, us)
 			return
 		}
-		newProxyHandler(stats, nil, "", "", nil, nil, RetryConfig{}).ServeHTTP(w, req)
+		newProxyHandler(stats, nil, "", "", nil, nil, RetryConfig{}, nil).ServeHTTP(w, req)
 	}))
 	defer proxy.Close()
 
@@ -2656,7 +2656,7 @@ func TestKeyRouteQuotaTokensExceeded(t *testing.T) {
 			handleKeyRoute(w, req, ks, stats, us)
 			return
 		}
-		newProxyHandler(stats, nil, "", "", nil, nil, RetryConfig{}).ServeHTTP(w, req)
+		newProxyHandler(stats, nil, "", "", nil, nil, RetryConfig{}, nil).ServeHTTP(w, req)
 	}))
 	defer proxy.Close()
 
@@ -2727,7 +2727,7 @@ func TestKeyRouteQuotaNoUsageTracker(t *testing.T) {
 			handleKeyRoute(w, req, ks, stats, nil)
 			return
 		}
-		newProxyHandler(stats, nil, "", "", nil, nil, RetryConfig{}).ServeHTTP(w, req)
+		newProxyHandler(stats, nil, "", "", nil, nil, RetryConfig{}, nil).ServeHTTP(w, req)
 	}))
 	defer proxy.Close()
 
@@ -2769,7 +2769,7 @@ func TestKeyRouteQuotaRetryAfter(t *testing.T) {
 			handleKeyRoute(w, req, ks, stats, us)
 			return
 		}
-		newProxyHandler(stats, nil, "", "", nil, nil, RetryConfig{}).ServeHTTP(w, req)
+		newProxyHandler(stats, nil, "", "", nil, nil, RetryConfig{}, nil).ServeHTTP(w, req)
 	}))
 	defer proxy.Close()
 
@@ -2821,7 +2821,7 @@ func TestKeyRouteRecordSuccessOnSuccess(t *testing.T) {
 			handleKeyRoute(w, req, ks, stats, us)
 			return
 		}
-		newProxyHandler(stats, nil, "", "", nil, nil, RetryConfig{}).ServeHTTP(w, req)
+		newProxyHandler(stats, nil, "", "", nil, nil, RetryConfig{}, nil).ServeHTTP(w, req)
 	}))
 	defer proxy.Close()
 
@@ -2875,7 +2875,7 @@ func TestKeyRouteRecordErrorOnFailure(t *testing.T) {
 			handleKeyRoute(w, req, ks, stats, us)
 			return
 		}
-		newProxyHandler(stats, nil, "", "", nil, nil, RetryConfig{}).ServeHTTP(w, req)
+		newProxyHandler(stats, nil, "", "", nil, nil, RetryConfig{}, nil).ServeHTTP(w, req)
 	}))
 	defer proxy.Close()
 

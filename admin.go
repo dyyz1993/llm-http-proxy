@@ -155,6 +155,7 @@ func (a *adminServer) handler() http.Handler {
 	mux.HandleFunc("/__admin/keys/quickadd", a.handleKeyQuickAdd) // JSON+CORS，独立鉴权
 	mux.HandleFunc("/__admin/keys/delete", a.requireAuth(a.handleKeyDelete))
 	mux.HandleFunc("/__admin/keys/toggle", a.requireAuth(a.handleKeyToggle))
+	mux.HandleFunc("/__admin/keys/authrevive", a.requireAuth(a.handleKeyAuthRevive))
 	mux.HandleFunc("/__admin/stats", a.requireAuth(a.handleStats))
 	mux.HandleFunc("/__admin/daily", a.requireAuth(a.handleDaily))
 	mux.HandleFunc("/__admin/logs", a.requireAuth(a.handleLogs))
@@ -1014,6 +1015,41 @@ func (a *adminServer) handleKeyToggle(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/__admin/keys", http.StatusSeeOther)
 }
 
+// handleKeyAuthRevive 复活"认证失效"隔离中的 key(401 自动隔离的手动恢复入口)。
+// 适用于:给该 alias 换了新 key,或确认上游账号已恢复。清除隔离标记与 401 计数,
+// 立即重新参与 group 转发和配额轮询。
+// ?back=groups 时重定向回群组页(群组成员行也有此按钮)。
+func (a *adminServer) handleKeyAuthRevive(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if a.keys == nil {
+		http.Error(w, "key 模式未启用", http.StatusBadRequest)
+		return
+	}
+	alias := r.URL.Query().Get("alias")
+	if alias == "" {
+		http.Error(w, "缺少 alias", http.StatusBadRequest)
+		return
+	}
+	if _, ok := a.keys.allConfigs()[alias]; !ok {
+		http.Error(w, "未知的 alias: "+alias, http.StatusNotFound)
+		return
+	}
+	if err := clearAuthDead(a.keys, alias); err != nil {
+		renderMsg(w, "操作失败", err.Error())
+		return
+	}
+
+	back := r.URL.Query().Get("back")
+	if back == "groups" {
+		http.Redirect(w, r, "/__admin/groups", http.StatusSeeOther)
+		return
+	}
+	http.Redirect(w, r, "/__admin/keys", http.StatusSeeOther)
+}
+
 // handleKeyQuickAdd 是 JSON 版快速创建 alias 的端点，给外部工具(如时间轴页面)调用。
 // 与 handleKeyNew 的区别:
 //   - 接收 JSON 而非 form data
@@ -1401,6 +1437,11 @@ func computeMemberHealth(ks *keyStore, us *usageStats, alias string) string {
 	// 手动禁用(优先于其他状态展示——它压过一切,群组也会跳过)
 	if cfg.Disabled {
 		return "disabled"
+	}
+
+	// 认证失效自动隔离(连续 401;群组与配额轮询均跳过,管理界面可复活)
+	if cfg.AuthDead {
+		return "auth_dead"
 	}
 
 	// 检查限额

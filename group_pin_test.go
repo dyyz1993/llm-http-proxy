@@ -21,12 +21,13 @@ func TestReorderPinnedFirst_Basic(t *testing.T) {
 	}
 }
 
-// TestReorderPinnedFirst_MultiplePinned 多个置顶成员按原列表相对顺序排前面。
+// TestReorderPinnedFirst_MultiplePinned 多个置顶成员按 pinned 列表自身顺序排前面
+// (调用方在传入前可能已做轮换,函数必须保持该顺序,不能按 members 顺序洗掉)。
 func TestReorderPinnedFirst_MultiplePinned(t *testing.T) {
 	got := reorderPinnedFirst([]string{"d", "b"}, []string{"a", "b", "c", "d"})
-	// pinned 里写的是 [d, b],但成员列表里 b 在 d 前面 → 前缀应为 [b, d]
-	if len(got) != 4 || got[0] != "b" || got[1] != "d" || got[2] != "a" || got[3] != "c" {
-		t.Errorf("多个置顶按原列表顺序, got %v", got)
+	// 头部按 pinned 顺序 [d, b],其余按 members 顺序 [a, c]
+	if len(got) != 4 || got[0] != "d" || got[1] != "b" || got[2] != "a" || got[3] != "c" {
+		t.Errorf("多个置顶应按 pinned 列表顺序, got %v", got)
 	}
 }
 

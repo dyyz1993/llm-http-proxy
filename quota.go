@@ -76,8 +76,12 @@ func newQuotaCache(localAddr string) *quotaCache {
 
 // fetchAll 遍历 keys.yaml 里所有 key,逐个调 api.z.ai 拉配额。
 // 跳过那些 key 明显不是有效 token 的(比如以 "sk-" 开头的模拟 key)。
-func (qc *quotaCache) fetchAll(configs map[string]KeyConfig) {
+// 跳过手动禁用和认证失效(AuthDead)的 key——它们不参与转发,轮询纯属浪费
+// 并刷日志(2026-11-08 实测 ~12 个死 key 每天 401 约 1.4 万次)。
+// AuthDead 的 key 每满 24h 低频探测一次:成功则自动复活,仍失败则顺延周期。
+func (qc *quotaCache) fetchAll(ks *keyStore, configs map[string]KeyConfig) {
 	var results []cachedQuota
+	now := time.Now()
 
 	for alias, cfg := range configs {
 		rawKey := cfg.Key
@@ -85,10 +89,24 @@ func (qc *quotaCache) fetchAll(configs map[string]KeyConfig) {
 		if strings.HasPrefix(rawKey, "sk-") || len(rawKey) < 20 {
 			continue
 		}
+		if cfg.Disabled {
+			continue
+		}
+		if cfg.AuthDead && !shouldProbeAuthDead(cfg, now) {
+			continue
+		}
 
 		data := qc.fetchOne(alias, rawKey)
 		if data != nil {
+			if cfg.AuthDead {
+				// 隔离 key 探测成功 → 自动复活
+				clearAuthDead(ks, alias)
+				log.Printf("认证失效 key 配额探测成功,自动复活: %s", alias)
+			}
 			results = append(results, *data)
+		} else if cfg.AuthDead {
+			// 仍失败:刷新隔离时刻,下一个 24h 周期再探
+			touchAuthDead(ks, alias)
 		}
 	}
 
@@ -123,6 +141,10 @@ func (qc *quotaCache) probeAndRefresh(ks *keyStore) {
 		if strings.HasPrefix(rawKey, "sk-") || len(rawKey) < 20 {
 			continue
 		}
+		// 手动禁用 / 认证失效隔离中的 key 不 probe(不参与转发,probe 浪费且刷日志)
+		if cfg.Disabled || cfg.AuthDead {
+			continue
+		}
 		if seen[rawKey] {
 			continue // 同一个 key 已经 probe 过,跳过
 		}
@@ -145,7 +167,7 @@ func (qc *quotaCache) probeAndRefresh(ks *keyStore) {
 	}
 
 	// probe 完再拉一次配额(此时后端已结算,数字准确)
-	qc.fetchAll(configs)
+	qc.fetchAll(ks, configs)
 }
 
 // hasWeeklyQuota 检查 key 是否有周额度(unit=6)。
@@ -253,7 +275,7 @@ func (qc *quotaCache) refreshNow(ks *keyStore) int {
 	if ks == nil {
 		return 0
 	}
-	qc.fetchAll(ks.allConfigs())
+	qc.fetchAll(ks, ks.allConfigs())
 	qc.mu.RLock()
 	defer qc.mu.RUnlock()
 	return len(qc.entries)
@@ -269,7 +291,7 @@ func (qc *quotaCache) refreshNow(ks *keyStore) int {
 func (qc *quotaCache) startLoop(ks *keyStore) {
 	go func() {
 		// 启动后立即拉一次
-		qc.fetchAll(ks.allConfigs())
+		qc.fetchAll(ks, ks.allConfigs())
 
 		// 5 分钟保底轮询
 		ticker := time.NewTicker(qc.interval)
@@ -322,7 +344,7 @@ func (qc *quotaCache) startLoop(ks *keyStore) {
 		for {
 			select {
 			case <-ticker.C:
-				qc.fetchAll(ks.allConfigs())
+				qc.fetchAll(ks, ks.allConfigs())
 				scheduleResetTimers()
 			case <-activateTicker.C:
 				// 窗口激活:对周期额度"无重置时间"的 pro key 发 probe
@@ -350,6 +372,9 @@ func (qc *quotaCache) activateDormantWindows(ks *keyStore) {
 	for alias, cfg := range configs {
 		rawKey := cfg.Key
 		if strings.HasPrefix(rawKey, "sk-") || len(rawKey) < 20 {
+			continue
+		}
+		if cfg.Disabled || cfg.AuthDead {
 			continue
 		}
 		if seen[rawKey] {
@@ -393,7 +418,7 @@ func (qc *quotaCache) activateDormantWindows(ks *keyStore) {
 	if activated > 0 {
 		log.Printf("窗口激活完成: 激活了 %d 个老会员", activated)
 		// 激活后刷新一次配额
-		qc.fetchAll(configs)
+		qc.fetchAll(ks, configs)
 	}
 }
 

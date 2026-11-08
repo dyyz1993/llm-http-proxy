@@ -76,7 +76,7 @@ button{padding:10px 20px;cursor:pointer}
 	<tr><th>Alias</th><th>调用地址</th><th>Header</th><th>Prefix</th><th>Key</th><th>Rate/min</th><th>Burst</th><th>Token上限</th><th>窗口</th><th>有效期</th><th>操作</th></tr>
 	{{range $alias, $cfg := .Aliases}}
 	<tr {{if or (index $.Expired $alias) $cfg.Disabled}}class="expired"{{end}}>
-	<td><b>{{$alias}}</b>{{if $cfg.Disabled}} <span style="color:#e74c3c;font-size:12px" title="手动禁用中:直连返回 503,群组跳过该成员">⛔ 已禁用</span>{{end}}</td>
+	<td><b>{{$alias}}</b>{{if $cfg.Disabled}} <span style="color:#e74c3c;font-size:12px" title="手动禁用中:直连返回 503,群组跳过该成员">⛔ 已禁用</span>{{end}}{{if $cfg.AuthDead}} <span style="color:#c0392b;font-size:12px" title="连续 401 身份验证失败,自动隔离:群组与配额轮询均跳过(隔离满 24h 低频探测,成功自动复活)">🔒 认证失效{{if $cfg.AuthDeadAt}}<br><span style="color:#999;font-size:11px">{{$cfg.AuthDeadAt}}</span>{{end}}</span>{{end}}</td>
 	<td><code style="font-size:12px" id="url-{{$alias}}">/k/{{$alias}}/</code> <button type="button" onclick="copyURL('{{$alias}}')" style="padding:2px 8px;font-size:12px">复制地址</button></td>
 	<td>{{if $cfg.Header}}{{$cfg.Header}}{{else}}<span style="color:#888">自动</span>{{end}}</td>
 	<td>{{$cfg.Prefix}}</td>
@@ -91,7 +91,13 @@ button{padding:10px 20px;cursor:pointer}
 	<form method="post" action="/__admin/keys/toggle?alias={{$alias}}" style="display:inline">
 	<button type="submit" style="color:#27ae60" title="恢复该 key,立即生效">启用</button>
 	</form>
-	{{else}}
+	{{end}}
+	{{if $cfg.AuthDead}}
+	<form method="post" action="/__admin/keys/authrevive?alias={{$alias}}" style="display:inline">
+	<button type="submit" style="color:#2980b9" title="清除认证失效标记:换新 key 或账号恢复后点此,立即重新参与转发与轮询">复活</button>
+	</form>
+	{{end}}
+	{{if not $cfg.Disabled}}
 	<details class="pin-picker">
 	<summary title="点开选择:立即禁用,或设置预算(成功 N 次后自动禁用)">{{if index $.DisableNotes $alias}}预算中{{else}}禁用{{end}}</summary>
 	<div class="pin-panel">
@@ -364,7 +370,7 @@ function copyURL(alias) {
 {{with index $.Aliases $m}}<td><code style="font-size:11px;color:#888">{{maskKey .Key}}</code></td>{{else}}<td style="color:red">不存在</td>{{end}}
 {{with index $.UsageSnap $m}}<td>{{fmtTokens .WindowPrompt}} + {{fmtTokens .WindowCompletion}}</td>{{else}}<td>-</td>{{end}}
 {{with index $.Aliases $m}}<td>{{if .MaxTokens}}{{fmtTokens .MaxTokens}}{{else}}-{{end}}</td>{{else}}<td>-</td>{{end}}
-<td>{{if eq (index $.MemberHealth $m) "disabled"}}<span style="color:#e74c3c">⛔ 已禁用</span>{{else if eq (index $.MemberHealth $m) "expired"}}<span style="color:#95a5a6">🔒 已过期</span>{{else if eq (index $.MemberHealth $m) "quota_full"}}<span style="color:#e74c3c">🚫 限额已满</span>{{else if eq (index $.MemberHealth $m) "time_block"}}<span style="color:#95a5a6">⏰ 禁止时段</span>{{else}}{{with index $.MemberStatus $m}}{{if .IsCooling}}<span style="color:#e67e22">⏸ 冷却</span>{{else}}<span style="color:#27ae60">✅ 活跃</span>{{end}}{{else}}<span style="color:#27ae60">✅ 活跃</span>{{end}}{{end}}</td>
+<td>{{if eq (index $.MemberHealth $m) "disabled"}}<span style="color:#e74c3c">⛔ 已禁用</span>{{else if eq (index $.MemberHealth $m) "auth_dead"}}<span style="color:#c0392b" title="连续 401 自动隔离,不参与转发;管理界面 Keys 页可复活">🔒 认证失效</span>{{else if eq (index $.MemberHealth $m) "expired"}}<span style="color:#95a5a6">🔒 已过期</span>{{else if eq (index $.MemberHealth $m) "quota_full"}}<span style="color:#e74c3c">🚫 限额已满</span>{{else if eq (index $.MemberHealth $m) "time_block"}}<span style="color:#95a5a6">⏰ 禁止时段</span>{{else}}{{with index $.MemberStatus $m}}{{if .IsCooling}}<span style="color:#e67e22">⏸ 冷却</span>{{else}}<span style="color:#27ae60">✅ 活跃</span>{{end}}{{else}}<span style="color:#27ae60">✅ 活跃</span>{{end}}{{end}}</td>
 <td>{{with index $.MemberStatus $m}}{{if gt .TotalReqs 0}}{{.TotalReqs}}{{else}}-{{end}}{{else}}-{{end}}</td>
 <td style="font-size:12px">{{with index $.MemberStatus $m}}{{if .StatusCounts}}{{range $code, $cnt := .StatusCounts}}{{if gt $code 399}}<span style="color:{{if eq $code 401}}#e74c3c{{else if eq $code 429}}#e67e22{{else if ge $code 500}}#e74c3c{{else}}#888{{end}}">{{$code}}×{{$cnt}}</span> {{end}}{{end}}{{else}}-{{end}}{{else}}-{{end}}</td>
 <td style="white-space:nowrap">

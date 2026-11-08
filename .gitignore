@@ -33,3 +33,6 @@ keys.yaml
 *.usage
 stats.json
 stats.json.*
+
+# 本地工具页面(含真实 key,不提交)
+quota-timeline.html

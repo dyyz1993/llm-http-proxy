@@ -38,6 +38,11 @@ type KeyConfig struct {
 	TimeBlock *TimeBlock          `yaml:"time_block"`         // 禁止时段
 	Override  *InterceptorProfile `yaml:"override"`           // 覆盖 profile 中的部分参数
 	Disabled  bool                `yaml:"disabled,omitempty"` // 手动禁用开关:直连返回 503,群组跳过该成员(与过期不同,可随时点按钮恢复)
+	// 认证失效自动隔离:连续 2 次 401(code=1000 身份验证失败)后置位并持久化。
+	// group 选成员与配额轮询都跳过;隔离满 24h 低频探测一次,成功自动复活;
+	// 管理界面有"复活"按钮(换新 key 后手动恢复)。
+	AuthDead   bool   `yaml:"auth_dead,omitempty"`
+	AuthDeadAt string `yaml:"auth_dead_at,omitempty"` // 隔离时刻(北京时间,探测周期起点)
 	// 自动禁用预算:成功请求数达到 DisableAfterReqs 后自动置 Disabled(一次性,触发后字段清零)。
 	// DisableBaseReqs 是设置时刻的 TotalSuccess 基准;禁用中的 key 预算无意义,手动禁用时会清掉。
 	DisableAfterReqs int64 `yaml:"disable_after_reqs,omitempty"`
@@ -280,6 +285,7 @@ type keyStore struct {
 	mu                  sync.RWMutex
 	configs             map[string]KeyConfig // alias → config
 	limiters            map[string]*rateLimiter
+	auth401Count        map[string]int // alias → 连续"身份验证失败"计数(内存态,不持久化)
 	path                string
 	lastMtime           time.Time
 	imageFilter         []ImageFilterRule             // 全局 image_url 过滤规则
@@ -294,9 +300,10 @@ type keyStore struct {
 // newKeyStore 创建空的 key store。
 func newKeyStore() *keyStore {
 	return &keyStore{
-		configs:  make(map[string]KeyConfig),
-		limiters: make(map[string]*rateLimiter),
-		groupMgr: newGroupManager(),
+		configs:      make(map[string]KeyConfig),
+		limiters:     make(map[string]*rateLimiter),
+		auth401Count: make(map[string]int),
+		groupMgr:     newGroupManager(),
 	}
 }
 
