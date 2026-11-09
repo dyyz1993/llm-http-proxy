@@ -72,20 +72,67 @@ func TestSortGroupMembersDynamic_Rotation(t *testing.T) {
 	}
 }
 
-// TestSortGroupMembersDynamic_WeeklyDeferred 有周额度的成员进 deferred 排最后。
-func TestSortGroupMembersDynamic_WeeklyDeferred(t *testing.T) {
+// TestSortGroupMembersDynamic_WeeklyBackupTier 有周额度且自身健康的成员进
+// tier 25 兜底档:排在正常档(20)之后、让位档(30)之前——平时轮不到,
+// 高并发/前面让位时顶上(v2.5.75 策略,取代旧的无条件垫底)。
+func TestSortGroupMembersDynamic_WeeklyBackupTier(t *testing.T) {
 	qc := newTestQuotaCache([]cachedQuota{
-		{Alias: "pro1", Level: "pro", Limits: []quotaLimit{lim(3, 50, futureReset(300))}},
-		{Alias: "max1", Level: "max", Limits: []quotaLimit{lim(3, 0, 0), lim(6, 1, futureReset(5000))}},
+		{Alias: "pro1", Level: "pro", Limits: []quotaLimit{lim(3, 50, futureReset(300))}},               // tier 20 正常
+		{Alias: "high", Level: "pro", Limits: []quotaLimit{lim(3, 92, futureReset(300))}},               // tier 30 让位
+		{Alias: "max1", Level: "max", Limits: []quotaLimit{lim(3, 0, 0), lim(6, 1, futureReset(5000))}}, // tier 25 兜底
 	})
-	got := sortGroupMembersDynamic([]string{"pro1", "max1"}, qc, 0)
-	if len(got) != 2 || got[1] != "max1" {
-		t.Errorf("有周额度的成员应排最后(deferred), got %v", got)
+	got := sortGroupMembersDynamic([]string{"high", "pro1", "max1"}, qc, 0)
+	if len(got) != 3 || got[0] != "pro1" || got[1] != "max1" || got[2] != "high" {
+		t.Errorf("期望 正常→周额度兜底→让位, got %v", got)
 	}
-	// 即使 offset,max1 也不参与轮询(恒在 deferred 最后)
-	got = sortGroupMembersDynamic([]string{"pro1", "max1"}, qc, 1)
-	if got[1] != "max1" {
-		t.Errorf("deferred 成员不参与轮询, got %v", got)
+}
+
+// TestSortGroupMembersDynamic_WeeklyBackupRotation 兜底档(25)内按 offset 轮换,
+// 不再固定顺序死用第一个。
+func TestSortGroupMembersDynamic_WeeklyBackupRotation(t *testing.T) {
+	// 只有周额度成员(正常档为空),兜底档两员轮换
+	qc := newTestQuotaCache([]cachedQuota{
+		{Alias: "maxA", Level: "max", Limits: []quotaLimit{lim(3, 0, 0), lim(6, 1, futureReset(5000))}},
+		{Alias: "maxB", Level: "max", Limits: []quotaLimit{lim(3, 0, 0), lim(6, 2, futureReset(6000))}},
+	})
+	members := []string{"maxA", "maxB"}
+	// 同档按 resetTime 升序的基础序是 [maxA, maxB];offset 轮换队头
+	for _, c := range []struct {
+		offset int64
+		first  string
+	}{{0, "maxA"}, {1, "maxB"}, {2, "maxA"}} {
+		got := sortGroupMembersDynamic(members, qc, c.offset)
+		if got[0] != c.first {
+			t.Errorf("offset=%d: 兜底档轮换起点应是 %s, got %v", c.offset, c.first, got)
+		}
+	}
+}
+
+// TestSortGroupMembersDynamic_WeeklyCap98Yields 周额度成员自身 >=98% 时
+// 与无周额度一样进让位档(30),不再享受兜底档优待。
+func TestSortGroupMembersDynamic_WeeklyCap98Yields(t *testing.T) {
+	qc := newTestQuotaCache([]cachedQuota{
+		{Alias: "maxFull", Level: "max", Limits: []quotaLimit{lim(3, 99, futureReset(300)), lim(6, 1, futureReset(5000))}},
+		{Alias: "high", Level: "pro", Limits: []quotaLimit{lim(3, 92, futureReset(600))}}, // tier 30
+	})
+	got := sortGroupMembersDynamic([]string{"maxFull", "high"}, qc, 0)
+	// 两者都在让位档,同档按 resetTime 升序:high(600) 在 maxFull(300) 之后?
+	// futureReset(600) > futureReset(300),所以 maxFull 先到期排前
+	if got[0] != "maxFull" || got[1] != "high" {
+		t.Errorf("周额度 99%% 应进让位档(同档按到期时间排序), got %v", got)
+	}
+}
+
+// TestSortGroupMembersDynamic_WeeklyUnstartedNotBoosted 周额度成员的 5h 窗口
+// 未启动(resetTime=0)不享受 tier 0 加速——窗口刻意不激活,恒在兜底档。
+func TestSortGroupMembersDynamic_WeeklyUnstartedNotBoosted(t *testing.T) {
+	qc := newTestQuotaCache([]cachedQuota{
+		{Alias: "proUnstarted", Level: "pro", Limits: []quotaLimit{lim(3, 0, 0)}},                               // tier 0 加速
+		{Alias: "maxUnstarted", Level: "max", Limits: []quotaLimit{lim(3, 0, 0), lim(6, 1, futureReset(5000))}}, // tier 25
+	})
+	got := sortGroupMembersDynamic([]string{"maxUnstarted", "proUnstarted"}, qc, 0)
+	if got[0] != "proUnstarted" || got[1] != "maxUnstarted" {
+		t.Errorf("无周额度的未启动应享受 tier0 加速,周额度未启动不加速, got %v", got)
 	}
 }
 

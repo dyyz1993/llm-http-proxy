@@ -861,18 +861,40 @@ const (
 	urgentWindow       = 10 * time.Minute
 )
 
+// 排序档位(v2.5.75 起改为十位刻度,支持在正常档与让位档之间插入兜底档)。
+const (
+	tierUnstarted = 0  // 窗口未启动:加速激活
+	tierUrgent    = 10 // 快到期全力:剩<10min 且 <98%,趁过期前抢着用
+	tierNormal    = 20 // 正常:percentage<90% 且不快到期,主用 + 轮询
+	tierWeekly    = 25 // 周额度兜底:自身健康(<98%)的有周额度 key,档内轮换
+	tierYield     = 30 // 让位:percentage>=98%(绝对上限) 或 (不快到期且>=90%)
+)
+
 // sortGroupMembersDynamic 对 group 成员进行双维度动态排序。
 //
 // 排序档位(从最优先到最后):
 //
 //	tier 0 优先 — 窗口未启动(percentage==0 且无 reset),加速激活
-//	tier 1 全力 — 快到期(剩<10min)且 percentage<98%,趁过期前抢着用
-//	tier 2 正常 — percentage<90% 且不快到期,主用 + 轮询
-//	tier 3 让位 — percentage>=98%(绝对上限) 或 (不快到期且>=90%),留余量给并发
-//	deferred    — 有周额度的 max key,兜底
+//	tier 10 全力 — 快到期(剩<10min)且 percentage<98%,趁过期前抢着用
+//	tier 20 正常 — percentage<90% 且不快到期,主用 + 轮询
+//	tier 25 周额度兜底 — 有周额度且自身 <98%:排在正常档之后、让位档之前。
+//	              平时轮不到(省周额度);无周额度全员让位/挂掉时顶上兜底,
+//	              档内按 offset 轮换(不再固定顺序死用第一个)
+//	tier 30 让位 — percentage>=98%(绝对上限) 或 (不快到期且>=90%),留余量给并发
 //
 // 同 tier 内按 resetTime 升序(先到期的先用/先恢复)。
-// offset 轮询偏移只对 tier 2 生效(tier 1 要锁定全力,不能被打乱)。
+// offset 轮询对 tier 20 和 25 两档各自生效(0 加速激活、10 锁定全力、30 让位,不轮)。
+// 周额度 key 不享受 tier 0/10 加速——它们的 5h 窗口本来就刻意不激活
+// (见 activateDormantWindows 对 hasWeeklyQuota 的跳过)。
+// memberScore 是排序用的成员评分(包级:rotateTier 辅助函数也要用)。
+type memberScore struct {
+	alias      string
+	resetTime  int64
+	hasWeekly  bool
+	percentage int
+	tier       int
+}
+
 func sortGroupMembersDynamic(members []string, qc *quotaCache, offset int64) []string {
 	if qc == nil {
 		return members
@@ -884,17 +906,8 @@ func sortGroupMembersDynamic(members []string, qc *quotaCache, offset int64) []s
 		entryByAlias[e.Alias] = e
 	}
 
-	type memberScore struct {
-		alias      string
-		resetTime  int64
-		hasWeekly  bool
-		percentage int
-		tier       int
-	}
-
 	now := time.Now().UnixMilli()
 	scores := make([]memberScore, 0, len(members))
-	var deferred []string
 	for _, m := range members {
 		ms := memberScore{alias: m}
 		if entry, ok := entryByAlias[m]; ok {
@@ -909,30 +922,36 @@ func sortGroupMembersDynamic(members []string, qc *quotaCache, offset int64) []s
 			}
 		}
 		if ms.hasWeekly {
-			deferred = append(deferred, m)
+			// 周额度:同规则算档,健康(<98%)降为兜底档 25,
+			// >=98% 绝对上限与无周额度一样进让位档 30
+			ms.tier = tierWeekly
+			if ms.percentage >= quotaUrgentBoost {
+				ms.tier = tierYield
+			}
+			scores = append(scores, ms)
 			continue
 		}
 
-		// 计算 tier
+		// 无周额度:完整四档
 		remainMs := ms.resetTime - now
 		urgent := ms.resetTime > 0 && remainMs > 0 && remainMs < int64(urgentWindow/time.Millisecond)
 		switch {
 		case ms.resetTime == 0:
 			// 未启动:优先档,合成 resetTime=-1 排最前
-			ms.tier = 0
+			ms.tier = tierUnstarted
 			ms.resetTime = -1
 		case ms.percentage >= quotaUrgentBoost:
 			// 真满(绝对上限 98%):无论如何让位
-			ms.tier = 3
+			ms.tier = tierYield
 		case urgent && ms.percentage < quotaUrgentBoost:
 			// 快到期解禁:可用到 98%(平时 90% 让位的在这里解禁)
-			ms.tier = 1
+			ms.tier = tierUrgent
 		case ms.percentage >= quotaHighWaterMark:
 			// 平时让位:留 10% 给并发
-			ms.tier = 3
+			ms.tier = tierYield
 		default:
 			// 正常
-			ms.tier = 2
+			ms.tier = tierNormal
 		}
 		scores = append(scores, ms)
 	}
@@ -945,41 +964,42 @@ func sortGroupMembersDynamic(members []string, qc *quotaCache, offset int64) []s
 		return scores[i].resetTime < scores[j].resetTime
 	})
 
-	// 轮询偏移只对 tier 2(正常档)生效。
-	// tier 0/1/3 保持 sort 顺序(0 加速激活、1 锁定全力、3 让位,都不该轮询)。
-	if offset > 0 && len(scores) > 1 {
-		// 找出 tier 2 的成员范围(排序后连续)
-		t2Start, t2End := -1, -1
-		for i, s := range scores {
-			if s.tier == 2 {
-				if t2Start == -1 {
-					t2Start = i
-				}
-				t2End = i
-			}
-		}
-		if t2Start >= 0 && t2End > t2Start {
-			t2Len := t2End - t2Start + 1
-			start := int(offset % int64(t2Len))
-			result := make([]string, 0, len(scores))
-			for i := range scores {
-				if i < t2Start || i > t2End {
-					result = append(result, scores[i].alias)
-				} else {
-					// 结果位置 i 放 t2 范围内 (i-t2Start+start) 偏移的内容
-					origIdx := t2Start + ((i-t2Start)+start)%t2Len
-					result = append(result, scores[origIdx].alias)
-				}
-			}
-			return append(result, deferred...)
-		}
+	// 轮询偏移对 tier 20(正常)和 25(周额度兜底)两档各自生效。
+	// tier 0/10/30 保持 sort 顺序(加速激活/锁定全力/让位,都不该轮)。
+	if offset > 0 {
+		rotateTier(scores, tierNormal, offset)
+		rotateTier(scores, tierWeekly, offset)
 	}
 
 	result := make([]string, 0, len(members))
 	for _, s := range scores {
 		result = append(result, s.alias)
 	}
-	return append(result, deferred...)
+	return result
+}
+
+// rotateTier 把 scores 中指定 tier 的连续区段按 offset 轮换(左移 offset%len 位)。
+// 区段不存在或只有单个成员时原地不动。
+func rotateTier(scores []memberScore, tier int, offset int64) {
+	start, end := -1, -1
+	for i, s := range scores {
+		if s.tier == tier {
+			if start == -1 {
+				start = i
+			}
+			end = i
+		}
+	}
+	if start < 0 || end <= start {
+		return
+	}
+	n := end - start + 1
+	startIdx := int(offset % int64(n))
+	rotated := make([]memberScore, 0, n)
+	for k := 0; k < n; k++ {
+		rotated = append(rotated, scores[start+(k+startIdx)%n])
+	}
+	copy(scores[start:end+1], rotated)
 }
 
 // handleGroupWebSocket 处理 group 路径下的 WebSocket 请求。
