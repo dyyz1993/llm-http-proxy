@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -524,5 +525,70 @@ func TestGroupE2E_FastEOFStillbornFailover(t *testing.T) {
 	}
 	if !ks.groupMgr.memberStatus("m1").IsCooling {
 		t.Error("m1 空流后应被标记冷却")
+	}
+}
+
+// ---------- 端到端:529 容量过载码换人(2026-11-24 线上配置) ----------
+
+// mixed529Backend sk-m1 返回 529(z.ai 容量过载码),sk-m2 正常。
+func mixed529Backend() *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.Header.Get("Authorization"), "sk-m1") {
+			w.WriteHeader(529)
+			fmt.Fprint(w, `{"error":{"code":"1301","message":"service overloaded"}}`)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl := w.(http.Flusher)
+		fmt.Fprint(w, "event: content_block_delta\n"+`data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"from-m2"}}`+"\n\n")
+		fmt.Fprint(w, "event: message_stop\n"+`data: {"type":"message_stop"}`+"\n\n")
+		fl.Flush()
+	}))
+}
+
+func TestGroupE2E_529OverloadSwitches(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short 模式跳过集成测试")
+	}
+	backend := mixed529Backend()
+	defer backend.Close()
+
+	ks := newKeyStore()
+	ks.configs["m1"] = KeyConfig{Key: "sk-m1", Header: "Authorization", Prefix: "Bearer "}
+	ks.configs["m2"] = KeyConfig{Key: "sk-m2", Header: "Authorization", Prefix: "Bearer "}
+	// 与线上 keys.yaml 相同的名单(2026-11-24 起): 529 在列
+	ks.groups = map[string]GroupConfig{
+		"pool": {Members: []string{"m1", "m2"}, OnStatus: []int{402, 429, 502, 503, 401, 529}, Cooldown: "1m"},
+	}
+	ks.groupMgr.updateGroups(ks.groups)
+	if settingsMgr == nil {
+		settingsMgr = newSettingsManager()
+	}
+	stats := newStatsCollector()
+	us := newUsageStats()
+	mux := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if strings.HasPrefix(req.URL.Path, "/g/") {
+			handleGroupRoutePrefix(w, req, ks, stats, us)
+			return
+		}
+		http.Error(w, "no route", 500)
+	})
+	proxy := httptest.NewServer(mux)
+	defer proxy.Close()
+
+	resp, err := noCompressClient.Get(proxy.URL + "/g/pool/" + backend.URL + "/sse")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("529 应被吃掉换人,客户端最终拿到 200,实际 %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "from-m2") {
+		t.Errorf("客户端应收到 m2 的内容,实际: %s", body)
+	}
+	if ks.groupMgr.memberStatus("m1").IsCooling != true {
+		t.Error("返回 529 的 m1 应进冷却")
 	}
 }
