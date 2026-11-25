@@ -591,4 +591,9 @@ func TestGroupE2E_529OverloadSwitches(t *testing.T) {
 	if ks.groupMgr.memberStatus("m1").IsCooling != true {
 		t.Error("返回 529 的 m1 应进冷却")
 	}
+	// v2.5.76: 529 冷却收紧为 1 秒(毫秒级瞬时过载,30s 纯浪费池容量)
+	remain := time.Until(ks.groupMgr.memberStatus("m1").CoolUntil)
+	if remain <= 0 || remain > 2*time.Second {
+		t.Errorf("529 冷却应约 1 秒, 实际 %v", remain)
+	}
 }

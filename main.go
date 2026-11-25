@@ -817,9 +817,12 @@ func handleGroupRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, st
 					goto nextMember
 				}
 				// 确定性错误(429额度满/401key失效)→ 长冷却(配置值)
-				// 瞬时错误(502/连接失败)→ 短冷却 30 秒
+				// 529(z.ai 容量过载)→ 1 秒:毫秒级瞬时过载,长冷却纯浪费池容量
+				// 其余瞬时错误(502/连接失败)→ 短冷却 30 秒
 				if rec.status == 429 || rec.status == 401 {
 					gm.markCooldown(member, groupName, rec.status)
+				} else if rec.status == 529 {
+					gm.markCooldownWithDuration(member, groupName, rec.status, time.Second)
 				} else {
 					gm.markCooldownWithDuration(member, groupName, rec.status, 30*time.Second)
 				}
