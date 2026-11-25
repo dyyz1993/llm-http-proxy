@@ -141,3 +141,22 @@ func TestRealSnapshot_CooldownSkipsMember(t *testing.T) {
 		t.Error("未失败的成员不应冷却")
 	}
 }
+
+// 验证6: 502 冷却收紧为 3s(v2.5.77, 与线上瞬断形态匹配,旧值 30s)。
+func TestCooldown502_ThreeSeconds(t *testing.T) {
+	gm := newGroupManager()
+	gm.updateGroups(map[string]GroupConfig{
+		"group": {Members: []string{"m1", "m2"}, OnStatus: []int{402, 429, 502, 503, 401, 529}, Cooldown: "5m"},
+	})
+	gm.markCooldownWithDuration("m1", "group", 502, transientCooldown)
+	remain := time.Until(gm.memberStatus("m1").CoolUntil)
+	if remain <= 0 || remain > 4*time.Second {
+		t.Errorf("502 冷却应约 3 秒, 实际 %v", remain)
+	}
+	// 对照: 429 仍是长冷却(配置值 5m)
+	gm.markCooldown("m2", "group", 429)
+	remain2 := time.Until(gm.memberStatus("m2").CoolUntil)
+	if remain2 < 4*time.Minute {
+		t.Errorf("429 应保持 5 分钟长冷却, 实际 %v", remain2)
+	}
+}

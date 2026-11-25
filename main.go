@@ -786,7 +786,7 @@ func handleGroupRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, st
 			// 开场死:上游发了响应头(甚至 message_start+ping)但 stall 内没有内容
 			// 事件 → guard 已取消上游,rec 未 commit,客户端无感知,直接换人。
 			if sg.abortedNow() {
-				gm.markCooldownWithDuration(member, groupName, 502, 30*time.Second)
+				gm.markCooldownWithDuration(member, groupName, 502, transientCooldown)
 				log.Printf("group 开场死(>%v 无内容事件)→ 换人: group=%s member=%s",
 					streamFirstContentStall, groupName, member)
 				goto nextMember
@@ -796,7 +796,7 @@ func handleGroupRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, st
 			switch {
 			case rec.status == 0:
 				// 没拿到响应(连接错误等)→ 瞬时错误,短冷却 30 秒
-				gm.markCooldownWithDuration(member, groupName, 502, 30*time.Second)
+				gm.markCooldownWithDuration(member, groupName, 502, transientCooldown)
 				log.Printf("group 成员无响应: group=%s member=%s → 换人", groupName, member)
 				goto nextMember
 			case rec.intercepted:
@@ -824,7 +824,7 @@ func handleGroupRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, st
 				} else if rec.status == 529 {
 					gm.markCooldownWithDuration(member, groupName, rec.status, time.Second)
 				} else {
-					gm.markCooldownWithDuration(member, groupName, rec.status, 30*time.Second)
+					gm.markCooldownWithDuration(member, groupName, rec.status, transientCooldown)
 				}
 				log.Printf("group 成员返回 %d → 换人: group=%s member=%s", rec.status, groupName, member)
 				goto nextMember
@@ -835,7 +835,7 @@ func handleGroupRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, st
 				// 比 15s stall 更快:秒断型 1~9s 的 EOF 在此直接触发。
 				// 非 SSE 响应不走 hold,不受此判定影响。
 				if rec.holdActive && !rec.committed {
-					gm.markCooldownWithDuration(member, groupName, 502, 30*time.Second)
+					gm.markCooldownWithDuration(member, groupName, 502, transientCooldown)
 					log.Printf("group 成员空流(2xx 未提交即 EOF)→ 换人: group=%s member=%s",
 						groupName, member)
 					goto nextMember
@@ -856,6 +856,11 @@ func handleGroupRoute(w http.ResponseWriter, req *http.Request, ks *keyStore, st
 	w.Header().Set("Retry-After", "60")
 	http.Error(w, "所有上游成员暂时不可用,请稍后重试 (group: "+groupName+")\n", http.StatusServiceUnavailable)
 }
+
+// transientCooldown 瞬时故障(502/503/402/连接失败/开场死/空流)的冷却时长。
+// 2026-11-25 从 30s 收紧为 3s:线上 502 实测多为秒级瞬断(11ms~2s 返回),
+// 30s 让成员白白缺席;3s 留一点缓冲避免同秒内反复撞同一故障边缘。
+const transientCooldown = 3 * time.Second
 
 // group 成员排序阈值(双维度:用量 + 时间)。
 const (
